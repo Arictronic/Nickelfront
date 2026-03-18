@@ -28,5 +28,18 @@ logs/
 .coverage
 htmlcov/
 
+# Git
+.git/
+.gitignore
+
 # Docker
-*.pid
+docker-compose.yml
+Dockerfile
+
+# Documentation
+*.md
+!requirements.txt
+
+# Other
+*.tmp
+.DS_Store
