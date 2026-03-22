@@ -1,3 +1,6 @@
+import polars as pl
+from datetime import date
+
 def validate_schema(df: pl.DataFrame) -> bool:
     """Проверка наличия всех необходимых колонок и их типов"""
     required_columns = {
