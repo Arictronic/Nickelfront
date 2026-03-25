@@ -1,6 +1,13 @@
+import sys
+from pathlib import Path
 from celery import Celery
 from celery.signals import task_prerun, task_postrun
 from loguru import logger
+
+# Добавляем корень проекта и shared в PATH
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent.parent
+sys.path.insert(0, str(ROOT_DIR))
+sys.path.insert(0, str(ROOT_DIR / "shared"))
 
 from app.core.config import settings
 
@@ -8,7 +15,10 @@ celery_app = Celery(
     "worker",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["app.tasks.tasks"],
+    include=[
+        "app.tasks.tasks",
+        "app.tasks.parse_tasks",
+    ],
 )
 
 # Настройки Celery

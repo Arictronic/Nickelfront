@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from app.api.v1.endpoints import tasks as tasks_router
+from app.api.v1.endpoints import parse as parse_router
 from app.core.logging import setup_logging
 from app.core.config import settings
 
@@ -25,6 +26,7 @@ app.add_middleware(
 
 # Подключаем роутеры
 app.include_router(tasks_router.router, prefix="/api/v1")
+app.include_router(parse_router.router, prefix="/api/v1")
 
 
 @app.on_event("startup")
