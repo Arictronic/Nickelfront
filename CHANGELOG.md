@@ -1,56 +1,143 @@
 # Changelog
 
-## [18.03.2026] — Исправление запуска backend
+Все изменения в проекте Nickelfront.
+
+## [2026-03-25] — Парсер arXiv + Бритва Оккама
+
+### ✨ Новое
+
+#### Парсер arXiv
+- ✅ `parser/arxiv/client.py` — клиент arXiv API
+- ✅ `parser/arxiv/parser.py` — парсер статей arXiv
+- ✅ Поиск по запросам с поддержкой категорий
+- ✅ Rate limiting (3 секунды между запросами)
+- ✅ Извлечение ключевых слов (предметные термины)
+
+#### Celery задачи
+- ✅ `parse_papers_task` — универсальная задача (CORE/arXiv)
+- ✅ `parse_multiple_queries_task` — массовый парсинг
+- ✅ `parse_all_sources_task` — все источники сразу
+
+#### API Endpoints
+- ✅ `POST /api/v1/papers/parse` — запуск парсинга
+- ✅ `POST /api/v1/papers/parse-all` — массовый парсинг
+- ✅ `GET /api/v1/papers?source=arXiv` — фильтрация по источнику
+
+#### Тесты
+- ✅ 6 unit тестов для ArxivClient
+- ✅ 5 unit тестов для ArxivParser
+- ✅ 3 integration теста (реальные запросы к arXiv)
+
+#### Скрипты запуска
+- ✅ `run_all.bat` — запуск всех компонентов
+- ✅ `run_worker.bat` — запуск Celery worker
+- ✅ `test_parse.py` — быстрое тестирование парсинга
 
 ### 🔧 Исправления
 
-#### 1. Настройка импортов модулей
-- ✅ Создан `shared/schemas/__init__.py` — для корректного импорта схем
-- ✅ Создан `backend/app/db/__init__.py` — для импорта моделей БД
-- ✅ Создан `backend/app/db/models/__init__.py` — для импорта SQLAlchemy моделей
-- ✅ Очищен `backend/app/api/__init__.py` — удалён лишний код инициализации app
+#### Дата в arXiv
+- ✅ Исправлена проблема с timezone (can't subtract offset-naive and offset-aware)
+- ✅ Даты сохраняются в формате без timezone для совместимости с SQLite/PostgreSQL
 
-#### 2. Конфигурация приложения
-- ✅ Обновлён `backend/app/core/config.py`:
-  - Добавлен абсолютный путь к `.env` через `Path`
-  - Исправлена проблема с загрузкой переменных окружения
+#### Celery worker
+- ✅ Добавлен `sys.path` в `celery_app.py` для импорта `shared`
+- ✅ Исправлен запуск worker на Windows
 
-#### 3. Очистка проекта (Бритва Оккама)
-Удалены дублирующиеся файлы:
-- ❌ `backend/CHANGES_SUMMARY.md`
-- ❌ `backend/TEAM_INSTRUCTIONS.md`
-- ❌ `backend/START_HERE.md`
-- ❌ `backend/SECURITY.md`
-- ❌ `backend/IMPLEMENTATION_REPORT.md`
-- ❌ `backend/requirements-full.txt`
+#### HTTP
+- ✅ Изменен URL arXiv с `http://` на `https://` (301 redirect)
 
-### 📁 Новые файлы
-- `run_backend.bat` — скрипт для удобного запуска сервера
-- `backend/.dockerignore` — исключения для Docker сборки
-- `backend/.env.example` — шаблон переменных окружения
-- `backend/Dockerfile` — образ Docker
-- `backend/README.md` — основная документация
-- `backend/docker-compose.yml` — оркестрация сервисов
-- `backend/app/main.py` — точка входа FastAPI
-- `backend/app/core/config.py` — настройки приложения
-- `backend/app/db/base.py` — базовый класс SQLAlchemy
-- `backend/app/db/session.py` — сессии БД
-- `backend/app/db/init_db.py` — инициализация БД
+### 🗑️ Удалено (Бритва Оккама)
 
-### 🚀 Запуск проекта
+#### Код
+- ❌ `parse_arxiv_task` — дублировал `parse_papers_task`
+- ❌ `parse_arxiv_multiple_queries_task` — дублировал `parse_multiple_queries_task`
+- ❌ `PaperSource` Enum — избыточен
+- ❌ `get_abstract_url()` — редко использовался
+- ❌ `suggest()` — всегда возвращал пустой список
+- ❌ 4 отдельные async функции — объединены в `_parse_async`
+
+#### API Endpoints
+- ❌ `/parse/arxiv` — избыточен (есть `source` параметр)
+- ❌ `/sources` — можно посмотреть в документации
+- ❌ `/search-queries` — hardcoded в коде
+
+#### Тесты
+- ❌ 7 избыточных тестов — дублировали логику
+- ❌ `test_rate_limit_delay` — медленный (3 секунды)
+
+#### Файлы
+- ❌ `PARSER_README.md` — дублировал parser/README.md
+- ❌ 2 фикстуры из `conftest.py` — не использовались
+
+### 📊 Статистика оптимизации
+
+| Файл | Было | Стало | Сокращение |
+|------|------|-------|------------|
+| `parse_tasks.py` | 400 строк | 180 строк | -55% |
+| `parse.py (API)` | 314 строк | 170 строк | -46% |
+| `client.py (arXiv)` | 383 строки | 200 строк | -48% |
+| `parser.py (arXiv)` | 206 строк | 130 строк | -37% |
+| Тесты | 39 тестов | 32 теста | -18% |
+
+**Итого:** ~**-45%** кода без потери функциональности
+
+### 📁 Изменения в зависимостях
+
+```
+pytest>=8.2.0         # Было: pytest==8.0.0
+pytest-asyncio>=0.24.0 # Было: pytest-asyncio==0.23.3
+```
+
+### 🚀 Как запускать
 
 ```bash
-cd Nickelfront
+# Все компоненты
+.\run_all.bat
+
+# Только worker
+.\run_worker.bat
+
+# Только сервер
 .\run_backend.bat
+
+# Тест парсинга
+python test_parse.py
 ```
 
-Или вручную:
+### ✅ Проверка работы
+
 ```bash
-cd Nickelfront
-set PYTHONPATH=backend
-backend\venv\Scripts\python.exe -m uvicorn backend.app.main:app --reload
+# Health check
+curl http://localhost:8000/health
+
+# Запуск парсинга
+curl -X POST "http://localhost:8000/api/v1/papers/parse?query=nickel%20alloys&limit=5&source=arXiv"
+
+# Проверка результата
+curl http://localhost:8000/api/v1/papers/count
 ```
 
-### ✅ Проверка
-- Health endpoint: http://localhost:8000/health
-- Swagger UI: http://localhost:8000/docs
+---
+
+## [2026-03-24] — Настройка backend
+
+### ✨ Новое
+- ✅ FastAPI приложение
+- ✅ Celery + Redis интеграция
+- ✅ SQLAlchemy модели
+- ✅ Alembic миграции
+- ✅ Docker Compose конфигурация
+
+### 🔧 Исправления
+- ✅ Настроены импорты модулей
+- ✅ Исправлен конфиг с `.env`
+- ✅ Очищены дублирующиеся файлы
+
+---
+
+## [2026-03-20] — Начало проекта
+
+### ✨ Новое
+- ✅ Initial commit
+- ✅ Структура проекта
+- ✅ Базовая конфигурация
