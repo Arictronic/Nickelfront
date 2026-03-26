@@ -14,15 +14,21 @@ export default function Header() {
       </div>
       <div className="header-actions">
         <span className="user-chip">{user?.email ?? "guest@local"}</span>
-        <button
-          className="btn btn-ghost"
-          onClick={() => {
-            logout();
-            navigate("/login");
-          }}
-        >
-          Выйти
-        </button>
+        {user ? (
+          <button
+            className="btn btn-ghost"
+            onClick={() => {
+              logout();
+              navigate("/login");
+            }}
+          >
+            Выйти
+          </button>
+        ) : (
+          <button className="btn btn-ghost" onClick={() => navigate("/login")}>
+            Войти
+          </button>
+        )}
       </div>
     </header>
   );

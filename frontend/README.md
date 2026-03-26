@@ -4,11 +4,14 @@ Frontend часть проекта Nickelfront на `React + Vite + TypeScript`.
 
 ## Что реализовано
 
-- Авторизация и регистрация (`/login`, `/register`)
-- Главная панель (`/dashboard`)
-- Список патентов (`/patents`)
-- Детальная страница патента (`/patents/:id`)
-- Аналитика (`/analytics`)
+- Главная (демо) (`/`)
+- Dashboard парсинга (`/dashboard`)
+- Каталог статей (`/papers`)
+- Карточка статьи и отчет (`/papers/:id`, `/papers/:id/report`)
+- Векторный поиск UI (`/vector-search`, fallback на `/papers/search`)
+- Статус парсинга (`/jobs`, эвристика)
+- Доступные данные/таблицы (`/database`)
+- Авторизация и регистрация (`/login`, `/register`) — UI, backend auth endpoints пока отсутствуют
 
 ## Технологии
 
@@ -40,95 +43,37 @@ npm run build
 - В `vite.config.js` настроен proxy:
   - `/api` -> `http://localhost:8000`
 - Используемые backend endpoints:
-  - `POST /api/v1/tasks/`
-  - `GET /api/v1/tasks/{task_id}`
+  - `GET    /api/v1/papers?limit&offset&source`
+  - `GET    /api/v1/papers/count?source`
+  - `GET    /api/v1/papers/id/{id}`
+  - `POST   /api/v1/papers/search`
+  - `POST   /api/v1/papers/parse?query&limit&source`
+  - `POST   /api/v1/papers/parse-all?limit_per_query&source`
+  - `DELETE /api/v1/papers/id/{id}`
 
-## Данные и mock-режим
+## Ограничения по интеграции
 
-Так как часть endpoint-ов backend пока отсутствует, часть экранов работает на mock-данных:
+В текущем backend есть эндпоинты только для парсинга и управления **papers**:
+- поэтому таблицы/карточки на фронте работают с реальными данными из `/api/v1/papers/...`;
+- для “vector search” и ML-метрик сейчас используется текущий `/papers/search` как fallback, а сами метрики/отчет формируются на фронте (эвристики) до появления ML-endpoint-ов.
 
-- файл: `src/utils/mockData.ts`
-- store: `src/store/patentStore.ts`
+Авторизация/регистрация в текущем проекте не подкреплена backend auth-эндпоинтами, поэтому UI хранит состояние локально.
 
-Mock используется для:
+Где менять для настоящей авторизации:
+- backend: добавить endpoints auth (например, JWT)
+- frontend: заменить `src/api/auth.ts`, `src/hooks/useAuth.ts` и `src/store/authStore.ts` под контракт auth.
 
-- списка патентов
-- детальной информации патента
-- аналитических графиков и таблиц
-- части UX-функций (экспорт PNG/PDF, редактирование и т.д.)
+## Ключевые функции (live data)
 
-## Ключевые функции
-
-### Dashboard
-
-- карточки метрик: всего, за сегодня, за неделю, статус парсинга
-- линейный график по датам
-- pie chart по категориям
-- таблица последних патентов
-- автообновление каждые 30 секунд
-- кнопки обновления и запуска парсинга
-
-### Patents
-
-- таблица патентов с сортировкой
-- фильтры (категория, страна, статус, дата от/до)
-- debounce-поиск (500ms)
-- массовое выделение и удаление
-- подтверждение удаления
-- экспорт CSV и mock Excel
-- сохранение фильтров в URL
-- пагинация с номерами страниц
-
-### Patent Detail
-
-- хлебные крошки
-- карточка основных данных
-- вкладки: описание, формула, PDF, аналитика
-- встроенный mock PDF viewer
-- zoom PDF
-- копирование текста
-- кнопки действий: редактировать, скачать PDF, найти похожие, удалить
-
-### Analytics
-
-- график по годам
-- pie chart по категориям
-- horizontal bar chart по странам
-- топ заявителей: таблица + bar chart
-- heatmap по месяцам
-- фильтр периода (год / 5 лет / все время)
-- кастомный диапазон дат
-- сохранение текущего вида
-- экспорт отчета (mock)
-
-### Auth
-
-- валидация форм
-- переключение видимости пароля (иконка-глаз)
-- обработка ошибок
-- redirect после успеха
-- кнопка выхода из аккаунта в header
-
-## Структура `src`
-
-```text
-src/
-├── api/
-├── components/
-│   ├── layout/
-│   ├── patents/
-│   └── ui/
-├── hooks/
-├── pages/
-├── store/
-├── types/
-├── utils/
-├── App.tsx
-└── main.tsx
-```
+- `/dashboard`: запуск парсинга (`/api/v1/papers/parse` и `/api/v1/papers/parse-all`) + KPI (кол-во статей) + список последних добавленных
+- `/papers`: каталог статей из БД (`GET /api/v1/papers`) + поиск (`POST /api/v1/papers/search`), сортировка на клиенте, удаление (`DELETE /api/v1/papers/id/{id}`), экспорт CSV текущей выборки
+- `/papers/:id`: карточка статьи (`GET /api/v1/papers/id/{id}`) + разбиение `full_text/abstract` на части по настройке токенов
+- `/papers/:id/report`: страница отчета по частям (сейчас формируется на фронте до появления ML-endpoint-ов)
+- `/vector-search`: поисковый экран (fallback через `POST /api/v1/papers/search`)
+- `/jobs`: статус ваших парсинг-задач (эвристика, так как endpoint celery-status отсутствует)
+- `/database`: просмотр доступных таблиц/сущностей в текущем бэкенде (по фактическим endpoint-ам)
 
 ## Примечания
 
-- Интерфейс сделан без градиентов (по требованиям).
+- Интерфейс сделан без градиентов.
 - Emoji удалены из UI.
-- Для полного перехода на live-данные нужно расширить backend API и заменить mock-слой.

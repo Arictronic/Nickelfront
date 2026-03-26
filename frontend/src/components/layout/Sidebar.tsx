@@ -8,13 +8,19 @@ export default function Sidebar() {
       <NavLink className={cls} to="/dashboard">
         <span>Главная</span>
       </NavLink>
-      <NavLink className={cls} to="/patents">
-        <span>Патенты</span>
+      <NavLink className={cls} to="/papers">
+        <span>Статьи</span>
       </NavLink>
-      <NavLink className={cls} to="/analytics">
-        <span>Аналитика</span>
+      <NavLink className={cls} to="/vector-search">
+        <span>Векторный поиск</span>
       </NavLink>
-      <div className="sidebar-note">Режим: frontend</div>
+      <NavLink className={cls} to="/jobs">
+        <span>Статус парсинга</span>
+      </NavLink>
+      <NavLink className={cls} to="/database">
+        <span>База данных</span>
+      </NavLink>
+      <div className="sidebar-note">Backend: papers API + эвристики</div>
     </aside>
   );
 }

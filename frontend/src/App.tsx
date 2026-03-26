@@ -4,6 +4,10 @@ import Dashboard from "./pages/Dashboard";
 import Patents from "./pages/Patents";
 import PatentDetail from "./pages/PatentDetail";
 import Analytics from "./pages/Analytics";
+import WorkerStatus from "./pages/WorkerStatus";
+import Database from "./pages/Database";
+import Landing from "./pages/Landing";
+import PaperReport from "./pages/PaperReport";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import { useAuthStore } from "./store/authStore";
@@ -18,19 +22,64 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
-      <Route
-        path="/"
-        element={
-          <ProtectedRoute>
-            <Layout />
-          </ProtectedRoute>
-        }
-      >
-        <Route index element={<Navigate to="/dashboard" replace />} />
-        <Route path="dashboard" element={<Dashboard />} />
-        <Route path="patents" element={<Patents />} />
-        <Route path="patents/:id" element={<PatentDetail />} />
-        <Route path="analytics" element={<Analytics />} />
+      <Route path="/" element={<Layout />}>
+        <Route index element={<Landing />} />
+        <Route
+          path="dashboard"
+          element={
+            <ProtectedRoute>
+              <Dashboard />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="papers"
+          element={
+            <ProtectedRoute>
+              <Patents />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="papers/:id"
+          element={
+            <ProtectedRoute>
+              <PatentDetail />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="papers/:id/report"
+          element={
+            <ProtectedRoute>
+              <PaperReport />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="vector-search"
+          element={
+            <ProtectedRoute>
+              <Analytics />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="jobs"
+          element={
+            <ProtectedRoute>
+              <WorkerStatus />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="database"
+          element={
+            <ProtectedRoute>
+              <Database />
+            </ProtectedRoute>
+          }
+        />
       </Route>
     </Routes>
   );

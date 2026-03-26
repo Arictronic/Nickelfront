@@ -1,0 +1,12 @@
+﻿
+> nickelfront-frontend@0.0.0 build
+> vite build
+
+node.exe : "vite" не является внутренней или внешней
+строка:1 знак:1
++ & "C:\Program Files\nodejs/node.exe" "C:\Program Files\nodejs/node_mo ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ("vite" не являе...ней или внешней:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+командой, исполняемой программой или пакетным файлом.
