@@ -182,6 +182,7 @@ python test_parse.py
 |----------|------|--------|
 | Ваня | Backend, парсеры | `backend/app/api/`, `parser/` |
 | Артем | БД | `backend/app/db/`, `alembic/` |
+| Сережа | ML, RAG-система | `ml/`, `rag/` |
 | Тамерлан | Frontend, тесты | `frontend/`, `tests/` |
 | Паша | ML, аналитика | `ml/`, `analytics/` |
 
