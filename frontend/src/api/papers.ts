@@ -213,6 +213,15 @@ export async function revokeCeleryTask(taskId: string, terminate: boolean = fals
   return data;
 }
 
+export async function deleteCeleryTask(taskId: string) {
+  const { data } = await apiClient.delete<{
+    task_id: string;
+    status: string;
+    message?: string;
+  }>(`/tasks/celery/${taskId}`);
+  return data;
+}
+
 // Full-text search API
 export async function fullTextSearch(args: {
   query: string;

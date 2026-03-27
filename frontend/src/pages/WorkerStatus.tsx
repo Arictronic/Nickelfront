@@ -1,5 +1,5 @@
 ﻿import { useEffect, useState } from "react";
-import { getPapersCount, getCeleryTaskStatus, revokeCeleryTask, type CeleryTaskStatus } from "../api/papers";
+import { getPapersCount, getCeleryTaskStatus, revokeCeleryTask, deleteCeleryTask, type CeleryTaskStatus } from "../api/papers";
 
 type ParseJob = {
   jobId: string;
@@ -50,7 +50,10 @@ export default function WorkerStatus() {
       try {
         const updatedJobs = await Promise.all(
           jobs.map(async (job) => {
+            // Не обновляем завершённые или отменённые задачи
             if (job.status !== "in_progress") return job;
+            // Если уже отменено, не обновляем статус из API
+            if (job.celeryStatus?.status === "REVOKED" || job.status === "cancelled") return job;
 
             try {
               const celeryStatus = await getCeleryTaskStatus(job.jobId);
@@ -132,6 +135,22 @@ export default function WorkerStatus() {
             }
           : job
       );
+      setJobs(nextJobs);
+      saveJobs(nextJobs);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const deleteJob = async (jobId: string) => {
+    if (!window.confirm("Удалить задачу из истории? Это не повлияет на Celery, только удалит запись из интерфейса.")) {
+      return;
+    }
+
+    try {
+      // Вызываем API для удаления флага отмены (опционально)
+      await deleteCeleryTask(jobId);
+      const nextJobs = jobs.filter((job) => job.jobId !== jobId);
       setJobs(nextJobs);
       saveJobs(nextJobs);
     } catch (e) {
@@ -258,13 +277,15 @@ export default function WorkerStatus() {
                     </td>
                     <td>{savedCount}</td>
                     <td>{new Date(j.startedAt).toLocaleTimeString("ru-RU")}</td>
-                    <td>
+                    <td style={{ display: "flex", gap: 8 }}>
                       {j.status === "in_progress" && j.celeryStatus?.status !== "REVOKED" ? (
                         <button className="btn" onClick={() => cancelJob(j.jobId)}>
                           Остановить
                         </button>
                       ) : (
-                        <span className="muted">—</span>
+                        <button className="btn btn-danger" onClick={() => deleteJob(j.jobId)}>
+                          Удалить
+                        </button>
                       )}
                     </td>
                   </tr>

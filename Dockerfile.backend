@@ -1,0 +1,29 @@
+# Backend Dockerfile для Nickelfront
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Устанавливаем системные зависимости
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Копируем requirements
+COPY requirements.txt .
+COPY backend/requirements.txt ./backend/
+
+# Устанавливаем Python зависимости
+RUN pip install --no-cache-dir -r backend/requirements.txt
+
+# Копируем код
+COPY shared/ ./shared/
+COPY backend/ ./backend/
+
+# Создаём директорию для логов
+RUN mkdir -p /app/logs
+
+# Открываем порт
+EXPOSE 8001
+
+# Запускаем backend
+CMD ["python", "backend/start_server.py"]

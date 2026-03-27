@@ -32,7 +32,11 @@ celery_app.conf.update(
     task_track_started=True,
     task_time_limit=3600,  # 1 час максимум на задачу
     task_soft_time_limit=3300,  # 55 минут мягкий лимит
-    
+
+    # Настройки для Flower (мониторинг задач)
+    task_send_task_events=True,  # Отправлять события задач
+    worker_send_task_events=True,  # Отправлять события воркера
+
     # Настройки Celery Beat для периодических задач
     beat_schedule_filename=settings.resolve_path(settings.CELERY_BEAT_SCHEDULE_FILENAME),
     beat_schedule={

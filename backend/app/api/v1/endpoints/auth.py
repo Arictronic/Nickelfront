@@ -28,7 +28,7 @@ async def register(
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="???????????? ? ????? email ??? ??????????",
+            detail="Пользователь с таким email уже существует",
         )
 
     user = await user_service.create_user(
@@ -53,7 +53,7 @@ async def login(
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="???????? email ??? ??????",
+            detail="Неверный email или пароль",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -90,7 +90,7 @@ async def refresh_access_token(
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="?????????? refresh-?????",
+            detail="Недействительный refresh-токен",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -99,7 +99,7 @@ async def refresh_access_token(
     if not user or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="???????????? ?? ?????? ??? ?????????",
+            detail="Пользователь не найден или неактивен",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -130,7 +130,7 @@ async def logout(
     await refresh_service.revoke_user_tokens(current_user.id)
 
     logger.info(f"User logged out: {current_user.email}")
-    return {"message": "????? ???????? ???????"}
+    return {"message": "Все токены отозваны"}
 
 
 @router.get("/me", response_model=UserResponse)

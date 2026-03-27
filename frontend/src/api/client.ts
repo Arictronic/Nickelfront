@@ -1,7 +1,11 @@
 import axios from "axios";
 import { useAuthStore } from "../store/authStore";
 
-const baseURL = import.meta.env.VITE_API_URL || "/api/v1";
+// Определяем базовый URL API
+// - Если задан VITE_API_URL (полный URL), используем его
+// - Иначе используем относительный путь (для работы через proxy на сервере)
+const apiUrl = import.meta.env.VITE_API_URL;
+const baseURL = apiUrl ? apiUrl : "/api/v1";
 
 export const apiClient = axios.create({
   baseURL,

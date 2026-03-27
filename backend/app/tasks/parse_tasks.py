@@ -199,11 +199,16 @@ async def _parse_async(
             paper_service = PaperService(db)
 
             for idx, paper in enumerate(papers):
+                # Проверяем флаг отмены на каждой итерации
                 if _is_cancelled(self):
                     return _mark_revoked(self, query=query, source=source, current=idx, total=len(papers))
                 try:
-                    # Обновляем прогресс каждые 5 статей
+                    # Обновляем прогресс и проверяем отмену каждые 5 статей
                     if idx % 5 == 0:
+                        # Дополнительная проверка отмены перед обновлением статуса
+                        if _is_cancelled(self):
+                            return _mark_revoked(self, query=query, source=source, current=idx, total=len(papers))
+                        
                         self.update_state(
                             state="STARTED",
                             meta={
