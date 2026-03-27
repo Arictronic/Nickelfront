@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+﻿import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 
 type Theme = "light" | "dark";
 
@@ -27,12 +27,12 @@ export function ThemeProvider({ children, defaultTheme = "light" }: ThemeProvide
     if (saved && (saved === "light" || saved === "dark")) {
       return saved;
     }
-    
+
     // Проверяем системную тему
     if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
       return "dark";
     }
-    
+
     return defaultTheme;
   });
 
@@ -40,7 +40,7 @@ export function ThemeProvider({ children, defaultTheme = "light" }: ThemeProvide
     // Применяем тему к документу
     const root = document.documentElement;
     root.setAttribute("data-theme", theme);
-    
+
     // Сохраняем в localStorage
     localStorage.setItem(STORAGE_KEY, theme);
   }, [theme]);
@@ -76,34 +76,18 @@ export function useTheme() {
  */
 export function ThemeToggle({ className = "" }: { className?: string }) {
   const { theme, toggleTheme } = useTheme();
+  const label = theme === "light" ? "Светлая" : "Темная";
+  const nextLabel = theme === "light" ? "темную" : "светлую";
 
   return (
     <button
-      className={`btn ${className}`}
+      className={`btn theme-toggle ${className}`}
       onClick={toggleTheme}
-      title={`Переключить на ${theme === "light" ? "темную" : "светлую"} тему`}
-      style={{
-        background: "transparent",
-        border: "1px solid currentColor",
-        padding: "8px 12px",
-        borderRadius: 8,
-        cursor: "pointer",
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-      }}
+      title={`Переключить на ${nextLabel} тему`}
+      type="button"
     >
-      {theme === "light" ? (
-        <>
-          <span>🌙</span>
-          <span style={{ fontSize: 13 }}>Темная</span>
-        </>
-      ) : (
-        <>
-          <span>☀️</span>
-          <span style={{ fontSize: 13 }}>Светлая</span>
-        </>
-      )}
+      <span className="theme-label">Тема</span>
+      <span className="theme-value">{label}</span>
     </button>
   );
 }

@@ -1,4 +1,4 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import { isValidEmail, checkPasswordRequirements } from "../utils/validators";
@@ -36,7 +36,7 @@ export default function Register() {
   const [agree, setAgree] = useState(false);
   const [show, setShow] = useState(false);
   const [error, setError] = useState("");
-  
+
   const passwordReqs: PasswordRequirements = checkPasswordRequirements(password);
   const passwordsMatch = confirmPassword && password === confirmPassword;
   const isEmailValid = isValidEmail(email);
@@ -44,27 +44,27 @@ export default function Register() {
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
-    
+
     if (!isEmailValid) {
       setError("Введите корректный email");
       return;
     }
-    
+
     if (!passwordReqs.isValid) {
       setError("Пароль не соответствует требованиям");
       return;
     }
-    
+
     if (!passwordsMatch) {
       setError("Пароли не совпадают");
       return;
     }
-    
+
     if (!agree) {
       setError("Необходимо согласие с условиями");
       return;
     }
-    
+
     try {
       await register({ email, password, username: username || undefined });
       navigate("/login");
@@ -76,13 +76,14 @@ export default function Register() {
   return (
     <form className="auth panel" onSubmit={onSubmit}>
       <h2>Регистрация</h2>
-      
+      <p className="muted">Создайте аккаунт для доступа к платформе.</p>
+
       <div className="form-group">
-        <input 
-          className={`input ${email && !isEmailValid ? "invalid" : ""}`} 
-          value={email} 
-          onChange={(e) => setEmail(e.target.value)} 
-          placeholder="Email" 
+        <input
+          className={`input ${email && !isEmailValid ? "invalid" : ""}`}
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="Email"
           type="email"
           autoComplete="email"
         />
@@ -90,18 +91,18 @@ export default function Register() {
           <span className="field-error">Введите корректный email</span>
         )}
       </div>
-      
+
       <div className="form-group">
-        <input 
-          className="input" 
-          value={username} 
-          onChange={(e) => setUsername(e.target.value)} 
-          placeholder="Имя пользователя (необязательно)" 
+        <input
+          className="input"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="Имя пользователя (необязательно)"
           type="text"
           autoComplete="username"
         />
       </div>
-      
+
       <div className="form-group">
         <div className="password-input-wrapper">
           <input
@@ -112,10 +113,10 @@ export default function Register() {
             placeholder="Пароль"
             autoComplete="new-password"
           />
-          <button 
-            className="icon-btn toggle-password" 
-            type="button" 
-            onClick={() => setShow((s) => !s)} 
+          <button
+            className="icon-btn toggle-password"
+            type="button"
+            onClick={() => setShow((s) => !s)}
             aria-label="Показать пароль"
             tabIndex={-1}
           >
@@ -142,8 +143,7 @@ export default function Register() {
             )}
           </button>
         </div>
-        
-        {/* Требования к паролю */}
+
         <div className="password-requirements">
           <p className="requirements-title">Требования к паролю:</p>
           <RequirementItem met={passwordReqs.minLength} label="Минимум 8 символов" />
@@ -152,7 +152,7 @@ export default function Register() {
           <RequirementItem met={passwordReqs.hasNumber} label="Цифра (0-9)" />
         </div>
       </div>
-      
+
       <div className="form-group">
         <div className="password-input-wrapper">
           <input
@@ -176,22 +176,21 @@ export default function Register() {
           <span className="field-error">Пароли не совпадают</span>
         )}
       </div>
-      
+
       <label className="checkbox-label">
         <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />
-        <span>Я согласен с <a href="/terms" target="_blank" rel="noopener noreferrer">условиями использования</a> и <a href="/privacy" target="_blank" rel="noopener noreferrer">политикой конфиденциальности</a></span>
+        <span>
+          Я согласен с <a href="/terms" target="_blank" rel="noopener noreferrer">условиями использования</a> и
+          <a href="/privacy" target="_blank" rel="noopener noreferrer"> политикой конфиденциальности</a>
+        </span>
       </label>
-      
-      <button 
-        className="btn btn-primary" 
-        type="submit"
-        disabled={!passwordReqs.isValid || !passwordsMatch || !isEmailValid || !agree}
-      >
+
+      <button className="btn btn-primary" type="submit" disabled={!passwordReqs.isValid || !passwordsMatch || !isEmailValid || !agree}>
         Зарегистрироваться
       </button>
-      
+
       {error && <p className="error">{error}</p>}
-      
+
       <Link className="muted" to="/login">
         Уже есть аккаунт? <strong>Войти</strong>
       </Link>

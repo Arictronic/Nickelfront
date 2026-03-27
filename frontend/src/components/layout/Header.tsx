@@ -1,4 +1,4 @@
-import { useAuthStore } from "../../store/authStore";
+﻿import { useAuthStore } from "../../store/authStore";
 import { useAuth } from "../../hooks/useAuth";
 import { useNavigate } from "react-router-dom";
 import { ThemeToggle } from "../../context/ThemeProvider";
@@ -47,10 +47,12 @@ export default function Header() {
         <span className="user-chip">{user?.username || user?.email || "guest@local"}</span>
         {user ? (
           <button className="btn btn-ghost" onClick={handleLogout}>
-            ?????
+            Выйти
           </button>
         ) : (
-          <button className="btn btn-ghost" onClick={() => navigate("/login")}>?????</button>
+          <button className="btn btn-ghost" onClick={() => navigate("/login")}>
+            Войти
+          </button>
         )}
       </div>
     </header>

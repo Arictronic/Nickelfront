@@ -4,6 +4,7 @@ from app.services.task_service import create_task, get_task_by_id
 from app.db.session import get_db
 from app.tasks.tasks import get_celery_task_status
 from app.tasks.celery_app import celery_app
+from app.services.celery_cancel import set_cancel_flag
 from celery.result import AsyncResult
 from shared.schemas.task import TaskCreate, TaskOut, CeleryTaskStatus
 from typing import Optional
@@ -90,6 +91,7 @@ async def revoke_celery_task(
             "message": "Task already finished",
         }
 
+    set_cancel_flag(task_id)
     celery_app.control.revoke(task_id, terminate=terminate)
 
     return {

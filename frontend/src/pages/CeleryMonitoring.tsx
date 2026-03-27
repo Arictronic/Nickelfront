@@ -53,6 +53,7 @@ type ScheduledTask = {
   name: string;
   task: string;
   schedule: string;
+  description?: string;
   kwargs: Record<string, any>;
   options: Record<string, any>;
 };
@@ -300,6 +301,7 @@ export default function CeleryMonitoring() {
               <tr>
                 <th>Название</th>
                 <th>Задача</th>
+                <th>Описание</th>
                 <th>Расписание</th>
                 <th>Параметры</th>
               </tr>
@@ -309,6 +311,7 @@ export default function CeleryMonitoring() {
                 <tr key={idx}>
                   <td style={{ fontFamily: "monospace", fontSize: 13 }}>{task.name}</td>
                   <td>{task.task}</td>
+                  <td>{task.description || "—"}</td>
                   <td><code>{task.schedule}</code></td>
                   <td style={{ fontSize: 12 }}>
                     {Object.entries(task.kwargs || {}).map(([k, v]) => (
@@ -376,7 +379,7 @@ export default function CeleryMonitoring() {
         <div className="panel">
           <p className="error">{error}</p>
           <p className="muted" style={{ fontSize: 13 }}>
-            Примечание: Убедитесь, что Flower запущен: <code>docker-compose up -d flower</code>
+            Примечание: Убедитесь, что Flower запущен через <code>run_flower.bat</code>
           </p>
         </div>
       )}

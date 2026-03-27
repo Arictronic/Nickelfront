@@ -16,6 +16,7 @@ import PaperReport from "./pages/PaperReport";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import { useAuthStore } from "./store/authStore";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 function ProtectedRoute({ children }: { children: JSX.Element }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -150,7 +151,9 @@ export default function App() {
             path="database"
             element={
               <ProtectedRoute>
-                <Database />
+                <ErrorBoundary name="База данных">
+                  <Database />
+                </ErrorBoundary>
               </ProtectedRoute>
             }
           />

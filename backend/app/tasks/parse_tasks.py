@@ -10,6 +10,7 @@ from app.db.session import AsyncSessionLocal
 from app.services.paper_service import PaperService
 from app.services.embedding_service import get_embedding_service, EmbeddingService
 from app.services.vector_service import get_vector_service
+from app.services.celery_cancel import is_cancelled, clear_cancel_flag
 from shared.schemas.paper import PaperCreate
 from parsers_pkg.core.client import COREClient
 from parsers_pkg.core.parser import COREParser
@@ -18,6 +19,7 @@ from parsers_pkg.arxiv.parser import ArxivParser
 from parsers_pkg.arxiv import ARXIV_SEARCH_QUERIES
 from loguru import logger
 import asyncio
+from typing import Optional
 
 
 # Поисковые запросы по тематике никелевых сплавов
@@ -28,6 +30,38 @@ DEFAULT_SEARCH_QUERIES = [
     "nickel superalloys corrosion",
     "nickel alloys high temperature",
 ]
+
+
+def _get_task_id(task) -> Optional[str]:
+    return getattr(getattr(task, "request", None), "id", None)
+
+
+def _is_cancelled(task) -> bool:
+    task_id = _get_task_id(task)
+    return bool(task_id and is_cancelled(task_id))
+
+
+def _mark_revoked(task, query: str, source: str, current: int = 0, total: int = 0) -> dict:
+    task.update_state(
+        state="REVOKED",
+        meta={
+            "query": query,
+            "source": source,
+            "current": current,
+            "total": total,
+            "status": "Отменено",
+        },
+    )
+    return {
+        "status": "revoked",
+        "query": query,
+        "source": source,
+        "current": current,
+        "total": total,
+        "saved_count": 0,
+        "embedded_count": 0,
+        "errors": ["cancelled"],
+    }
 
 
 @celery_app.task(bind=True)
@@ -46,6 +80,9 @@ def parse_papers_task(
         source: Источник (CORE или arXiv)
     """
     try:
+        if _is_cancelled(self):
+            return _mark_revoked(self, query=query, source=source, current=0, total=limit)
+
         # Обновляем статус STARTED
         self.update_state(
             state="STARTED",
@@ -72,6 +109,10 @@ def parse_papers_task(
             }
         )
         raise
+    finally:
+        task_id = _get_task_id(self)
+        if task_id:
+            clear_cancel_flag(task_id)
 
 
 async def _parse_async(
@@ -83,6 +124,9 @@ async def _parse_async(
     """Асинхронная функция для парсинга статей."""
 
     # Выбираем клиент и парсер в зависимости от источника
+    if _is_cancelled(self):
+        return _mark_revoked(self, query=query, source=source, current=0, total=limit)
+
     if source == "arXiv":
         client = ArxivClient(rate_limit=True)
         parser = ArxivParser()
@@ -122,6 +166,9 @@ async def _parse_async(
             }
         )
         
+        if _is_cancelled(self):
+            return _mark_revoked(self, query=query, source=source, current=0, total=limit)
+
         if source == "arXiv":
             search_results = await client.search(query=query, limit=limit)
         else:
@@ -141,6 +188,9 @@ async def _parse_async(
             }
         )
         
+        if _is_cancelled(self):
+            return _mark_revoked(self, query=query, source=source, current=0, total=limit)
+
         papers = await parser.parse_search_results(search_results)
         stats["parsed_count"] = len(papers)
 
@@ -149,6 +199,8 @@ async def _parse_async(
             paper_service = PaperService(db)
 
             for idx, paper in enumerate(papers):
+                if _is_cancelled(self):
+                    return _mark_revoked(self, query=query, source=source, current=idx, total=len(papers))
                 try:
                     # Обновляем прогресс каждые 5 статей
                     if idx % 5 == 0:
@@ -266,6 +318,8 @@ def parse_multiple_queries_task(
     total_saved = 0
     
     for idx, query in enumerate(queries):
+        if _is_cancelled(self):
+            return _mark_revoked(self, query=str(query), source=source, current=idx, total=total_queries)
         try:
             # Обновляем прогресс по текущему запросу
             self.update_state(
@@ -325,6 +379,9 @@ def parse_all_sources_task(
     Args:
         limit_per_query: Лимит на каждый запрос
     """
+    if _is_cancelled(self):
+        return _mark_revoked(self, query='all_sources', source='CORE', current=0, total=2)
+
     logger.info("Запуск парсинга по всем источникам...")
     
     total_sources = 2  # CORE + arXiv
@@ -359,6 +416,9 @@ def parse_all_sources_task(
         }
     )
     
+    if _is_cancelled(self):
+        return _mark_revoked(self, query='all_sources', source='arXiv', current=1, total=2)
+
     arxiv_result = parse_multiple_queries_task(
         queries=ARXIV_SEARCH_QUERIES,
         limit_per_query=limit_per_query,

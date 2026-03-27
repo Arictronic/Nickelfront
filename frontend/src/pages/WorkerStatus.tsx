@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
-import { getPapersCount } from "../api/papers";
-import { getCeleryTaskStatus, type CeleryTaskStatus } from "../api/papers";
+﻿import { useEffect, useState } from "react";
+import { getPapersCount, getCeleryTaskStatus, revokeCeleryTask, type CeleryTaskStatus } from "../api/papers";
 
 type ParseJob = {
   jobId: string;
@@ -10,8 +9,7 @@ type ParseJob = {
   initialCount: number;
   lastObservedCount: number;
   lastCountChangeAt: number;
-  status: "in_progress" | "completed";
-  // Новый статус из Celery API
+  status: "in_progress" | "completed" | "cancelled";
   celeryStatus?: CeleryTaskStatus;
   lastPolledAt?: number;
 };
@@ -52,28 +50,26 @@ export default function WorkerStatus() {
       try {
         const updatedJobs = await Promise.all(
           jobs.map(async (job) => {
-            if (job.status === "completed") return job;
+            if (job.status !== "in_progress") return job;
 
             try {
-              // Получаем реальный статус из Celery API
               const celeryStatus = await getCeleryTaskStatus(job.jobId);
-              
               const now = Date.now();
               const isCompleted = celeryStatus.status === "SUCCESS" || celeryStatus.status === "FAILURE";
+              const isRevoked = celeryStatus.status === "REVOKED";
               const savedCount = celeryStatus.saved_count || celeryStatus.result?.saved_count || 0;
-              
+
               const next: ParseJob = {
                 ...job,
                 celeryStatus,
                 lastObservedCount: savedCount > 0 ? savedCount : job.lastObservedCount,
                 lastCountChangeAt: isCompleted ? now : job.lastCountChangeAt,
                 lastPolledAt: now,
-                status: isCompleted ? "completed" : "in_progress",
+                status: isRevoked ? "cancelled" : isCompleted ? "completed" : "in_progress",
               };
 
               return next;
-            } catch (err) {
-              // Если API недоступно, используем эвристический метод
+            } catch {
               const source = job.source === "all" ? "all" : job.source;
               const current = await getPapersCount(source as any);
               const now = Date.now();
@@ -102,7 +98,7 @@ export default function WorkerStatus() {
       } catch (e) {
         setError((e as Error).message);
       }
-    }, 5000); // Polling каждые 5 секунд
+    }, 5000);
 
     return () => window.clearInterval(pollInterval);
   }, [jobs.length]);
@@ -116,15 +112,41 @@ export default function WorkerStatus() {
     localStorage.removeItem(LS_KEY);
   };
 
+  const cancelJob = async (jobId: string) => {
+    if (!window.confirm("Остановить задачу? В очереди она будет отменена, а запущенная может не прерваться сразу.")) {
+      return;
+    }
+
+    try {
+      await revokeCeleryTask(jobId, false);
+      const nextJobs = jobs.map((job) =>
+        job.jobId === jobId
+          ? {
+              ...job,
+              status: "cancelled",
+              celeryStatus: {
+                ...(job.celeryStatus || {}),
+                status: "REVOKED",
+                state: "REVOKED",
+              },
+            }
+          : job
+      );
+      setJobs(nextJobs);
+      saveJobs(nextJobs);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   const getProgressPercent = (job: ParseJob): number => {
     if (job.celeryStatus) {
       const current = job.celeryStatus.current || job.celeryStatus.result?.current || 0;
       const total = job.celeryStatus.total || job.celeryStatus.result?.total || 0;
       if (total > 0) return Math.round((current / total) * 100);
     }
-    // Fallback к эвристике
     const delta = job.lastObservedCount - job.initialCount;
-    const expectedDelta = 50; // Ожидаемое среднее значение
+    const expectedDelta = 50;
     return Math.min(100, Math.round((delta / expectedDelta) * 100));
   };
 
@@ -132,13 +154,15 @@ export default function WorkerStatus() {
     if (job.celeryStatus) {
       const status = job.celeryStatus.status;
       const stateText = job.celeryStatus.result?.status || job.celeryStatus.state || "";
-      
+
       if (status === "SUCCESS") return "✓ Завершено";
       if (status === "FAILURE") return "✗ Ошибка";
+      if (status === "REVOKED") return "Отменено";
       if (status === "PENDING") return "Ожидание...";
       if (status === "STARTED") return stateText || "В процессе...";
       if (status === "RETRY") return "Повтор...";
     }
+    if (job.status === "cancelled") return "Отменено";
     return job.status === "completed" ? "Готово" : "В обработке";
   };
 
@@ -196,6 +220,7 @@ export default function WorkerStatus() {
                 <th>Прогресс</th>
                 <th>Сохранено</th>
                 <th>Время</th>
+                <th>Действия</th>
               </tr>
             </thead>
             <tbody>
@@ -203,7 +228,7 @@ export default function WorkerStatus() {
                 const progress = getProgressPercent(j);
                 const statusText = getStatusText(j);
                 const savedCount = j.celeryStatus?.saved_count || j.celeryStatus?.result?.saved_count || (j.lastObservedCount - j.initialCount);
-                
+
                 return (
                   <tr key={j.jobId}>
                     <td style={{ wordBreak: "break-word", fontFamily: "monospace", fontSize: "0.85em" }}>
@@ -219,13 +244,13 @@ export default function WorkerStatus() {
                     <td style={{ minWidth: 120 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                         <div style={{ flex: 1, height: 8, background: "#e0e0e0", borderRadius: 4, overflow: "hidden" }}>
-                          <div 
-                            style={{ 
-                              width: `${progress}%`, 
-                              height: "100%", 
+                          <div
+                            style={{
+                              width: `${progress}%`,
+                              height: "100%",
                               background: progress === 100 ? "#22c55e" : "#4a6cf7",
-                              transition: "width 0.3s ease"
-                            }} 
+                              transition: "width 0.3s ease",
+                            }}
                           />
                         </div>
                         <span style={{ fontSize: "0.85em", minWidth: 38 }}>{progress}%</span>
@@ -233,6 +258,15 @@ export default function WorkerStatus() {
                     </td>
                     <td>{savedCount}</td>
                     <td>{new Date(j.startedAt).toLocaleTimeString("ru-RU")}</td>
+                    <td>
+                      {j.status === "in_progress" && j.celeryStatus?.status !== "REVOKED" ? (
+                        <button className="btn" onClick={() => cancelJob(j.jobId)}>
+                          Остановить
+                        </button>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
                   </tr>
                 );
               })}

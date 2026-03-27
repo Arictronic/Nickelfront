@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import { getPapersCount } from "../api/papers";
 
 export default function Database() {
@@ -15,7 +15,7 @@ export default function Database() {
       const [all, core, arxiv] = await Promise.all([
         getPapersCount(),
         getPapersCount("CORE"),
-        getPapersCount("arXiv")
+        getPapersCount("arXiv"),
       ]);
       setAllCount(all);
       setCoreCount(core);
@@ -94,20 +94,24 @@ export default function Database() {
         <h3>Доступные API endpoints</h3>
         <p className="muted">
           <br />
-          • <code>GET /api/v1/papers</code> — список статей с пагинацией<br />
-          • <code>POST /api/v1/papers/search</code> — поиск по названию/аннотации/ключевым словам<br />
-          • <code>POST /api/v1/papers/parse</code> — запуск парсинга<br />
-          • <code>GET /api/v1/papers/id/{id}</code> — получение статьи по ID<br />
-          • <code>DELETE /api/v1/papers/id/{id}</code> — удаление статьи
+          • <code>GET /api/v1/papers</code> — список статей с пагинацией
+          <br />
+          • <code>POST /api/v1/papers/search</code> — поиск по названию/аннотации/ключевым словам
+          <br />
+          • <code>POST /api/v1/papers/parse</code> — запуск парсинга
+          <br />
+          • <code>GET /api/v1/papers/id/{"{id}"}</code> — получение статьи по ID
+          <br />
+          • <code>DELETE /api/v1/papers/id/{"{id}"}</code> — удаление статьи
         </p>
         <div className="actions" style={{ marginTop: 10 }}>
-          <a className="btn btn-primary" href="/papers" style={{ textDecoration: 'none' }}>
+          <a className="btn btn-primary" href="/papers" style={{ textDecoration: "none" }}>
             Перейти к списку статей
           </a>
-          <a className="btn" href="/vector-search" style={{ textDecoration: 'none' }}>
+          <a className="btn" href="/vector-search" style={{ textDecoration: "none" }}>
             Векторный поиск
           </a>
-          <a className="btn" href="/docs" target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
+          <a className="btn" href="/docs" target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
             Swagger документация
           </a>
         </div>
@@ -115,4 +119,3 @@ export default function Database() {
     </div>
   );
 }
-

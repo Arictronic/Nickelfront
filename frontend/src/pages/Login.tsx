@@ -1,4 +1,4 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import { isValidEmail } from "../utils/validators";
@@ -10,27 +10,26 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [show, setShow] = useState(false);
   const [error, setError] = useState("");
-  
+
   const isEmailValid = isValidEmail(email);
   const isPasswordFilled = password.length >= 6;
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
-    
+
     if (!isEmailValid) {
       setError("Введите корректный email");
       return;
     }
-    
+
     if (!isPasswordFilled) {
       setError("Введите пароль (минимум 6 символов)");
       return;
     }
-    
+
     try {
       await login({ email, password });
-      // Небольшая задержка чтобы убедиться что состояние обновилось
       setTimeout(() => {
         navigate("/dashboard", { replace: true });
       }, 100);
@@ -42,13 +41,14 @@ export default function Login() {
   return (
     <form className="auth panel" onSubmit={onSubmit}>
       <h2>Вход</h2>
-      
+      <p className="muted">Войдите, чтобы продолжить работу.</p>
+
       <div className="form-group">
-        <input 
+        <input
           className={`input ${email && !isEmailValid ? "invalid" : ""}`}
-          value={email} 
-          onChange={(e) => setEmail(e.target.value)} 
-          placeholder="Email" 
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="Email"
           type="email"
           autoComplete="email"
         />
@@ -56,7 +56,7 @@ export default function Login() {
           <span className="field-error">Введите корректный email</span>
         )}
       </div>
-      
+
       <div className="form-group">
         <div className="password-input-wrapper">
           <input
@@ -67,10 +67,10 @@ export default function Login() {
             placeholder="Пароль"
             autoComplete="current-password"
           />
-          <button 
-            className="icon-btn toggle-password" 
-            type="button" 
-            onClick={() => setShow((s) => !s)} 
+          <button
+            className="icon-btn toggle-password"
+            type="button"
+            onClick={() => setShow((s) => !s)}
             aria-label="Показать пароль"
             tabIndex={-1}
           >
@@ -101,21 +101,17 @@ export default function Login() {
           <span className="field-error">Минимум 6 символов</span>
         )}
       </div>
-      
+
       <label className="checkbox-label">
         <input type="checkbox" /> Запомнить меня
       </label>
-      
-      <button 
-        className="btn btn-primary" 
-        type="submit"
-        disabled={!isEmailValid || !isPasswordFilled}
-      >
+
+      <button className="btn btn-primary" type="submit" disabled={!isEmailValid || !isPasswordFilled}>
         Войти
       </button>
-      
+
       {error && <p className="error">{error}</p>}
-      
+
       <Link className="muted" to="/register">
         Нет аккаунта? <strong>Зарегистрироваться</strong>
       </Link>

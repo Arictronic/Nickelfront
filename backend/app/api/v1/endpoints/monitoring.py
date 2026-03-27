@@ -8,12 +8,31 @@ import httpx
 
 from app.db.session import AsyncSessionLocal
 from app.core.config import settings
+from app.tasks.celery_app import celery_app
 
 router = APIRouter(prefix="/monitoring", tags=["monitoring"])
 
 
 # Flower API base URL
 FLOWER_HOST = settings.get_flower_url()
+
+
+def _inspect_workers_fallback() -> list[str]:
+    try:
+        inspector = celery_app.control.inspect()
+        ping = inspector.ping() or {}
+        return list(ping.keys())
+    except Exception:
+        return []
+
+
+def _inspect_active_tasks_fallback() -> int:
+    try:
+        inspector = celery_app.control.inspect()
+        active = inspector.active() or {}
+        return sum(len(v or []) for v in active.values())
+    except Exception:
+        return 0
 
 
 @router.get("/celery/status")
@@ -26,13 +45,17 @@ async def get_celery_status():
     """
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
+            flower_reachable = False
             # Получаем информацию о воркерах из Flower API
             try:
                 response = await client.get(f"{FLOWER_HOST}/api/workers")
                 if response.status_code == 200:
                     workers_data = response.json()
+                    flower_reachable = True
                 else:
                     workers_data = {}
+                    if response.status_code in {401, 403}:
+                        flower_reachable = True
             except Exception:
                 workers_data = {}
             
@@ -41,8 +64,11 @@ async def get_celery_status():
                 response = await client.get(f"{FLOWER_HOST}/api/broker/queues")
                 if response.status_code == 200:
                     queues_data = response.json()
+                    flower_reachable = True
                 else:
                     queues_data = {}
+                    if response.status_code in {401, 403}:
+                        flower_reachable = True
             except Exception:
                 queues_data = {}
             
@@ -51,13 +77,18 @@ async def get_celery_status():
                 response = await client.get(f"{FLOWER_HOST}/api/tasks")
                 if response.status_code == 200:
                     tasks_data = response.json()
+                    flower_reachable = True
                 else:
                     tasks_data = {}
+                    if response.status_code in {401, 403}:
+                        flower_reachable = True
             except Exception:
                 tasks_data = {}
         
         # Агрегируем статистику
         workers_count = len(workers_data) if isinstance(workers_data, dict) else 0
+        if workers_count == 0:
+            workers_count = len(_inspect_workers_fallback())
         active_workers = sum(
             1 for w in (workers_data.values() if isinstance(workers_data, dict) else [])
             if w.get("active", 0) > 0 or w.get("status", "").lower() == "online"
@@ -69,6 +100,8 @@ async def get_celery_status():
             1 for t in (tasks_data.values() if isinstance(tasks_data, dict) else [])
             if t.get("state", "").lower() == "started"
         )
+        if active_tasks == 0:
+            active_tasks = _inspect_active_tasks_fallback()
         successful_tasks = sum(
             1 for t in (tasks_data.values() if isinstance(tasks_data, dict) else [])
             if t.get("state", "").lower() == "success"
@@ -90,7 +123,7 @@ async def get_celery_status():
                 "successful": successful_tasks,
                 "failed": failed_tasks,
             },
-            "flower_available": workers_count > 0,
+            "flower_available": flower_reachable,
             "flower_url": FLOWER_HOST,
             "generated_at": datetime.now().isoformat(),
         }
@@ -282,16 +315,20 @@ async def get_scheduled_tasks_info():
     """
     try:
         # Получаем конфигурацию из celery_app
-        from app.tasks.celery_app import celery_app
-        
         beat_schedule = celery_app.conf.beat_schedule or {}
-        
+        descriptions = {
+            "daily-parse-all-sources": "Ежедневный полный парсинг всех источников (CORE + arXiv)",
+            "weekly-parse-all-sources": "Еженедельный полный парсинг всех источников (CORE + arXiv)",
+            "hourly-parse-core": "Ежечасный парсинг CORE по базовым запросам",
+        }
+
         scheduled_tasks = []
         for name, config in beat_schedule.items():
             scheduled_tasks.append({
                 "name": name,
                 "task": config.get("task", "unknown"),
                 "schedule": str(config.get("schedule", "unknown")),
+                "description": descriptions.get(name, "Периодическая задача Celery"),
                 "kwargs": config.get("kwargs", {}),
                 "options": config.get("options", {}),
             })
