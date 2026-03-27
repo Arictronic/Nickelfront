@@ -1,7 +1,7 @@
 """Интеграционные тесты для CORE API."""
 
 import pytest
-from parser.core.client import COREClient
+from parsers_pkg.core.client import COREClient
 
 
 class TestCOREClientIntegration:

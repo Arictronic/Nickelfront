@@ -5,6 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.db.base import Base
 from app.db.session import engine
 from app.db.models import PatentTask  # импорт моделей для регистрации
+from app.db.models import User  # noqa: F401
+from app.db.models import RefreshToken  # noqa: F401
 
 
 async def init_db():

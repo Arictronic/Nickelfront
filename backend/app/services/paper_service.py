@@ -2,7 +2,7 @@
 
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, String
 from loguru import logger
 
 from app.db.models.paper import Paper as PaperModel
@@ -110,7 +110,7 @@ class PaperService:
             .where(
                 (PaperModel.title.ilike(search_pattern)) |
                 (PaperModel.abstract.ilike(search_pattern)) |
-                (PaperModel.keywords.any(query))
+                (PaperModel.keywords.cast(String).ilike(search_pattern))
             )
             .limit(limit)
             .offset(offset)

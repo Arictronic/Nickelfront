@@ -1,42 +1,108 @@
+import json
 import secrets
 from pathlib import Path
-from pydantic_settings import BaseSettings
-from typing import List
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import ClassVar, List, Optional
 
 # Базовая директория проекта (Nickelfront)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 
-
 class Settings(BaseSettings):
     """Настройки приложения."""
+    
+    model_config = SettingsConfigDict(
+        env_file=BASE_DIR / "backend" / ".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore",  # Игнорировать лишние переменные
+    )
+    
+    DEFAULT_CORS_ORIGINS: ClassVar[List[str]] = ["http://localhost:3000", "http://localhost:5173"]
+
+    DEFAULT_PARSE_QUERIES: ClassVar[List[str]] = [
+        "nickel-based alloys",
+        "superalloys",
+        "heat resistant alloys",
+    ]
 
     # Database
-    DATABASE_URL: str = "postgresql+asyncpg://user:pass@localhost:5432/nickelfront"
+    DATABASE_URL: str = "postgresql+asyncpg://user:pass@localhost:5433/nickelfront"
 
     # Redis
-    REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_URL: str = "redis://localhost:6380/0"
+
+    # API
+    API_HOST: str = "0.0.0.0"
+    API_PORT: int = 8001
 
     # Security
-    SECRET_KEY: str = None
+    SECRET_KEY: Optional[str] = None
+    _generated_secret_key: Optional[str] = None
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 14
 
     # CORS
-    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173"]
+    CORS_ORIGINS: Optional[str] = None
 
     # Celery
-    CELERY_BROKER_URL: str = "redis://localhost:6379/0"
-    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
+    CELERY_BROKER_URL: str = "redis://localhost:6380/0"
+    CELERY_RESULT_BACKEND: str = "redis://localhost:6380/0"
+
+    # Flower (Celery monitoring)
+    FLOWER_HOST: str = "http://localhost"
+    FLOWER_PORT: int = 5555
+    
+    # Celery Beat - периодические задачи
+    CELERY_BEAT_SCHEDULE_FILENAME: str = str(BASE_DIR / "backend" / "celerybeat-schedule")
+    
+    # Парсинг по расписанию (в минутах)
+    PARSE_SCHEDULE_INTERVAL: int = 60  # По умолчанию - каждый час
+    PARSE_LIMIT_PER_RUN: int = 50  # Лимит статей на один запуск
+    PARSE_QUERIES: Optional[str] = None
+
+    def get_cors_origins(self) -> List[str]:
+        """Parse CORS_ORIGINS from env (JSON array or CSV) with safe fallback."""
+        return self._parse_list(self.CORS_ORIGINS, self.DEFAULT_CORS_ORIGINS)
+
+    def get_parse_queries(self) -> List[str]:
+        """Parse PARSE_QUERIES from env (JSON array or CSV) with safe fallback."""
+        return self._parse_list(self.PARSE_QUERIES, self.DEFAULT_PARSE_QUERIES)
+
+    @classmethod
+    def _parse_list(cls, value: Optional[str], default: List[str]) -> List[str]:
+        if value is None:
+            return default
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return default
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
+            except json.JSONDecodeError:
+                pass
+            return [item.strip() for item in raw.split(",") if item.strip()]
+        return default
 
     def get_secret_key(self) -> str:
         """Получить SECRET_KEY или сгенерировать новый."""
         if self.SECRET_KEY:
             return self.SECRET_KEY
-        return secrets.token_urlsafe(32)
+        if not self._generated_secret_key:
+            self._generated_secret_key = secrets.token_urlsafe(32)
+        return self._generated_secret_key
 
-    class Config:
-        env_file = BASE_DIR / "backend" / ".env"
-        case_sensitive = True
+    def get_flower_url(self) -> str:
+        """Сформировать URL Flower из FLOWER_HOST/FLOWER_PORT."""
+        host = self.FLOWER_HOST.rstrip("/")
+        host_tail = host.split("://", 1)[-1]
+        if ":" in host_tail:
+            return host
+        return f"{host}:{self.FLOWER_PORT}"
 
 
 settings = Settings()

@@ -4,6 +4,47 @@ from app.db.models.task import PatentTask
 from sqlalchemy import select
 import time
 from loguru import logger
+from celery.result import AsyncResult
+from typing import Optional, Dict, Any
+
+
+def get_celery_task_status(task_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Получить статус задачи Celery по task_id.
+    
+    Args:
+        task_id: UUID задачи Celery
+        
+    Returns:
+        Dict со статусом задачи или None если задача не найдена
+    """
+    try:
+        result = AsyncResult(task_id, app=celery_app)
+        
+        task_info = {
+            "task_id": task_id,
+            "status": result.status,
+            "state": result.state,
+            "ready": result.ready(),
+            "successful": result.successful() if result.ready() else None,
+        }
+        
+        # Если задача завершена, получаем результат
+        if result.ready():
+            try:
+                task_info["result"] = result.get(timeout=1)
+            except Exception as e:
+                task_info["error"] = str(e)
+        
+        # Получаем метаданные задачи если доступны
+        if result.info and isinstance(result.info, dict):
+            task_info["info"] = result.info
+            
+        return task_info
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения статуса задачи {task_id}: {e}")
+        return None
 
 
 @celery_app.task(bind=True)

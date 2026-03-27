@@ -57,3 +57,30 @@ class PaperSearchResponse(BaseModel):
     total: int
     query: str
     sources: list[str]
+
+
+class VectorSearchRequest(BaseModel):
+    """Запрос на векторный поиск."""
+
+    query: str = Field(..., description="Поисковый запрос")
+    limit: int = Field(default=10, ge=1, le=100, description="Макс. количество результатов")
+    source: Optional[str] = Field(None, description="Фильтр по источнику (CORE, arXiv)")
+    date_from: Optional[str] = Field(None, description="Дата от (YYYY-MM-DD)")
+    date_to: Optional[str] = Field(None, description="Дата до (YYYY-MM-DD)")
+    search_type: str = Field(default="vector", description="Тип поиска: vector, semantic, hybrid")
+
+
+class VectorSearchResultItem(BaseModel):
+    """Результат векторного поиска."""
+
+    paper: Paper
+    similarity: float = Field(..., description="Сходство (0-1)")
+
+
+class VectorSearchResponse(BaseModel):
+    """Ответ на векторный поиск."""
+
+    results: list[VectorSearchResultItem]
+    total: int
+    query: str
+    search_type: str

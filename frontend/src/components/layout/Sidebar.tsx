@@ -14,6 +14,15 @@ export default function Sidebar() {
       <NavLink className={cls} to="/vector-search">
         <span>Векторный поиск</span>
       </NavLink>
+      <NavLink className={cls} to="/metrics">
+        <span>Метрики</span>
+      </NavLink>
+      <NavLink className={cls} to="/celery">
+        <span>Celery</span>
+      </NavLink>
+      <NavLink className={cls} to="/search">
+        <span>Поиск</span>
+      </NavLink>
       <NavLink className={cls} to="/jobs">
         <span>Статус парсинга</span>
       </NavLink>

@@ -32,3 +32,59 @@ export interface PaperListFilters {
   query?: string;
 }
 
+export type SearchType = "vector" | "semantic" | "hybrid" | "text";
+
+export interface VectorSearchFilters {
+  query: string;
+  limit: number;
+  source?: PaperSource | "all";
+  dateFrom?: string;
+  dateTo?: string;
+  searchType: SearchType;
+}
+
+export interface VectorSearchResult {
+  paper: Paper;
+  similarity: number;
+}
+
+export interface VectorSearchResponse {
+  results: VectorSearchResult[];
+  total: number;
+  query: string;
+  search_type: SearchType | "text_fallback";
+}
+
+export type CeleryTaskStatusType = "PENDING" | "STARTED" | "RETRY" | "FAILURE" | "SUCCESS";
+
+export interface CeleryTaskStatus {
+  task_id: string;
+  status: CeleryTaskStatusType;
+  state?: string;
+  result?: {
+    query?: string;
+    source?: string;
+    current?: number;
+    total?: number;
+    saved_count?: number;
+    embedded_count?: number;
+    errors?: string[];
+    [key: string]: any;
+  };
+  progress?: {
+    current?: number;
+    total?: number;
+    [key: string]: any;
+  };
+  query?: string;
+  source?: string;
+  current?: number;
+  total?: number;
+  saved_count?: number;
+  embedded_count?: number;
+  errors?: string[];
+  name?: string;
+  args?: any[];
+  kwargs?: Record<string, any>;
+}
+

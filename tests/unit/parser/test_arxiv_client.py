@@ -3,7 +3,7 @@
 import pytest
 import httpx
 from unittest.mock import AsyncMock, patch, MagicMock
-from parser.arxiv.client import ArxivClient
+from parsers_pkg.arxiv.client import ArxivClient
 
 
 class TestArxivClient:

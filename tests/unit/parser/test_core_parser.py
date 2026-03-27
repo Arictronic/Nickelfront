@@ -2,7 +2,7 @@
 
 import pytest
 from datetime import datetime
-from parser.core.parser import COREParser
+from parsers_pkg.core.parser import COREParser
 from shared.schemas.paper import Paper
 
 

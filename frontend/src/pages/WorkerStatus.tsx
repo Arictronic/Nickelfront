@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { getPapersCount } from "../api/papers";
+import { getCeleryTaskStatus, type CeleryTaskStatus } from "../api/papers";
 
 type ParseJob = {
   jobId: string;
@@ -10,6 +11,9 @@ type ParseJob = {
   lastObservedCount: number;
   lastCountChangeAt: number;
   status: "in_progress" | "completed";
+  // Новый статус из Celery API
+  celeryStatus?: CeleryTaskStatus;
+  lastPolledAt?: number;
 };
 
 const LS_KEY = "parseJobs.v1";
@@ -30,14 +34,9 @@ function saveJobs(jobs: ParseJob[]) {
 
 export default function WorkerStatus() {
   const [jobs, setJobs] = useState<ParseJob[]>(() => loadJobs());
-  const jobsRef = useRef<ParseJob[]>(jobs);
   const [allCount, setAllCount] = useState<number>(0);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number>(Date.now());
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    jobsRef.current = jobs;
-  }, [jobs]);
 
   useEffect(() => {
     getPapersCount("all")
@@ -45,31 +44,53 @@ export default function WorkerStatus() {
       .catch((e) => setError((e as Error).message));
   }, []);
 
+  // Polling статуса задач Celery
   useEffect(() => {
     if (jobs.length === 0) return;
 
-    const interval = window.setInterval(async () => {
+    const pollInterval = window.setInterval(async () => {
       try {
-        const snapshot = jobsRef.current;
         const updatedJobs = await Promise.all(
-          snapshot.map(async (job) => {
+          jobs.map(async (job) => {
             if (job.status === "completed") return job;
-            const source = job.source === "all" ? "all" : job.source;
-            const current = await getPapersCount(source as any);
-            const now = Date.now();
-            const changed = current !== job.lastObservedCount;
 
-            const next: ParseJob = {
-              ...job,
-              lastObservedCount: current,
-              lastCountChangeAt: changed ? now : job.lastCountChangeAt,
-            };
+            try {
+              // Получаем реальный статус из Celery API
+              const celeryStatus = await getCeleryTaskStatus(job.jobId);
+              
+              const now = Date.now();
+              const isCompleted = celeryStatus.status === "SUCCESS" || celeryStatus.status === "FAILURE";
+              const savedCount = celeryStatus.saved_count || celeryStatus.result?.saved_count || 0;
+              
+              const next: ParseJob = {
+                ...job,
+                celeryStatus,
+                lastObservedCount: savedCount > 0 ? savedCount : job.lastObservedCount,
+                lastCountChangeAt: isCompleted ? now : job.lastCountChangeAt,
+                lastPolledAt: now,
+                status: isCompleted ? "completed" : "in_progress",
+              };
 
-            const stableMs = 60_000;
-            if (now - next.lastCountChangeAt > stableMs && current > next.initialCount) {
-              next.status = "completed";
+              return next;
+            } catch (err) {
+              // Если API недоступно, используем эвристический метод
+              const source = job.source === "all" ? "all" : job.source;
+              const current = await getPapersCount(source as any);
+              const now = Date.now();
+              const changed = current !== job.lastObservedCount;
+
+              const next: ParseJob = {
+                ...job,
+                lastObservedCount: current,
+                lastCountChangeAt: changed ? now : job.lastCountChangeAt,
+              };
+
+              const stableMs = 60_000;
+              if (now - next.lastCountChangeAt > stableMs && current > next.initialCount) {
+                next.status = "completed";
+              }
+              return next;
             }
-            return next;
           })
         );
 
@@ -81,18 +102,44 @@ export default function WorkerStatus() {
       } catch (e) {
         setError((e as Error).message);
       }
-    }, 10_000);
+    }, 5000); // Polling каждые 5 секунд
 
-    return () => window.clearInterval(interval);
+    return () => window.clearInterval(pollInterval);
   }, [jobs.length]);
 
-  const inProgress = useMemo(() => jobs.filter((j) => j.status === "in_progress").length, [jobs]);
-  const completed = useMemo(() => jobs.filter((j) => j.status === "completed").length, [jobs]);
+  const inProgress = jobs.filter((j) => j.status === "in_progress").length;
+  const completed = jobs.filter((j) => j.status === "completed").length;
 
   const clearHistory = () => {
     if (!window.confirm("Очистить историю задач в интерфейсе? (не влияет на celery)")) return;
     setJobs([]);
     localStorage.removeItem(LS_KEY);
+  };
+
+  const getProgressPercent = (job: ParseJob): number => {
+    if (job.celeryStatus) {
+      const current = job.celeryStatus.current || job.celeryStatus.result?.current || 0;
+      const total = job.celeryStatus.total || job.celeryStatus.result?.total || 0;
+      if (total > 0) return Math.round((current / total) * 100);
+    }
+    // Fallback к эвристике
+    const delta = job.lastObservedCount - job.initialCount;
+    const expectedDelta = 50; // Ожидаемое среднее значение
+    return Math.min(100, Math.round((delta / expectedDelta) * 100));
+  };
+
+  const getStatusText = (job: ParseJob): string => {
+    if (job.celeryStatus) {
+      const status = job.celeryStatus.status;
+      const stateText = job.celeryStatus.result?.status || job.celeryStatus.state || "";
+      
+      if (status === "SUCCESS") return "✓ Завершено";
+      if (status === "FAILURE") return "✗ Ошибка";
+      if (status === "PENDING") return "Ожидание...";
+      if (status === "STARTED") return stateText || "В процессе...";
+      if (status === "RETRY") return "Повтор...";
+    }
+    return job.status === "completed" ? "Готово" : "В обработке";
   };
 
   return (
@@ -125,15 +172,17 @@ export default function WorkerStatus() {
             <p className="kpi">{completed}</p>
           </article>
           <article className="panel kpi-card">
-            <h3>Worker realtime</h3>
-            <p className="kpi-status idle">нет endpoint</p>
+            <h3>Celery Worker</h3>
+            <p className={`kpi-status ${inProgress > 0 ? "ok" : "idle"}`}>
+              {inProgress > 0 ? "Активен" : "Ожидание"}
+            </p>
           </article>
         </div>
         {error && <p className="error">{error}</p>}
       </div>
 
       <div className="panel">
-        <h3>Ваши задания парсинга (heuristic)</h3>
+        <h3>Ваши задания парсинга</h3>
         {jobs.length === 0 ? (
           <p className="muted">История задач пустая. Запустите парсинг в разделе Dashboard.</p>
         ) : (
@@ -144,33 +193,56 @@ export default function WorkerStatus() {
                 <th>Источник</th>
                 <th>Запрос</th>
                 <th>Статус</th>
-                <th>Счетчик</th>
+                <th>Прогресс</th>
+                <th>Сохранено</th>
                 <th>Время</th>
               </tr>
             </thead>
             <tbody>
-              {jobs.slice(0, 30).map((j) => (
-                <tr key={j.jobId}>
-                  <td style={{ wordBreak: "break-word" }}>{j.jobId}</td>
-                  <td>{j.source}</td>
-                  <td style={{ maxWidth: 360 }}>{j.query}</td>
-                  <td>
-                    <span className={`status ${j.status === "completed" ? "active" : ""}`}>{j.status === "completed" ? "Готово" : "В обработке"}</span>
-                  </td>
-                  <td>
-                    {j.lastObservedCount} (было {j.initialCount})
-                  </td>
-                  <td>{new Date(j.startedAt).toLocaleTimeString("ru-RU")}</td>
-                </tr>
-              ))}
+              {jobs.slice(0, 30).map((j) => {
+                const progress = getProgressPercent(j);
+                const statusText = getStatusText(j);
+                const savedCount = j.celeryStatus?.saved_count || j.celeryStatus?.result?.saved_count || (j.lastObservedCount - j.initialCount);
+                
+                return (
+                  <tr key={j.jobId}>
+                    <td style={{ wordBreak: "break-word", fontFamily: "monospace", fontSize: "0.85em" }}>
+                      {j.jobId}
+                    </td>
+                    <td>{j.source}</td>
+                    <td style={{ maxWidth: 280 }}>{j.query}</td>
+                    <td>
+                      <span className={`status ${j.status === "completed" || j.celeryStatus?.status === "SUCCESS" ? "active" : ""}`}>
+                        {statusText}
+                      </span>
+                    </td>
+                    <td style={{ minWidth: 120 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <div style={{ flex: 1, height: 8, background: "#e0e0e0", borderRadius: 4, overflow: "hidden" }}>
+                          <div 
+                            style={{ 
+                              width: `${progress}%`, 
+                              height: "100%", 
+                              background: progress === 100 ? "#22c55e" : "#4a6cf7",
+                              transition: "width 0.3s ease"
+                            }} 
+                          />
+                        </div>
+                        <span style={{ fontSize: "0.85em", minWidth: 38 }}>{progress}%</span>
+                      </div>
+                    </td>
+                    <td>{savedCount}</td>
+                    <td>{new Date(j.startedAt).toLocaleTimeString("ru-RU")}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
         <p className="muted" style={{ marginTop: 10 }}>
-          Примечание: в текущем бэке нет API для статуса celery задачи по `task_id`, поэтому статус оценивается эвристически по росту общего числа статей.
+          Статус отображается в реальном времени через Celery API endpoint /api/v1/tasks/celery/{`{task_id}`}/status
         </p>
       </div>
     </div>
   );
 }
-

@@ -1,0 +1,306 @@
+"""API endpoints для мониторинга Celery."""
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
+from typing import Optional, List
+from datetime import datetime
+import httpx
+
+from app.db.session import AsyncSessionLocal
+from app.core.config import settings
+
+router = APIRouter(prefix="/monitoring", tags=["monitoring"])
+
+
+# Flower API base URL
+FLOWER_HOST = settings.get_flower_url()
+
+
+@router.get("/celery/status")
+async def get_celery_status():
+    """
+    Получить статус Celery кластера.
+    
+    Returns:
+        Информация о воркерах и очередях
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            # Получаем информацию о воркерах из Flower API
+            try:
+                response = await client.get(f"{FLOWER_HOST}/api/workers")
+                if response.status_code == 200:
+                    workers_data = response.json()
+                else:
+                    workers_data = {}
+            except Exception:
+                workers_data = {}
+            
+            # Получаем информацию об очередях
+            try:
+                response = await client.get(f"{FLOWER_HOST}/api/broker/queues")
+                if response.status_code == 200:
+                    queues_data = response.json()
+                else:
+                    queues_data = {}
+            except Exception:
+                queues_data = {}
+            
+            # Получаем информацию о задачах
+            try:
+                response = await client.get(f"{FLOWER_HOST}/api/tasks")
+                if response.status_code == 200:
+                    tasks_data = response.json()
+                else:
+                    tasks_data = {}
+            except Exception:
+                tasks_data = {}
+        
+        # Агрегируем статистику
+        workers_count = len(workers_data) if isinstance(workers_data, dict) else 0
+        active_workers = sum(
+            1 for w in (workers_data.values() if isinstance(workers_data, dict) else [])
+            if w.get("active", 0) > 0 or w.get("status", "").lower() == "online"
+        )
+        
+        # Статистика задач
+        total_tasks = len(tasks_data) if isinstance(tasks_data, dict) else 0
+        active_tasks = sum(
+            1 for t in (tasks_data.values() if isinstance(tasks_data, dict) else [])
+            if t.get("state", "").lower() == "started"
+        )
+        successful_tasks = sum(
+            1 for t in (tasks_data.values() if isinstance(tasks_data, dict) else [])
+            if t.get("state", "").lower() == "success"
+        )
+        failed_tasks = sum(
+            1 for t in (tasks_data.values() if isinstance(tasks_data, dict) else [])
+            if t.get("state", "").lower() == "failure"
+        )
+        
+        return {
+            "status": "online" if workers_count > 0 else "offline",
+            "workers": {
+                "total": workers_count,
+                "active": active_workers,
+            },
+            "tasks": {
+                "total": total_tasks,
+                "active": active_tasks,
+                "successful": successful_tasks,
+                "failed": failed_tasks,
+            },
+            "flower_available": workers_count > 0,
+            "flower_url": FLOWER_HOST,
+            "generated_at": datetime.now().isoformat(),
+        }
+        
+    except Exception as e:
+        # Если Flower недоступен, возвращаем базовый статус
+        return {
+            "status": "unknown",
+            "workers": {
+                "total": 0,
+                "active": 0,
+            },
+            "tasks": {
+                "total": 0,
+                "active": 0,
+                "successful": 0,
+                "failed": 0,
+            },
+            "flower_available": False,
+            "flower_url": FLOWER_HOST,
+            "error": str(e),
+            "generated_at": datetime.now().isoformat(),
+        }
+
+
+@router.get("/celery/workers")
+async def get_workers_info():
+    """
+    Получить информацию о воркерах.
+    
+    Returns:
+        Список воркеров с деталями
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{FLOWER_HOST}/api/workers")
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=503, detail="Flower API недоступна")
+            
+            workers_data = response.json()
+            
+            # Форматируем ответ
+            workers = []
+            for name, info in (workers_data.items() if isinstance(workers_data, dict) else {}):
+                workers.append({
+                    "name": name,
+                    "status": info.get("status", "unknown"),
+                    "active_tasks": info.get("active", 0),
+                    "processed_tasks": info.get("processed", 0),
+                    "queues": info.get("queues", []),
+                    "pool": info.get("pool", {}),
+                    "timestamp": info.get("timestamp"),
+                })
+            
+            return {
+                "workers": workers,
+                "total": len(workers),
+                "generated_at": datetime.now().isoformat(),
+            }
+            
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="Flower API недоступна")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/celery/tasks")
+async def get_tasks_info(
+    limit: int = 100,
+    state: Optional[str] = None,
+):
+    """
+    Получить информацию о задачах.
+    
+    Args:
+        limit: Максимум задач
+        state: Фильтр по статусу (SUCCESS, FAILURE, STARTED, PENDING)
+        
+    Returns:
+        Список задач
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            params = {"limit": limit}
+            if state:
+                params["state"] = state
+            
+            response = await client.get(f"{FLOWER_HOST}/api/tasks", params=params)
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=503, detail="Flower API недоступна")
+            
+            tasks_data = response.json()
+            
+            # Форматируем ответ
+            tasks = []
+            for task_id, info in (tasks_data.items() if isinstance(tasks_data, dict) else {}):
+                tasks.append({
+                    "task_id": task_id,
+                    "name": info.get("name", "unknown"),
+                    "state": info.get("state", "UNKNOWN"),
+                    "args": info.get("args", ""),
+                    "kwargs": info.get("kwargs", {}),
+                    "started": info.get("started"),
+                    "received": info.get("received"),
+                    "succeeded": info.get("succeeded"),
+                    "failed": info.get("failed"),
+                    "retries": info.get("retries", 0),
+                    "worker": info.get("worker", {}),
+                })
+            
+            # Сортируем по времени получения
+            tasks.sort(key=lambda t: t.get("received", ""), reverse=True)
+            
+            return {
+                "tasks": tasks[:limit],
+                "total": len(tasks),
+                "limit": limit,
+                "generated_at": datetime.now().isoformat(),
+            }
+            
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="Flower API недоступна")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/celery/queues")
+async def get_queues_info():
+    """
+    Получить информацию об очередях.
+    
+    Returns:
+        Список очередей
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{FLOWER_HOST}/api/broker/queues")
+            
+            if response.status_code != 200:
+                # Если API очередей недоступно, возвращаем базовую информацию
+                return {
+                    "queues": [
+                        {"name": "celery", "messages": 0, "consumers": 1},
+                    ],
+                    "total": 1,
+                    "generated_at": datetime.now().isoformat(),
+                }
+            
+            queues_data = response.json()
+            
+            # Форматируем ответ
+            queues = []
+            for name, info in (queues_data.items() if isinstance(queues_data, dict) else {}):
+                queues.append({
+                    "name": name,
+                    "messages": info.get("messages", 0),
+                    "consumers": info.get("consumers", 0),
+                    "unacked": info.get("unacked", 0),
+                })
+            
+            return {
+                "queues": queues,
+                "total": len(queues),
+                "generated_at": datetime.now().isoformat(),
+            }
+            
+    except httpx.RequestError:
+        # Возвращаем базовую информацию при ошибке
+        return {
+            "queues": [
+                {"name": "celery", "messages": 0, "consumers": 1},
+            ],
+            "total": 1,
+            "generated_at": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/celery/scheduled-tasks")
+async def get_scheduled_tasks_info():
+    """
+    Получить информацию о запланированных задачах (Celery Beat).
+    
+    Returns:
+        Список периодических задач
+    """
+    try:
+        # Получаем конфигурацию из celery_app
+        from app.tasks.celery_app import celery_app
+        
+        beat_schedule = celery_app.conf.beat_schedule or {}
+        
+        scheduled_tasks = []
+        for name, config in beat_schedule.items():
+            scheduled_tasks.append({
+                "name": name,
+                "task": config.get("task", "unknown"),
+                "schedule": str(config.get("schedule", "unknown")),
+                "kwargs": config.get("kwargs", {}),
+                "options": config.get("options", {}),
+            })
+        
+        return {
+            "scheduled_tasks": scheduled_tasks,
+            "total": len(scheduled_tasks),
+            "generated_at": datetime.now().isoformat(),
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

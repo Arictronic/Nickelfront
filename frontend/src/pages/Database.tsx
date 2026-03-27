@@ -1,28 +1,48 @@
 import { useEffect, useState } from "react";
 import { getPapersCount } from "../api/papers";
-import { Link } from "react-router-dom";
 
 export default function Database() {
   const [allCount, setAllCount] = useState(0);
   const [coreCount, setCoreCount] = useState(0);
   const [arxivCount, setArxivCount] = useState(0);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = async () => {
+    setLoading(true);
     setError(null);
     try {
-      const [all, core, arxiv] = await Promise.all([getPapersCount("all"), getPapersCount("CORE"), getPapersCount("arXiv")]);
+      const [all, core, arxiv] = await Promise.all([
+        getPapersCount(),
+        getPapersCount("CORE"),
+        getPapersCount("arXiv")
+      ]);
       setAllCount(all);
       setCoreCount(core);
       setArxivCount(arxiv);
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      setLoading(false);
     }
   };
 
   useEffect(() => {
-    refresh().catch(() => null);
+    refresh();
   }, []);
+
+  if (loading) {
+    return (
+      <div className="page">
+        <div className="page-head">
+          <h2>База данных</h2>
+        </div>
+        <div className="panel">
+          <p>Загрузка данных...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="page">
@@ -38,44 +58,58 @@ export default function Database() {
       {error && <p className="error">{error}</p>}
 
       <div className="panel">
-        <h3>Таблицы (текущее состояние бэка)</h3>
+        <h3>Статистика по статьям</h3>
         <div className="detail-grid">
           <p>
-            <strong>papers</strong> — {allCount} строк
+            <strong>Всего статей:</strong> {allCount}
           </p>
           <p>
-            <strong>CORE</strong> — {coreCount}
+            <strong>CORE:</strong> {coreCount}
           </p>
           <p>
-            <strong>arXiv</strong> — {arxivCount}
-          </p>
-          <p>
-            <strong>patent_tasks</strong> — есть endpoint для задач, но они относятся к “patent_number” (в текущем бэке нет papers-status)
+            <strong>arXiv:</strong> {arxivCount}
           </p>
         </div>
       </div>
 
       <div className="panel">
-        <h3>Какие данные доступны с фронта</h3>
+        <h3>Таблицы в базе данных</h3>
+        <div className="detail-grid">
+          <p>
+            <strong>papers</strong> — основные данные статей
+          </p>
+          <p>
+            <strong>users</strong> — пользователи системы
+          </p>
+          <p>
+            <strong>refresh_tokens</strong> — токены обновления сессий
+          </p>
+          <p>
+            <strong>alembic_version</strong> — версия миграций БД
+          </p>
+        </div>
+      </div>
+
+      <div className="panel">
+        <h3>Доступные API endpoints</h3>
         <p className="muted">
-          Для статей сейчас используются:
           <br />
-          <br />
-          • `GET /api/v1/papers?limit&offset&source` — список (с пагинацией).<br />
-          • `POST /api/v1/papers/search` — поиск по title/abstract/keywords.<br />
-          • `POST /api/v1/papers/parse` и `POST /api/v1/papers/parse-all` — запуск celery-парсинга.<br />
-          • `GET /api/v1/papers/id/{id}` и `DELETE /api/v1/papers/id/{id}` — карточка и удаление.
+          • <code>GET /api/v1/papers</code> — список статей с пагинацией<br />
+          • <code>POST /api/v1/papers/search</code> — поиск по названию/аннотации/ключевым словам<br />
+          • <code>POST /api/v1/papers/parse</code> — запуск парсинга<br />
+          • <code>GET /api/v1/papers/id/{id}</code> — получение статьи по ID<br />
+          • <code>DELETE /api/v1/papers/id/{id}</code> — удаление статьи
         </p>
         <div className="actions" style={{ marginTop: 10 }}>
-          <Link className="btn btn-primary" to="/papers">
+          <a className="btn btn-primary" href="/papers" style={{ textDecoration: 'none' }}>
             Перейти к списку статей
-          </Link>
-          <Link className="btn" to="/jobs">
-            Посмотреть статус парсинга
-          </Link>
-          <Link className="btn" to="/vector-search">
-            Поиск по базе
-          </Link>
+          </a>
+          <a className="btn" href="/vector-search" style={{ textDecoration: 'none' }}>
+            Векторный поиск
+          </a>
+          <a className="btn" href="/docs" target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
+            Swagger документация
+          </a>
         </div>
       </div>
     </div>

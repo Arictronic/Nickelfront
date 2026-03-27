@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import task_prerun, task_postrun
 from loguru import logger
 
@@ -31,6 +32,37 @@ celery_app.conf.update(
     task_track_started=True,
     task_time_limit=3600,  # 1 час максимум на задачу
     task_soft_time_limit=3300,  # 55 минут мягкий лимит
+    
+    # Настройки Celery Beat для периодических задач
+    beat_schedule_filename=settings.CELERY_BEAT_SCHEDULE_FILENAME,
+    beat_schedule={
+        # Ежедневный парсинг по всем запросам (каждый день в 00:00)
+        "daily-parse-all-sources": {
+            "task": "app.tasks.parse_tasks.parse_all_sources_task",
+            "schedule": crontab(hour=0, minute=0),  # Каждый день в полночь
+            "kwargs": {
+                "limit_per_query": settings.PARSE_LIMIT_PER_RUN,
+            },
+        },
+        # Еженедельный полный парсинг (каждое воскресенье в 00:00)
+        "weekly-parse-all-sources": {
+            "task": "app.tasks.parse_tasks.parse_all_sources_task",
+            "schedule": crontab(hour=0, minute=0, day_of_week=0),  # Каждое воскресенье
+            "kwargs": {
+                "limit_per_query": settings.PARSE_LIMIT_PER_RUN * 2,  # Увеличенный лимит
+            },
+        },
+        # Парсинг по расписанию (каждый час)
+        "hourly-parse-core": {
+            "task": "app.tasks.parse_tasks.parse_multiple_queries_task",
+            "schedule": crontab(minute=0),  # Каждый час
+            "kwargs": {
+                "queries": settings.get_parse_queries(),
+                "limit_per_query": settings.PARSE_LIMIT_PER_RUN // 2,
+                "source": "CORE",
+            },
+        },
+    },
 )
 
 

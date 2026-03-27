@@ -3,7 +3,7 @@
 import pytest
 import httpx
 from unittest.mock import AsyncMock, patch, MagicMock
-from parser.core.client import COREClient
+from parsers_pkg.core.client import COREClient
 
 
 class TestCOREClient:

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import Pagination from "../components/ui/Pagination";
+import ExportButton from "../components/ui/ExportButton";
+import { useToast } from "../components/ui/Toast";
 import type { Paper, PaperListFilters, PaperSource } from "../types/paper";
 import { deletePaper, getPapersCount, getPapersList, searchPapers } from "../api/papers";
 
@@ -28,6 +30,7 @@ function saveSelected(ids: number[]) {
 
 export default function Patents() {
   const pageSize = 10;
+  const toast = useToast();
 
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<SortState>({ sortKey: "createdAt", sortDir: "desc" });
@@ -149,13 +152,19 @@ export default function Patents() {
   const deleteByIds = async (ids: number[]) => {
     if (ids.length === 0) return;
     if (!window.confirm(`Удалить ${ids.length} статей из базы?`)) return;
-    await Promise.all(
-      ids.map(async (id) => {
-        await deletePaper(id);
-      })
-    );
-    setSelectedIds((prev) => prev.filter((id) => !ids.includes(id)));
-    await fetchData();
+    
+    try {
+      await Promise.all(
+        ids.map(async (id) => {
+          await deletePaper(id);
+        })
+      );
+      setSelectedIds((prev) => prev.filter((id) => !ids.includes(id)));
+      toast.success(`Удалено ${ids.length} статей`);
+      await fetchData();
+    } catch (error) {
+      toast.error("Ошибка при удалении");
+    }
   };
 
   const exportCSV = () => {
@@ -201,6 +210,10 @@ export default function Patents() {
       <div className="page-head">
         <h2>Статьи (papers)</h2>
         <div className="counter-badge">Всего: {totalCount}</div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <ExportButton papers={papers} filename="papers" variant="csv" />
+          <ExportButton papers={papers} filename="papers" variant="excel" />
+        </div>
       </div>
 
       <div className="panel">

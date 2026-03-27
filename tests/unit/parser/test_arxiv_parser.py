@@ -1,7 +1,7 @@
 """Unit тесты для arXiv парсера."""
 
 import pytest
-from parser.arxiv.parser import ArxivParser
+from parsers_pkg.arxiv.parser import ArxivParser
 from shared.schemas.paper import Paper
 
 

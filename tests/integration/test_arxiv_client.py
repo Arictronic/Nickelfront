@@ -4,7 +4,7 @@
 """
 
 import pytest
-from parser.arxiv.client import ArxivClient
+from parsers_pkg.arxiv.client import ArxivClient
 
 
 class TestArxivClientIntegration:

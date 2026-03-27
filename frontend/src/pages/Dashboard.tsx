@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, PieChart, Pie, Cell } from "recharts";
-import { getPapersCount, getPapersList, parseAll, parsePapers } from "../api/papers";
+import { getPapersCount, getPapersList, parseAll, parsePapers, getCeleryTaskStatus } from "../api/papers";
 import { Paper } from "../types/paper";
 import { Link } from "react-router-dom";
 
@@ -15,6 +15,7 @@ type ParseJob = {
   lastObservedCount: number;
   lastCountChangeAt: number;
   status: "in_progress" | "completed";
+  celeryStatus?: any;
 };
 
 const LS_KEY = "parseJobs.v1";
@@ -83,22 +84,41 @@ export default function Dashboard() {
           jobs.map(async (job) => {
             if (job.status === "completed") return job;
 
-            const current = await getPapersCount(job.source === "all" ? "all" : job.source);
-            const now = Date.now();
-            const changed = current !== job.lastObservedCount;
+            try {
+              // Пытаемся получить реальный статус из Celery API
+              const celeryStatus = await getCeleryTaskStatus(job.jobId);
+              const now = Date.now();
+              const isCompleted = celeryStatus.status === "SUCCESS" || celeryStatus.status === "FAILURE";
+              const savedCount = celeryStatus.saved_count || celeryStatus.result?.saved_count || 0;
 
-            const next: ParseJob = {
-              ...job,
-              lastObservedCount: current,
-              lastCountChangeAt: changed ? now : job.lastCountChangeAt,
-            };
+              const next: ParseJob = {
+                ...job,
+                celeryStatus,
+                lastObservedCount: savedCount > 0 ? savedCount : job.lastObservedCount,
+                lastCountChangeAt: isCompleted ? now : job.lastCountChangeAt,
+                status: isCompleted ? "completed" : "in_progress",
+              };
 
-            const stableMs = 60_000; // считаем completed, если count стабилен 1 минуту и вырос
-            if (now - next.lastCountChangeAt > stableMs && current > next.initialCount) {
-              next.status = "completed";
+              return next;
+            } catch {
+              // Fallback к эвристике если API недоступно
+              const current = await getPapersCount(job.source === "all" ? "all" : job.source);
+              const now = Date.now();
+              const changed = current !== job.lastObservedCount;
+
+              const next: ParseJob = {
+                ...job,
+                lastObservedCount: current,
+                lastCountChangeAt: changed ? now : job.lastCountChangeAt,
+              };
+
+              const stableMs = 60_000;
+              if (now - next.lastCountChangeAt > stableMs && current > next.initialCount) {
+                next.status = "completed";
+              }
+
+              return next;
             }
-
-            return next;
           })
         );
 
@@ -107,7 +127,7 @@ export default function Dashboard() {
       } catch {
         // ignore polling errors
       }
-    }, 10_000);
+    }, 5000); // Polling каждые 5 секунд
 
     return () => window.clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -318,28 +338,70 @@ export default function Dashboard() {
                 <th>Источник</th>
                 <th>Запрос</th>
                 <th>Статус</th>
-                <th>Счетчик</th>
+                <th>Прогресс</th>
+                <th>Сохранено</th>
               </tr>
             </thead>
             <tbody>
-              {jobs.slice(0, 10).map((j) => (
-                <tr key={j.jobId}>
-                  <td style={{ wordBreak: "break-word" }}>{j.jobId}</td>
-                  <td>{j.source}</td>
-                  <td style={{ maxWidth: 360 }}>{j.query}</td>
-                  <td>
-                    <span className={`status ${j.status === "completed" ? "active" : ""}`}>
-                      {j.status === "completed" ? "Готово" : "В обработке"}
-                    </span>
-                  </td>
-                  <td>
-                    {j.lastObservedCount} (было {j.initialCount})
-                  </td>
-                </tr>
-              ))}
+              {jobs.slice(0, 10).map((j) => {
+                const progress = (() => {
+                  if (j.celeryStatus) {
+                    const current = j.celeryStatus.current || j.celeryStatus.result?.current || 0;
+                    const total = j.celeryStatus.total || j.celeryStatus.result?.total || 0;
+                    if (total > 0) return Math.round((current / total) * 100);
+                  }
+                  const delta = j.lastObservedCount - j.initialCount;
+                  const expectedDelta = 50;
+                  return Math.min(100, Math.round((delta / expectedDelta) * 100));
+                })();
+                
+                const statusText = (() => {
+                  if (j.celeryStatus) {
+                    const status = j.celeryStatus.status;
+                    if (status === "SUCCESS") return "✓ Завершено";
+                    if (status === "FAILURE") return "✗ Ошибка";
+                    if (status === "PENDING") return "Ожидание...";
+                    if (status === "STARTED") return j.celeryStatus.result?.status || "В процессе...";
+                    if (status === "RETRY") return "Повтор...";
+                  }
+                  return j.status === "completed" ? "Готово" : "В обработке";
+                })();
+                
+                const savedCount = j.celeryStatus?.saved_count || j.celeryStatus?.result?.saved_count || (j.lastObservedCount - j.initialCount);
+                
+                return (
+                  <tr key={j.jobId}>
+                    <td style={{ wordBreak: "break-word", fontFamily: "monospace", fontSize: "0.85em" }}>{j.jobId}</td>
+                    <td>{j.source}</td>
+                    <td style={{ maxWidth: 280 }}>{j.query}</td>
+                    <td>
+                      <span className={`status ${j.status === "completed" || j.celeryStatus?.status === "SUCCESS" ? "active" : ""}`}>
+                        {statusText}
+                      </span>
+                    </td>
+                    <td style={{ minWidth: 120 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <div style={{ flex: 1, height: 8, background: "#e0e0e0", borderRadius: 4, overflow: "hidden" }}>
+                          <div 
+                            style={{ 
+                              width: `${progress}%`, 
+                              height: "100%", 
+                              background: progress === 100 ? "#22c55e" : "#4a6cf7",
+                              transition: "width 0.3s ease"
+                            }} 
+                          />
+                        </div>
+                        <span style={{ fontSize: "0.85em", minWidth: 38 }}>{progress}%</span>
+                      </div>
+                    </td>
+                    <td>{savedCount}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
+        <p className="muted">Статус отображается через Celery API</p>
       </div>
     </div>
   );

@@ -13,7 +13,7 @@ from app.tasks.parse_tasks import (
     parse_all_sources_task,
     DEFAULT_SEARCH_QUERIES,
 )
-from parser.arxiv import ARXIV_SEARCH_QUERIES
+from parsers_pkg.arxiv import ARXIV_SEARCH_QUERIES
 from shared.schemas.paper import Paper, PaperSearchRequest, PaperSearchResponse
 
 router = APIRouter(prefix="/papers", tags=["papers"])
@@ -30,6 +30,8 @@ async def search_papers(
 
     if request.sources:
         papers = [p for p in papers if p.source in request.sources]
+    if request.full_text_only:
+        papers = [p for p in papers if p.full_text and p.full_text.strip()]
 
     return PaperSearchResponse(
         papers=papers,

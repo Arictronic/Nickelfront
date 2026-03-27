@@ -8,9 +8,14 @@
 from .celery_app import celery_app
 from app.db.session import AsyncSessionLocal
 from app.services.paper_service import PaperService
+from app.services.embedding_service import get_embedding_service, EmbeddingService
+from app.services.vector_service import get_vector_service
 from shared.schemas.paper import PaperCreate
-from parser.core import COREClient, COREParser
-from parser.arxiv import ArxivClient, ArxivParser, ARXIV_SEARCH_QUERIES
+from parsers_pkg.core.client import COREClient
+from parsers_pkg.core.parser import COREParser
+from parsers_pkg.arxiv.client import ArxivClient
+from parsers_pkg.arxiv.parser import ArxivParser
+from parsers_pkg.arxiv import ARXIV_SEARCH_QUERIES
 from loguru import logger
 import asyncio
 
@@ -41,19 +46,42 @@ def parse_papers_task(
         source: Источник (CORE или arXiv)
     """
     try:
-        return asyncio.run(_parse_async(query, limit, source))
+        # Обновляем статус STARTED
+        self.update_state(
+            state="STARTED",
+            meta={
+                "query": query,
+                "source": source,
+                "limit": limit,
+                "current": 0,
+                "total": limit,
+                "status": "Инициализация..."
+            }
+        )
+        return asyncio.run(_parse_async(self, query, limit, source))
     except Exception as e:
         logger.error(f"Ошибка парсинга: {e}")
+        self.update_state(
+            state="FAILURE",
+            meta={
+                "query": query,
+                "source": source,
+                "error": str(e),
+                "current": 0,
+                "total": limit,
+            }
+        )
         raise
 
 
 async def _parse_async(
+    self,
     query: str,
     limit: int = 50,
     source: str = "CORE",
 ) -> dict:
     """Асинхронная функция для парсинга статей."""
-    
+
     # Выбираем клиент и парсер в зависимости от источника
     if source == "arXiv":
         client = ArxivClient(rate_limit=True)
@@ -62,25 +90,57 @@ async def _parse_async(
         client = COREClient()
         parser = COREParser()
 
+    # Инициализируем сервисы эмбеддингов и векторного поиска
+    embedding_service = get_embedding_service()
+    vector_service = get_vector_service()
+
+    # Проверяем доступность модели эмбеддингов
+    embedding_available = embedding_service.model is not None
+    if not embedding_available:
+        logger.warning("Модель эмбеддингов недоступна, статьи будут сохранены без векторов")
+
     stats = {
         "query": query,
         "source": source,
         "found_count": 0,
         "parsed_count": 0,
         "saved_count": 0,
+        "embedded_count": 0,
         "errors": [],
     }
 
     try:
         # Поиск статей
+        self.update_state(
+            state="STARTED",
+            meta={
+                "query": query,
+                "source": source,
+                "current": 0,
+                "total": limit,
+                "status": f"Поиск статей по запросу '{query}'..."
+            }
+        )
+        
         if source == "arXiv":
             search_results = await client.search(query=query, limit=limit)
         else:
             search_results = await client.search(query=query, limit=limit, full_text_only=False)
-        
+
         stats["found_count"] = len(search_results)
 
         # Парсинг результатов
+        self.update_state(
+            state="STARTED",
+            meta={
+                "query": query,
+                "source": source,
+                "current": len(search_results),
+                "total": limit,
+                "status": f"Парсинг результатов ({len(search_results)} найдено)..."
+            }
+        )
+        
         papers = await parser.parse_search_results(search_results)
         stats["parsed_count"] = len(papers)
 
@@ -88,8 +148,22 @@ async def _parse_async(
         async with AsyncSessionLocal() as db:
             paper_service = PaperService(db)
 
-            for paper in papers:
+            for idx, paper in enumerate(papers):
                 try:
+                    # Обновляем прогресс каждые 5 статей
+                    if idx % 5 == 0:
+                        self.update_state(
+                            state="STARTED",
+                            meta={
+                                "query": query,
+                                "source": source,
+                                "current": idx,
+                                "total": len(papers),
+                                "saved_count": stats["saved_count"],
+                                "status": f"Сохранение статей ({idx}/{len(papers)})..."
+                            }
+                        )
+                    
                     paper_create = PaperCreate(
                         title=paper.title,
                         authors=paper.authors,
@@ -103,8 +177,39 @@ async def _parse_async(
                         source_id=paper.source_id,
                         url=paper.url,
                     )
-                    await paper_service.create_paper(paper_create)
+                    saved_paper = await paper_service.create_paper(paper_create)
                     stats["saved_count"] += 1
+
+                    # Генерируем и сохраняем эмбеддинг если модель доступна
+                    if embedding_available and saved_paper.id:
+                        try:
+                            # Формируем текст для эмбеддинга
+                            embedding_text = embedding_service.get_paper_embedding_text(
+                                title=saved_paper.title,
+                                abstract=saved_paper.abstract or "",
+                                keywords=saved_paper.keywords or [],
+                            )
+
+                            if embedding_text:
+                                embedding = embedding_service.get_embedding(embedding_text)
+                                if embedding:
+                                    # Сохраняем эмбеддинг в БД
+                                    await paper_service.update_paper(saved_paper.id, embedding=embedding)
+
+                                    # Добавляем в векторную базу ChromaDB
+                                    vector_service.add_paper(
+                                        paper_id=saved_paper.id,
+                                        embedding=embedding,
+                                        title=saved_paper.title,
+                                        source=saved_paper.source,
+                                        doi=saved_paper.doi,
+                                        publication_date=saved_paper.publication_date.isoformat() if saved_paper.publication_date else None,
+                                        journal=saved_paper.journal,
+                                    )
+                                    stats["embedded_count"] += 1
+                        except Exception as e:
+                            logger.warning(f"Ошибка генерации эмбеддинга для статьи {saved_paper.id}: {e}")
+
                 except Exception as e:
                     error_msg = f"Error saving paper '{paper.title[:50]}...': {e}"
                     logger.error(error_msg)
@@ -112,9 +217,24 @@ async def _parse_async(
 
             await db.commit()
 
+        # Финальный статус
+        self.update_state(
+            state="SUCCESS",
+            meta={
+                "query": query,
+                "source": source,
+                "current": len(papers),
+                "total": len(papers),
+                "saved_count": stats["saved_count"],
+                "embedded_count": stats["embedded_count"],
+                "status": "Завершено"
+            }
+        )
+
         logger.info(
             f"Парсинг '{query}' ({source}): найдено={stats['found_count']}, "
-            f"распарсено={stats['parsed_count']}, сохранено={stats['saved_count']}"
+            f"распарсено={stats['parsed_count']}, сохранено={stats['saved_count']}, "
+            f"эмбеддинги={stats['embedded_count']}"
         )
 
         return stats
@@ -141,24 +261,56 @@ def parse_multiple_queries_task(
     if queries is None:
         queries = DEFAULT_SEARCH_QUERIES if source == "CORE" else ARXIV_SEARCH_QUERIES
 
+    total_queries = len(queries)
     results = []
-    for query in queries:
+    total_saved = 0
+    
+    for idx, query in enumerate(queries):
         try:
+            # Обновляем прогресс по текущему запросу
+            self.update_state(
+                state="STARTED",
+                meta={
+                    "type": "multiple_queries",
+                    "source": source,
+                    "current_query": idx + 1,
+                    "total_queries": total_queries,
+                    "current_query_text": query,
+                    "total_saved": total_saved,
+                    "status": f"Обработка запроса {idx + 1}/{total_queries}: '{query}'"
+                }
+            )
+            
             result = parse_papers_task(
                 query=query,
                 limit=limit_per_query,
                 source=source,
             )
             results.append(result)
+            total_saved += result.get("saved_count", 0)
+            
         except Exception as e:
             logger.error(f"Ошибка при парсинге запроса '{query}': {e}")
             results.append({"query": query, "error": str(e)})
 
+    # Финальный статус
+    self.update_state(
+        state="SUCCESS",
+        meta={
+            "type": "multiple_queries",
+            "source": source,
+            "current_query": total_queries,
+            "total_queries": total_queries,
+            "total_saved": total_saved,
+            "status": "Все запросы обработаны"
+        }
+    )
+
     return {
-        "total_queries": len(queries),
+        "total_queries": total_queries,
         "source": source,
         "results": results,
-        "total_saved": sum(r.get("saved_count", 0) for r in results if "error" not in r),
+        "total_saved": total_saved,
     }
 
 
@@ -174,8 +326,21 @@ def parse_all_sources_task(
         limit_per_query: Лимит на каждый запрос
     """
     logger.info("Запуск парсинга по всем источникам...")
-
+    
+    total_sources = 2  # CORE + arXiv
+    
     # Парсинг CORE
+    self.update_state(
+        state="STARTED",
+        meta={
+            "type": "all_sources",
+            "current_source": 1,
+            "total_sources": total_sources,
+            "source": "CORE",
+            "status": "Парсинг источника CORE..."
+        }
+    )
+    
     core_result = parse_multiple_queries_task(
         queries=DEFAULT_SEARCH_QUERIES,
         limit_per_query=limit_per_query,
@@ -183,10 +348,33 @@ def parse_all_sources_task(
     )
 
     # Парсинг arXiv
+    self.update_state(
+        state="STARTED",
+        meta={
+            "type": "all_sources",
+            "current_source": 2,
+            "total_sources": total_sources,
+            "source": "arXiv",
+            "status": "Парсинг источника arXiv..."
+        }
+    )
+    
     arxiv_result = parse_multiple_queries_task(
         queries=ARXIV_SEARCH_QUERIES,
         limit_per_query=limit_per_query,
         source="arXiv",
+    )
+
+    # Финальный статус
+    self.update_state(
+        state="SUCCESS",
+        meta={
+            "type": "all_sources",
+            "current_source": total_sources,
+            "total_sources": total_sources,
+            "total_saved": core_result["total_saved"] + arxiv_result["total_saved"],
+            "status": "Все источники обработаны"
+        }
     )
 
     return {

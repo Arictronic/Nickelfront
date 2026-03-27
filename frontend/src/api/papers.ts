@@ -1,5 +1,6 @@
 import { apiClient } from "./client";
 import type { Paper, PaperListFilters, PaperSearchFilters, PaperSource } from "../types/paper";
+import type { VectorSearchFilters, VectorSearchResponse } from "../types/paper";
 
 type PaperApiModel = {
   id: number;
@@ -120,6 +121,154 @@ export async function parseAll(args: { limitPerQuery: number; source: "CORE" | "
     },
   });
 
+  return data;
+}
+
+export async function vectorSearch(filters: VectorSearchFilters) {
+  const { data } = await apiClient.post<VectorSearchResponse>("/vector/search", {
+    query: filters.query,
+    limit: filters.limit,
+    source: filters.source && filters.source !== "all" ? filters.source : undefined,
+    date_from: filters.dateFrom,
+    date_to: filters.dateTo,
+    search_type: filters.searchType,
+  });
+
+  return {
+    results: data.results ?? [],
+    total: data.total ?? 0,
+    searchType: data.search_type,
+  };
+}
+
+export async function getVectorStats() {
+  const { data } = await apiClient.get<{
+    count: number;
+    available: boolean;
+    collection?: string;
+    embedding_model?: string | null;
+    embedding_dim?: number | null;
+    embedding_available?: boolean;
+  }>("/vector/stats");
+
+  return data;
+}
+
+export async function rebuildVectorIndex() {
+  const { data } = await apiClient.post<{
+    message: string;
+    indexed: number;
+    total: number;
+  }>("/vector/rebuild");
+
+  return data;
+}
+
+export type CeleryTaskStatus = {
+  task_id: string;
+  status: "PENDING" | "STARTED" | "RETRY" | "FAILURE" | "SUCCESS";
+  state?: string;
+  result?: {
+    query?: string;
+    source?: string;
+    current?: number;
+    total?: number;
+    saved_count?: number;
+    embedded_count?: number;
+    errors?: string[];
+    [key: string]: any;
+  };
+  progress?: {
+    current?: number;
+    total?: number;
+    [key: string]: any;
+  };
+  query?: string;
+  source?: string;
+  current?: number;
+  total?: number;
+  saved_count?: number;
+  embedded_count?: number;
+  errors?: string[];
+  name?: string;
+  args?: any[];
+  kwargs?: Record<string, any>;
+};
+
+export async function getCeleryTaskStatus(taskId: string) {
+  const { data } = await apiClient.get<CeleryTaskStatus>(`/tasks/celery/${taskId}/status`);
+  return data;
+}
+
+// Full-text search API
+export async function fullTextSearch(args: {
+  query: string;
+  limit?: number;
+  offset?: number;
+  source?: string;
+  searchMode?: "plain" | "phrase" | "websearch";
+}) {
+  const { data } = await apiClient.post<{
+    papers: PaperApiModel[];
+    total: number;
+    query: string;
+    sources: string[];
+  }>("/search/fulltext", undefined, {
+    params: {
+      query: args.query,
+      limit: args.limit || 20,
+      offset: args.offset || 0,
+      source: args.source,
+      search_mode: args.searchMode || "websearch",
+    },
+  });
+
+  return {
+    papers: (data.papers ?? []).map(mapPaper),
+    total: data.total ?? 0,
+    query: data.query,
+  };
+}
+
+export async function getSearchSuggestions(prefix: string, limit: number = 10) {
+  const { data } = await apiClient.get<{ suggestions: string[]; prefix: string; count: number }>(
+    "/search/suggest",
+    { params: { prefix, limit } }
+  );
+  return data.suggestions;
+}
+
+export async function searchByKeywords(keywords: string[], matchAll: boolean = true, limit: number = 20) {
+  const { data } = await apiClient.post<{
+    papers: PaperApiModel[];
+    total: number;
+    keywords: string[];
+    match_all: boolean;
+  }>("/search/keywords", undefined, {
+    params: { keywords, match_all: matchAll, limit },
+  });
+
+  return {
+    papers: (data.papers ?? []).map(mapPaper),
+    total: data.total ?? 0,
+  };
+}
+
+export async function getSearchStats(query: string) {
+  const { data } = await apiClient.get<{
+    total_matches: number;
+    avg_relevance: number;
+    max_relevance: number;
+  }>("/search/stats", { params: { query } });
+  return data;
+}
+
+export async function getSearchHighlight(paperId: number, query: string) {
+  const { data } = await apiClient.get<{
+    paper_id: number;
+    title: string;
+    abstract: string;
+  }>(`/search/highlight/${paperId}`, { params: { query } });
   return data;
 }
 

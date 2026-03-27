@@ -1,3 +1,5 @@
+from typing import Optional, Dict, Any
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.db.models.task import PatentTask
@@ -22,7 +24,7 @@ async def create_task(db: AsyncSession, task_data: dict) -> PatentTask:
     return db_task
 
 
-async def get_task_by_id(db: AsyncSession, task_id: int) -> PatentTask | None:
+async def get_task_by_id(db: AsyncSession, task_id: int) -> Optional[PatentTask]:
     """Получить задачу по ID."""
     result = await db.execute(select(PatentTask).where(PatentTask.id == task_id))
     return result.scalar_one_or_none()
@@ -32,8 +34,8 @@ async def update_task_status(
     db: AsyncSession,
     task_id: int,
     status: str,
-    result: dict | None = None
-) -> PatentTask | None:
+    result: Optional[Dict[str, Any]] = None
+) -> Optional[PatentTask]:
     """Обновить статус задачи."""
     task = await get_task_by_id(db, task_id)
     if not task:

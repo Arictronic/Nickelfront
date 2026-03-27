@@ -40,13 +40,13 @@ class TestPaperAPI:
     @pytest.mark.asyncio
     async def test_get_paper_not_found(self, client: AsyncClient):
         """Тест получения несуществующей статьи."""
-        response = await client.get("/api/v1/papers/99999")
+        response = await client.get("/api/v1/papers/id/99999")
         assert response.status_code == 404
 
     @pytest.mark.asyncio
     async def test_delete_paper_not_found(self, client: AsyncClient):
         """Тест удаления несуществующей статьи."""
-        response = await client.delete("/api/v1/papers/99999")
+        response = await client.delete("/api/v1/papers/id/99999")
         assert response.status_code == 404
 
     @pytest.mark.asyncio
@@ -135,7 +135,7 @@ class TestPaperCRUD:
         await test_db.refresh(paper)
 
         # Получаем статью
-        response = await client.get(f"/api/v1/papers/{paper.id}")
+        response = await client.get(f"/api/v1/papers/id/{paper.id}")
         assert response.status_code == 200
         data = response.json()
         assert data["title"] == sample_paper_data["title"]
