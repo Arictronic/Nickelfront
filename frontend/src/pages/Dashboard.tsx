@@ -48,7 +48,7 @@ export default function Dashboard() {
   const [jobs, setJobs] = useState<ParseJob[]>(() => loadJobs());
 
   const [query, setQuery] = useState("nickel-based superalloys");
-  const [source, setSource] = useState<"CORE" | "arXiv">("CORE");
+  const [source, setSource] = useState<"CORE" | "arXiv">("arXiv");
   const [limit, setLimit] = useState(25);
   const [parsingError, setParsingError] = useState<string | null>(null);
 

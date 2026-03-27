@@ -80,10 +80,21 @@ class COREClient(BaseAPIClient):
 
             return results
 
+        except httpx.HTTPStatusError as e:
+            logger.error(f"CORE API error: {e}")
+            if e.response is not None:
+                logger.error(f"Response: {e.response.text}")
+
+                # Явно сигнализируем о поломке/изменении API CORE,
+                # чтобы задача не завершалась "успешно" с нулём результатов.
+                if e.response.status_code == 404:
+                    raise RuntimeError(
+                        "CORE API endpoint недоступен (404). "
+                        "Вероятно, API CORE изменился; используйте источник arXiv."
+                    ) from e
+            return []
         except httpx.HTTPError as e:
             logger.error(f"CORE API error: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                logger.error(f"Response: {e.response.text}")
             return []
         except Exception as e:
             logger.error(f"CORE search error: {e}")

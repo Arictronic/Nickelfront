@@ -35,7 +35,7 @@ cd ..
 - `REDIS_URL=redis://localhost:6380/0`
 - `CELERY_BROKER_URL=redis://localhost:6380/0`
 - `CELERY_RESULT_BACKEND=redis://localhost:6380/1`
-- `VITE_API_URL=http://localhost:8001`
+- `VITE_API_URL=/api/v1`
 
 Примечание: PostgreSQL в этой установке работает на `5432` (не `5433`).
 
@@ -76,7 +76,7 @@ cd ..
 
 ## 6. Проверка после запуска
 
-- Frontend: `http://localhost:5173`
+- Frontend: `http://localhost` (порт 80)
 - Backend API: `http://localhost:8001`
 - Swagger: `http://localhost:8001/docs`
 - Flower: `http://localhost:5555`
@@ -90,3 +90,27 @@ cd ..
   - убедитесь, что база `nickelfront` создана;
   - примените миграции из `backend/apply_migrations.py`.
 - Ошибка Redis: запустите `run_redis.bat` и не закрывайте окно Redis.
+
+## 8. Доступ с другого устройства (LAN и белый IP)
+
+- Важно: текущий LAN IP сервера может быть не `192.168.10.3`. Проверьте командой:
+  - `ipconfig`
+- На этом сервере сейчас активен адрес `192.168.100.3` (если сеть не менялась).
+- Frontend должен открываться по:
+  - `http://192.168.100.3`
+- Backend API (проверка):
+  - `http://192.168.100.3:8001/docs`
+
+Если по IP не открывается:
+
+1. Запустите `run_open_ports.bat` от имени администратора (откроет порты 80/8001/5555 в Windows Firewall).
+2. Убедитесь, что процессы слушают `0.0.0.0`:
+   - `netstat -ano | findstr :80`
+   - `netstat -ano | findstr :8001`
+3. Проверьте, что заходите на правильный LAN IP (`192.168.100.3`, а не `192.168.10.3`).
+
+Для доступа по белому IP `78.139.95.130`:
+
+- Нужен проброс портов на роутере (NAT/Port Forwarding):
+  - `78.139.95.130:80 -> 192.168.100.3:80`
+- Если провайдер использует CG-NAT, прямой доступ по белому IP может не работать даже при открытых локальных портах.
