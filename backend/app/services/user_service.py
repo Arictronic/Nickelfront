@@ -3,7 +3,7 @@
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from datetime import datetime
+from datetime import datetime, timezone
 from loguru import logger
 
 from app.db.models.user import User
@@ -51,7 +51,7 @@ class UserService:
 
     async def update_last_login(self, user: User) -> None:
         """Обновить время последнего входа."""
-        user.last_login_at = datetime.utcnow()
+        user.last_login_at = datetime.now(timezone.utc)
         await self.db.commit()
 
     async def verify_password(self, plain_password: str, hashed_password: str) -> bool:

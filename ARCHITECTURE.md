@@ -1,4 +1,4 @@
-# Архитектура платформы Nickelfront
+﻿# Архитектура платформы Nickelfront
 
 **Версия:** 1.0.0  
 **Дата:** Март 2026
@@ -219,7 +219,7 @@ Nickelfront/
 │   │       ├── 003_add_embedding.py    # Добавление embedding
 │   │       └── 004_add_fulltext_search.py  # FTS + триггеры
 │   ├── tests/                          # Тесты backend
-│   └── requirements.txt                # Зависимости Python
+│   └── requirements.txt                # Единый список Python-зависимостей (root)
 │
 ├── frontend/                   # React 18 + Vite + TypeScript
 │   ├── src/
@@ -1486,7 +1486,6 @@ pytest tests/test_papers.py -v
 ```
 tests/
 ├── conftest.py                    # Фикстуры (test_db, client, sample_paper_data)
-├── requirements.txt               # Тестовые зависимости
 ├── unit/
 │   ├── test_auth.py              # Тесты авторизации (10 тестов)
 │   ├── test_paper_service.py     # Тесты PaperService (16 тестов)
@@ -1629,14 +1628,7 @@ pytest tests/unit/test_auth.py::test_login_user -v
 
 ### Тестовые зависимости
 
-**Файл:** `tests/requirements.txt`
-
-```
-pytest==8.0.0
-pytest-asyncio==0.23.3
-httpx==0.26.0
-aiosqlite==0.19.0
-```
+**Файл:** `requirements.txt` (единый список для backend и tests)
 
 ---
 
@@ -1674,15 +1666,35 @@ jobs:
 
 ## � Скрипты запуска
 
-### Backend скрипты
+### CMD скрипты (Windows)
 
-**Файл:** `run_backend.bat`
-
-```batch
-cd backend
-python ..\shared\__init__.py
-python start_server.py
+```bat
+run_redis.bat    # Redis (порт 6380)
+run_backend.bat  # FastAPI (порт 8001)
+run_worker.bat   # Celery worker
+run_flower.bat   # Flower (порт 5555)
+run_frontend.bat # Vite (порт 5173)
+run_all.bat      # Запуск всех сервисов с паузами
 ```
+
+**Порядок и интервалы в `run_all.bat`:**
+- Redis → 2 сек
+- Backend → 3 сек
+- Worker → 3 сек
+- Flower → 2 сек
+- Frontend → без ожидания после запуска
+
+**Примечание:** PostgreSQL должен быть запущен как сервис (порт 5433).
+
+### Создание venv (Windows)
+
+```bat
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### Backend скрипты
 
 **Файл:** `backend/start_server.py`
 
@@ -1704,20 +1716,6 @@ if __name__ == "__main__":
         port=8000,
         reload=True
     )
-```
-
-**Файл:** `run_worker.bat`
-
-```batch
-cd backend
-celery -A app.tasks.celery_app worker --loglevel=info
-```
-
-**Файл:** `run_all.bat`
-
-```batch
-start run_backend.bat
-start run_worker.bat
 ```
 
 ### Скрипты миграций
@@ -1762,7 +1760,7 @@ source venv/bin/activate
 
 ```powershell
 # Установка зависимостей
-pip install -r backend/requirements.txt
+pip install -r requirements.txt
 npm install --prefix frontend
 ```
 
@@ -1924,7 +1922,7 @@ Error: Redis connection refused
 ```
 
 **Решение:**
-- Запустите Redis: `redis-server`
+- Запустите Redis: `run_redis.bat`
 - Проверьте CELERY_BROKER_URL
 
 #### 4. Ошибка генерации эмбеддингов
@@ -1985,7 +1983,7 @@ Error: Redis connection refused
 ```
 
 **Решение:**
-- Запустите Redis: `redis-server`
+- Запустите Redis: `run_redis.bat`
 - Проверьте CELERY_BROKER_URL
 
 #### 4. Ошибка генерации эмбеддингов
@@ -2327,4 +2325,6 @@ vector_service.add_paper(
 | GET | `/api/v1/monitoring/celery/scheduled-tasks` | `monitoring.py` | Расписание |
 
 ---
+
+
 

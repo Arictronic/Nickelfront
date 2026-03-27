@@ -14,8 +14,8 @@ from app.core.config import settings
 
 celery_app = Celery(
     "worker",
-    broker=settings.REDIS_URL,
-    backend=settings.REDIS_URL,
+    broker=settings.CELERY_BROKER_URL,
+    backend=settings.CELERY_RESULT_BACKEND,
     include=[
         "app.tasks.tasks",
         "app.tasks.parse_tasks",
@@ -34,7 +34,7 @@ celery_app.conf.update(
     task_soft_time_limit=3300,  # 55 минут мягкий лимит
     
     # Настройки Celery Beat для периодических задач
-    beat_schedule_filename=settings.CELERY_BEAT_SCHEDULE_FILENAME,
+    beat_schedule_filename=settings.resolve_path(settings.CELERY_BEAT_SCHEDULE_FILENAME),
     beat_schedule={
         # Ежедневный парсинг по всем запросам (каждый день в 00:00)
         "daily-parse-all-sources": {

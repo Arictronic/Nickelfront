@@ -1,6 +1,6 @@
 """Сервис для работы с refresh-токенами."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +20,7 @@ class RefreshTokenService:
         """Создать refresh-токен для пользователя и сохранить в БД."""
         raw_token = create_refresh_token()
         token_hash = hash_refresh_token(raw_token)
-        expires_at = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+        expires_at = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
         token = RefreshToken(
             user_id=user_id,
@@ -46,7 +46,10 @@ class RefreshTokenService:
             return None
         if token.revoked_at is not None:
             return None
-        if token.expires_at <= datetime.utcnow():
+        expires_at = token.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= datetime.now(timezone.utc):
             return None
         return token
 
@@ -54,7 +57,7 @@ class RefreshTokenService:
         """Отозвать refresh-токен."""
         if token.revoked_at is not None:
             return
-        token.revoked_at = datetime.utcnow()
+        token.revoked_at = datetime.now(timezone.utc)
         await self.db.commit()
 
     async def revoke_user_tokens(self, user_id: int) -> None:
@@ -65,6 +68,6 @@ class RefreshTokenService:
                 RefreshToken.user_id == user_id,
                 RefreshToken.revoked_at.is_(None),
             )
-            .values(revoked_at=datetime.utcnow())
+            .values(revoked_at=datetime.now(timezone.utc))
         )
         await self.db.commit()

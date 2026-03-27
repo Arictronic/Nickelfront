@@ -5,6 +5,8 @@ from typing import Optional
 from dataclasses import dataclass
 from loguru import logger
 
+from app.core.config import settings
+
 try:
     import chromadb
     from chromadb.config import Settings
@@ -39,6 +41,7 @@ class ChromaVectorService:
     def __init__(self):
         self._client = None
         self._collection = None
+        self.CHROMA_PERSIST_DIR = settings.resolve_path(settings.CHROMA_DB_PATH)
     
     @property
     def client(self):

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, PieChart, Pie, Cell } from "recharts";
-import { getPapersCount, getPapersList, parseAll, parsePapers, getCeleryTaskStatus } from "../api/papers";
+import { getPapersCount, getPapersList, parseAll, parsePapers, getCeleryTaskStatus, revokeCeleryTask } from "../api/papers";
 import { Paper } from "../types/paper";
 import { Link } from "react-router-dom";
 
@@ -74,7 +74,7 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Heuristic "реальное время": celery-status отсутствует в API, поэтому ориентируемся на рост papers count.
+  // Реальное время: стараемся брать статус из Celery API, иначе fallback на рост papers count.
   useEffect(() => {
     if (jobs.length === 0) return;
 
@@ -201,6 +201,33 @@ export default function Dashboard() {
     }
   };
 
+  const cancelJob = async (jobId: string) => {
+    if (!window.confirm("Остановить задачу? В очереди она будет отменена, а запущенная может не прерваться сразу.")) {
+      return;
+    }
+
+    try {
+      await revokeCeleryTask(jobId, false);
+      const nextJobs = jobs.map((job) =>
+        job.jobId === jobId
+          ? {
+              ...job,
+              status: "completed",
+              celeryStatus: {
+                ...(job.celeryStatus || {}),
+                status: "REVOKED",
+                state: "REVOKED",
+              },
+            }
+          : job
+      );
+      setJobs(nextJobs);
+      saveJobs(nextJobs);
+    } catch (e) {
+      setParsingError((e as Error).message);
+    }
+  };
+
   return (
     <div className="page">
       <div className="page-head">
@@ -235,7 +262,7 @@ export default function Dashboard() {
             onChange={(e) => setLimit(Number(e.target.value))}
             style={{ width: 120 }}
           />
-          <span className="muted">Статус показывает рост числа статей (в API нет celery-status по task_id).</span>
+          <span className="muted">Статус берется из Celery API, при недоступности — по росту числа статей.</span>
         </div>
         {parsingError && <p className="error">{parsingError}</p>}
       </div>
@@ -340,6 +367,7 @@ export default function Dashboard() {
                 <th>Статус</th>
                 <th>Прогресс</th>
                 <th>Сохранено</th>
+                <th>Действия</th>
               </tr>
             </thead>
             <tbody>
@@ -360,6 +388,7 @@ export default function Dashboard() {
                     const status = j.celeryStatus.status;
                     if (status === "SUCCESS") return "✓ Завершено";
                     if (status === "FAILURE") return "✗ Ошибка";
+                    if (status === "REVOKED") return "Отменено";
                     if (status === "PENDING") return "Ожидание...";
                     if (status === "STARTED") return j.celeryStatus.result?.status || "В процессе...";
                     if (status === "RETRY") return "Повтор...";
@@ -395,6 +424,15 @@ export default function Dashboard() {
                       </div>
                     </td>
                     <td>{savedCount}</td>
+                    <td>
+                      {j.status !== "completed" && j.celeryStatus?.status !== "REVOKED" ? (
+                        <button className="btn" onClick={() => cancelJob(j.jobId)}>
+                          Остановить
+                        </button>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
                   </tr>
                 );
               })}

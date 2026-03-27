@@ -1,4 +1,4 @@
-# Nickelfront
+﻿# Nickelfront
 
 Платформа для парсинга и анализа научных статей и патентов в области материаловедения (никелевые сплавы, жаропрочные сплавы, суперсплавы).
 
@@ -70,7 +70,7 @@ Nickelfront — это полнофункциональная платформа
 ## 🚀 Быстрый старт
 
 ### Требования
-- **Python** 3.9+ 
+- **Python** 3.9+
 - **Node.js** 18+
 - **PostgreSQL** 16+ (порт 5433)
 - **Redis** (порт 6380)
@@ -79,28 +79,31 @@ Nickelfront — это полнофункциональная платформа
 
 #### Вариант 1: Автоматический запуск (рекомендуется)
 
-```bash
-# Из корня проекта
+```bat
+# Из корня проекта (CMD)
 run_all.bat
 ```
 
 Скрипт автоматически:
-- ✅ Проверит и запустит Redis
-- ✅ Проверит PostgreSQL
+- ✅ Запустит Redis (run_redis.bat)
 - ✅ Запустит Backend (FastAPI, порт 8001)
-- ✅ Запустит Frontend (Vite, порт 5173)
 - ✅ Запустит Celery Worker
+- ✅ Запустит Flower (Celery monitoring)
+- ✅ Запустит Frontend (Vite, порт 5173)
+
+Примечание: PostgreSQL должен быть запущен как сервис (порт 5433).
 
 **После запуска:**
 - Frontend: http://localhost:5173
 - Backend API: http://localhost:8001
 - Swagger UI: http://localhost:8001/docs
+- Flower: http://localhost:5555
 
 #### Вариант 2: Покомпонентный запуск
 
-```bash
-# 1. Запуск Redis (если не запущен)
-start /B c:\Redis\redis-server.exe --port 6380
+```bat
+# 1. Запуск Redis (в отдельном окне)
+run_redis.bat
 
 # 2. Запуск Backend (в отдельном окне)
 run_backend.bat
@@ -108,23 +111,23 @@ run_backend.bat
 # 3. Запуск Celery Worker (в отдельном окне)
 run_worker.bat
 
-# 4. Запуск Frontend (в отдельном окне)
+# 4. Запуск Flower (в отдельном окне)
+run_flower.bat
+
+# 5. Запуск Frontend (в отдельном окне)
 run_frontend.bat
 ```
 
 #### Вариант 3: Ручная установка (первый запуск)
 
-```bash
-# Установка Python зависимостей
+```bat
 python -m venv venv
 venv\Scripts\activate
-pip install -r backend\requirements.txt
+pip install -r requirements.txt
 
-# Установка Frontend зависимостей
 cd frontend
 npm install
 ```
-
 ### Первая регистрация
 
 1. Откройте http://localhost:5173
@@ -308,3 +311,5 @@ MIT License — см. [LICENSE](LICENSE) файл.
 
 **Версия:** 1.0.0
 **Дата:** Март 2026
+
+

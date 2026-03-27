@@ -21,7 +21,7 @@ class TaskOut(BaseModel):
 class CeleryTaskStatus(BaseModel):
     """Статус задачи Celery по task_id."""
     task_id: str
-    status: Literal["PENDING", "STARTED", "RETRY", "FAILURE", "SUCCESS"]
+    status: Literal["PENDING", "STARTED", "RETRY", "FAILURE", "SUCCESS", "REVOKED"]
     state: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
     progress: Optional[Dict[str, Any]] = None

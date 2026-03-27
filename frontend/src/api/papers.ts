@@ -166,7 +166,7 @@ export async function rebuildVectorIndex() {
 
 export type CeleryTaskStatus = {
   task_id: string;
-  status: "PENDING" | "STARTED" | "RETRY" | "FAILURE" | "SUCCESS";
+  status: "PENDING" | "STARTED" | "RETRY" | "FAILURE" | "SUCCESS" | "REVOKED";
   state?: string;
   result?: {
     query?: string;
@@ -197,6 +197,19 @@ export type CeleryTaskStatus = {
 
 export async function getCeleryTaskStatus(taskId: string) {
   const { data } = await apiClient.get<CeleryTaskStatus>(`/tasks/celery/${taskId}/status`);
+  return data;
+}
+
+export async function revokeCeleryTask(taskId: string, terminate: boolean = false) {
+  const { data } = await apiClient.post<{
+    task_id: string;
+    status: string;
+    previous_state?: string;
+    terminate?: boolean;
+    message?: string;
+  }>(`/tasks/celery/${taskId}/revoke`, undefined, {
+    params: { terminate },
+  });
   return data;
 }
 

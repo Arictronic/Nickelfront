@@ -2,6 +2,7 @@ import json
 import secrets
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
 from typing import ClassVar, List, Optional
 
 # Базовая директория проекта (Nickelfront)
@@ -11,7 +12,7 @@ class Settings(BaseSettings):
     """Настройки приложения."""
     
     model_config = SettingsConfigDict(
-        env_file=BASE_DIR / "backend" / ".env",
+        env_file=BASE_DIR / ".env",
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",  # Игнорировать лишние переменные
@@ -34,6 +35,7 @@ class Settings(BaseSettings):
     # API
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8001
+    DEBUG: bool = False
 
     # Security
     SECRET_KEY: Optional[str] = None
@@ -54,12 +56,40 @@ class Settings(BaseSettings):
     FLOWER_PORT: int = 5555
     
     # Celery Beat - периодические задачи
-    CELERY_BEAT_SCHEDULE_FILENAME: str = str(BASE_DIR / "backend" / "celerybeat-schedule")
+    CELERY_BEAT_SCHEDULE_FILENAME: str = str(BASE_DIR / "celerybeat-schedule")
     
     # Парсинг по расписанию (в минутах)
     PARSE_SCHEDULE_INTERVAL: int = 60  # По умолчанию - каждый час
     PARSE_LIMIT_PER_RUN: int = 50  # Лимит статей на один запуск
     PARSE_QUERIES: Optional[str] = None
+
+    # Vector Search
+    CHROMA_DB_PATH: str = "./chroma_db"
+    EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
+    EMBEDDING_DIM: int = 384
+    EMBEDDING_LOCAL_ONLY: bool = False
+    EMBEDDING_CACHE_DIR: Optional[str] = "./models"
+
+    # Logging
+    LOG_LEVEL: str = "INFO"
+    LOG_FILE: str = "./logs/app.log"
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def _parse_debug(cls, value):
+        if value is None:
+            return False
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "y", "on", "debug"}:
+                return True
+            if normalized in {"0", "false", "no", "n", "off", "release", "prod", "production"}:
+                return False
+        return False
 
     def get_cors_origins(self) -> List[str]:
         """Parse CORS_ORIGINS from env (JSON array or CSV) with safe fallback."""
@@ -103,6 +133,15 @@ class Settings(BaseSettings):
         if ":" in host_tail:
             return host
         return f"{host}:{self.FLOWER_PORT}"
+
+    def resolve_path(self, value: str) -> str:
+        """Преобразовать относительный путь в абсолютный от корня проекта."""
+        if not value:
+            return value
+        path = Path(value)
+        if path.is_absolute():
+            return str(path)
+        return str(BASE_DIR / path)
 
 
 settings = Settings()

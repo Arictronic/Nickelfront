@@ -30,12 +30,24 @@ build/
 *.pt
 *.onnx
 checkpoints/
+models/
 
 # Data
 *.csv
 *.parquet
 data/
 !data/.gitkeep
+
+# Vector DB
+chroma_db/
+
+# Redis
+redis/
+*.rdb
+
+# Celery
+celerybeat-schedule
+celerybeat-schedule.db
 
 # Logs
 *.log

@@ -3,6 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.task_service import create_task, get_task_by_id
 from app.db.session import get_db
 from app.tasks.tasks import get_celery_task_status
+from app.tasks.celery_app import celery_app
+from celery.result import AsyncResult
 from shared.schemas.task import TaskCreate, TaskOut, CeleryTaskStatus
 from typing import Optional
 
@@ -65,3 +67,34 @@ async def get_celery_task_status_endpoint(
     )
     
     return response
+
+
+@router.post("/celery/{task_id}/revoke")
+async def revoke_celery_task(
+    task_id: str = Path(..., description="Celery task UUID"),
+    terminate: bool = False,
+):
+    """
+    Отменить задачу Celery по task_id.
+
+    Примечание: на Windows с pool=solo завершение запущенной задачи
+    через terminate может остановить весь воркер, поэтому по умолчанию terminate=False.
+    """
+    result = AsyncResult(task_id, app=celery_app)
+    current_state = result.state
+
+    if current_state in {"SUCCESS", "FAILURE", "REVOKED"}:
+        return {
+            "task_id": task_id,
+            "status": current_state,
+            "message": "Task already finished",
+        }
+
+    celery_app.control.revoke(task_id, terminate=terminate)
+
+    return {
+        "task_id": task_id,
+        "status": "REVOKED",
+        "previous_state": current_state,
+        "terminate": terminate,
+    }
