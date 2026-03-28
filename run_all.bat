@@ -4,15 +4,19 @@ cd /d %~dp0
 
 call "%~dp0run_open_ports.bat"
 
-rem ????????? ??????? ???????:
+rem Запускаются следующие сервисы:
 rem 1) Redis
-rem 2) Backend
-rem 3) Celery Worker
-rem 4) Flower
-rem 5) Frontend
-rem PostgreSQL ?????? ???? ??????? ??? ?????? (???? 5433).
+rem 2) Qwen Service
+rem 3) Backend
+rem 4) Celery Worker
+rem 5) Flower
+rem 6) Frontend
+rem PostgreSQL должен быть запущен отдельно (порт 5433).
 
 start "Redis" cmd /k "%~dp0run_redis.bat"
+timeout /t 2 /nobreak >nul
+
+start "Qwen Service" cmd /k "%~dp0run_qwen_service.bat"
 timeout /t 2 /nobreak >nul
 
 start "Backend" cmd /k "%~dp0run_backend.bat"

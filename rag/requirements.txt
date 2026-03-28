@@ -1,0 +1,33 @@
+# FastAPI и сервер
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+python-multipart==0.0.6
+
+# LangChain и RAG
+langchain==0.1.9
+langchain-community==0.0.24
+langchain-core==0.1.26
+
+# Векторная база данных
+chromadb==0.4.22
+
+# Embeddings (легковесная модель)
+sentence-transformers==2.3.1
+
+# Парсинг PDF
+pdfplumber==0.10.4
+
+# Web-парсинг
+selenium==4.18.1
+webdriver-manager==4.0.1
+
+# Валидация данных
+pydantic==2.6.1
+pydantic-settings==2.1.0
+
+# Утилиты
+python-dotenv==1.0.1
+aiofiles==23.2.1
+
+# Логирование и утилиты
+tenacity==8.2.3
