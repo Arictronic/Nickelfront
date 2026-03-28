@@ -106,7 +106,27 @@ export default function CeleryMonitoring() {
         apiClient.get<{ scheduled_tasks: ScheduledTask[] }>("/monitoring/celery/scheduled-tasks").catch(() => null),
       ]);
 
-      if (statusRes) setStatus(statusRes.data);
+      if (statusRes) {
+        setStatus(statusRes.data);
+      } else {
+        const hasWorkersData = Array.isArray(workersRes?.data?.workers) && workersRes!.data.workers.length > 0;
+        const hasTasksData = Array.isArray(tasksRes?.data?.tasks) && tasksRes!.data.tasks.length > 0;
+        if (hasWorkersData || hasTasksData) {
+          setStatus((prev) => ({
+            status: "online",
+            workers: { total: workersRes?.data?.workers?.length || 0, active: workersRes?.data?.workers?.length || 0 },
+            tasks: {
+              total: tasksRes?.data?.tasks?.length || 0,
+              active: 0,
+              successful: 0,
+              failed: 0,
+            },
+            flower_available: true,
+            flower_url: prev?.flower_url || "http://localhost:5555",
+            generated_at: new Date().toISOString(),
+          }));
+        }
+      }
       if (workersRes) setWorkers(workersRes.data.workers || []);
       if (queuesRes) setQueues(queuesRes.data.queues || []);
       if (tasksRes) setTasks(tasksRes.data.tasks || []);
