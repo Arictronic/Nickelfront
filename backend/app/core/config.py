@@ -73,10 +73,7 @@ class Settings(BaseSettings):
     # Qwen API (Alibaba Cloud)
     QWEN_TOKEN: Optional[str] = None
     QWEN_MODEL: str = "qwen-coder"
-<<<<<<< HEAD
     QWEN_USE_STANDALONE: bool = False
-=======
->>>>>>> 47c919163f05bf5189d034046ca521453d89b24c
     QWEN_THINKING_ENABLED: bool = True
     QWEN_SEARCH_ENABLED: bool = True
     QWEN_AUTO_CONTINUE_ENABLED: bool = True

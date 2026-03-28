@@ -291,7 +291,8 @@ export default function Metrics() {
                   background: `rgba(74, 108, 247, ${0.1 + (idx / topKeywords.length) * 0.4})`,
                   borderRadius: 16,
                   fontSize: 14,
-                  color: "#1e293b",
+                  color: "var(--text)",
+                  border: "1px solid var(--border)",
                 }}
               >
                 {item.name} <strong style={{ marginLeft: 4 }}>{item.count}</strong>
