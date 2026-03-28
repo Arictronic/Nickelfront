@@ -41,6 +41,78 @@ def _safe_dict_values(data):
     return []
 
 
+def _inspect_workers_details_fallback() -> list[dict]:
+    try:
+        inspector = celery_app.control.inspect()
+        ping = inspector.ping() or {}
+        active = inspector.active() or {}
+        stats = inspector.stats() or {}
+
+        workers = []
+        for name in ping.keys():
+            worker_stats = stats.get(name, {}) if isinstance(stats, dict) else {}
+            total_map = (worker_stats.get("total") or {}) if isinstance(worker_stats, dict) else {}
+            processed_tasks = sum(total_map.values()) if isinstance(total_map, dict) else 0
+            workers.append(
+                {
+                    "name": name,
+                    "status": "online",
+                    "active_tasks": len(active.get(name, []) or []),
+                    "processed_tasks": processed_tasks,
+                    "queues": ["celery"],
+                    "pool": worker_stats.get("pool", {}) if isinstance(worker_stats, dict) else {},
+                    "timestamp": None,
+                }
+            )
+        return workers
+    except Exception:
+        return []
+
+
+def _inspect_tasks_details_fallback(limit: int = 100, state: Optional[str] = None) -> list[dict]:
+    try:
+        inspector = celery_app.control.inspect()
+        active = inspector.active() or {}
+        reserved = inspector.reserved() or {}
+        scheduled = inspector.scheduled() or {}
+
+        tasks: list[dict] = []
+
+        def _append(entries, default_state: str, worker_name: str):
+            for item in entries or []:
+                task_id = item.get("id") or item.get("request", {}).get("id") or "unknown"
+                task_name = item.get("name") or item.get("request", {}).get("name") or "unknown"
+                task_state = str(item.get("state") or default_state).upper()
+                if state and task_state != state.upper():
+                    continue
+                tasks.append(
+                    {
+                        "task_id": task_id,
+                        "name": task_name,
+                        "state": task_state,
+                        "args": str(item.get("args") or item.get("request", {}).get("args") or ""),
+                        "kwargs": item.get("kwargs") or item.get("request", {}).get("kwargs") or {},
+                        "started": item.get("time_start"),
+                        "received": item.get("time_start"),
+                        "succeeded": None,
+                        "failed": None,
+                        "retries": item.get("retries", 0),
+                        "worker": {"hostname": worker_name},
+                    }
+                )
+
+        for worker_name, entries in active.items():
+            _append(entries, "STARTED", worker_name)
+        for worker_name, entries in reserved.items():
+            _append(entries, "PENDING", worker_name)
+        for worker_name, entries in scheduled.items():
+            _append(entries, "PENDING", worker_name)
+
+        return tasks[:limit]
+    except Exception:
+        return []
+
+
 @router.get("/celery/status")
 async def get_celery_status():
     """
@@ -175,10 +247,7 @@ async def get_workers_info():
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(f"{FLOWER_HOST}/api/workers")
             
-            if response.status_code != 200:
-                raise HTTPException(status_code=503, detail="Flower API недоступна")
-            
-            workers_data = response.json()
+            workers_data = response.json() if response.status_code == 200 else {}
             
             # Форматируем ответ
             workers = []
@@ -192,6 +261,9 @@ async def get_workers_info():
                     "pool": info.get("pool", {}),
                     "timestamp": info.get("timestamp"),
                 })
+
+            if len(workers) == 0:
+                workers = _inspect_workers_details_fallback()
             
             return {
                 "workers": workers,
@@ -199,11 +271,21 @@ async def get_workers_info():
                 "generated_at": datetime.now().isoformat(),
             }
             
-    except HTTPException:
-        raise
     except httpx.RequestError:
-        raise HTTPException(status_code=503, detail="Flower API недоступна")
+        workers = _inspect_workers_details_fallback()
+        return {
+            "workers": workers,
+            "total": len(workers),
+            "generated_at": datetime.now().isoformat(),
+        }
     except Exception as e:
+        workers = _inspect_workers_details_fallback()
+        if workers:
+            return {
+                "workers": workers,
+                "total": len(workers),
+                "generated_at": datetime.now().isoformat(),
+            }
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -230,10 +312,7 @@ async def get_tasks_info(
             
             response = await client.get(f"{FLOWER_HOST}/api/tasks", params=params)
             
-            if response.status_code != 200:
-                raise HTTPException(status_code=503, detail="Flower API недоступна")
-            
-            tasks_data = response.json()
+            tasks_data = response.json() if response.status_code == 200 else {}
             
             # Форматируем ответ
             tasks = []
@@ -254,6 +333,9 @@ async def get_tasks_info(
             
             # Сортируем по времени получения
             tasks.sort(key=lambda t: t.get("received", ""), reverse=True)
+
+            if len(tasks) == 0:
+                tasks = _inspect_tasks_details_fallback(limit=limit, state=state)
             
             return {
                 "tasks": tasks[:limit],
@@ -262,11 +344,23 @@ async def get_tasks_info(
                 "generated_at": datetime.now().isoformat(),
             }
             
-    except HTTPException:
-        raise
     except httpx.RequestError:
-        raise HTTPException(status_code=503, detail="Flower API недоступна")
+        tasks = _inspect_tasks_details_fallback(limit=limit, state=state)
+        return {
+            "tasks": tasks[:limit],
+            "total": len(tasks),
+            "limit": limit,
+            "generated_at": datetime.now().isoformat(),
+        }
     except Exception as e:
+        tasks = _inspect_tasks_details_fallback(limit=limit, state=state)
+        if tasks:
+            return {
+                "tasks": tasks[:limit],
+                "total": len(tasks),
+                "limit": limit,
+                "generated_at": datetime.now().isoformat(),
+            }
         raise HTTPException(status_code=500, detail=str(e))
 
 

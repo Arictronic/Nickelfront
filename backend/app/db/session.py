@@ -7,6 +7,12 @@ engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
     pool_pre_ping=True,
+    pool_recycle=1800,
+    pool_timeout=30,
+    connect_args={
+        # Fail fast on broken local TCP/DB state instead of long hangs.
+        "timeout": 10,
+    },
 )
 
 async_session_maker = async_sessionmaker(

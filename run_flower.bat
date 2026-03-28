@@ -12,5 +12,9 @@ if exist ".env" (
 )
 
 cd backend
-celery -A app.tasks.celery_app flower --port=5555
+set "FLOWER_API_FLAG="
+if /I "%FLOWER_UNAUTHENTICATED_API%"=="true" set "FLOWER_API_FLAG=--unauthenticated_api=true"
+if /I "%FLOWER_UNAUTHENTICATED_API%"=="1" set "FLOWER_API_FLAG=--unauthenticated_api=true"
+
+celery -A app.tasks.celery_app flower --port=5555 %FLOWER_API_FLAG%
 endlocal
