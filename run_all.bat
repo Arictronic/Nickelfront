@@ -22,7 +22,7 @@ start "Worker" cmd /k "%~dp0run_worker.bat"
 timeout /t 3 /nobreak >nul
 
 start "Flower" cmd /k "%~dp0run_flower.bat"
-timeout /t 2 /nobreak >nul
+timeout /t 10 /nobreak >nul
 
 start "Frontend" cmd /k "%~dp0run_frontend.bat"
 

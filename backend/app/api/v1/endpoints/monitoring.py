@@ -35,6 +35,12 @@ def _inspect_active_tasks_fallback() -> int:
         return 0
 
 
+def _safe_dict_values(data):
+    if isinstance(data, dict):
+        return data.values()
+    return []
+
+
 @router.get("/celery/status")
 async def get_celery_status():
     """
@@ -90,25 +96,33 @@ async def get_celery_status():
         if workers_count == 0:
             workers_count = len(_inspect_workers_fallback())
         active_workers = sum(
-            1 for w in (workers_data.values() if isinstance(workers_data, dict) else [])
-            if w.get("active", 0) > 0 or w.get("status", "").lower() == "online"
+            1
+            for w in _safe_dict_values(workers_data)
+            if isinstance(w, dict)
+            and (
+                w.get("active", 0) > 0
+                or str(w.get("status", "")).lower() == "online"
+            )
         )
         
         # Статистика задач
         total_tasks = len(tasks_data) if isinstance(tasks_data, dict) else 0
         active_tasks = sum(
-            1 for t in (tasks_data.values() if isinstance(tasks_data, dict) else [])
-            if t.get("state", "").lower() == "started"
+            1
+            for t in _safe_dict_values(tasks_data)
+            if isinstance(t, dict) and str(t.get("state", "")).lower() == "started"
         )
         if active_tasks == 0:
             active_tasks = _inspect_active_tasks_fallback()
         successful_tasks = sum(
-            1 for t in (tasks_data.values() if isinstance(tasks_data, dict) else [])
-            if t.get("state", "").lower() == "success"
+            1
+            for t in _safe_dict_values(tasks_data)
+            if isinstance(t, dict) and str(t.get("state", "")).lower() == "success"
         )
         failed_tasks = sum(
-            1 for t in (tasks_data.values() if isinstance(tasks_data, dict) else [])
-            if t.get("state", "").lower() == "failure"
+            1
+            for t in _safe_dict_values(tasks_data)
+            if isinstance(t, dict) and str(t.get("state", "")).lower() == "failure"
         )
         
         return {
@@ -131,7 +145,7 @@ async def get_celery_status():
     except Exception as e:
         # Если Flower недоступен, возвращаем базовый статус
         return {
-            "status": "unknown",
+            "status": "offline",
             "workers": {
                 "total": 0,
                 "active": 0,
@@ -185,6 +199,8 @@ async def get_workers_info():
                 "generated_at": datetime.now().isoformat(),
             }
             
+    except HTTPException:
+        raise
     except httpx.RequestError:
         raise HTTPException(status_code=503, detail="Flower API недоступна")
     except Exception as e:
@@ -246,6 +262,8 @@ async def get_tasks_info(
                 "generated_at": datetime.now().isoformat(),
             }
             
+    except HTTPException:
+        raise
     except httpx.RequestError:
         raise HTTPException(status_code=503, detail="Flower API недоступна")
     except Exception as e:

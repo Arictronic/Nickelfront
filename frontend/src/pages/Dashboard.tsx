@@ -98,8 +98,8 @@ export default function Dashboard() {
           currentJobs.map(async (job) => {
             // Не обновляем завершённые или отменённые задачи
             if (job.status !== "in_progress") return job;
-            // Если уже отменено, не обновляем статус из API
-            if (job.celeryStatus?.status === "REVOKED" || job.status === "cancelled") return job;
+            // Если уже отменено в Celery, не обновляем статус из API
+            if (job.celeryStatus?.status === "REVOKED") return job;
 
             try {
               const celeryStatus = await getCeleryTaskStatus(job.jobId);
@@ -182,8 +182,8 @@ export default function Dashboard() {
         status: "in_progress",
       };
 
-      setJobs((prev) => {
-        const nextJobs = [job, ...prev].slice(0, 30);
+      setJobs((prev: ParseJob[]): ParseJob[] => {
+        const nextJobs: ParseJob[] = [job, ...prev].slice(0, 30);
         saveJobs(nextJobs);
         return nextJobs;
       });
@@ -209,8 +209,8 @@ export default function Dashboard() {
         status: "in_progress",
       };
 
-      setJobs((prev) => {
-        const nextJobs = [job, ...prev].slice(0, 30);
+      setJobs((prev: ParseJob[]): ParseJob[] => {
+        const nextJobs: ParseJob[] = [job, ...prev].slice(0, 30);
         saveJobs(nextJobs);
         return nextJobs;
       });
@@ -226,20 +226,19 @@ export default function Dashboard() {
 
     try {
       await revokeCeleryTask(jobId, false);
-      setJobs((prev) => {
-        const nextJobs = prev.map((job) =>
-          job.jobId === jobId
-            ? {
-                ...job,
-                status: "cancelled",
-                celeryStatus: {
-                  ...(job.celeryStatus || {}),
-                  status: "REVOKED",
-                  state: "REVOKED",
-                },
-              }
-            : job
-        );
+      setJobs((prev: ParseJob[]): ParseJob[] => {
+        const nextJobs: ParseJob[] = prev.map((job): ParseJob => {
+          if (job.jobId !== jobId) return job;
+          return {
+            ...job,
+            status: "cancelled",
+            celeryStatus: {
+              ...(job.celeryStatus || {}),
+              status: "REVOKED",
+              state: "REVOKED",
+            },
+          };
+        });
         saveJobs(nextJobs);
         return nextJobs;
       });
@@ -256,8 +255,8 @@ export default function Dashboard() {
     try {
       // Вызываем API для удаления флага отмены (опционально)
       await deleteCeleryTask(jobId);
-      setJobs((prev) => {
-        const nextJobs = prev.filter((job) => job.jobId !== jobId);
+      setJobs((prev: ParseJob[]): ParseJob[] => {
+        const nextJobs: ParseJob[] = prev.filter((job) => job.jobId !== jobId);
         saveJobs(nextJobs);
         return nextJobs;
       });
