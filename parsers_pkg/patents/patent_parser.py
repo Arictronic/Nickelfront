@@ -7,10 +7,10 @@
 """
 
 import asyncio
-from typing import Any, Optional, List
-from dataclasses import dataclass
 import logging
 import re
+from dataclasses import dataclass
+from typing import Any
 
 import httpx
 from bs4 import BeautifulSoup
@@ -30,24 +30,24 @@ class PatentConfig:
 
 class PatentParser(BaseParser):
     """Парсер для патентов."""
-    
+
     # Google Patents API (через web scraping)
     GOOGLE_PATENTS_URL = "https://patents.google.com"
-    
+
     # Espacenet API
     ESPACENET_URL = "https://worldwide.espacenet.com"
-    
-    def __init__(self, config: Optional[PatentConfig] = None):
+
+    def __init__(self, config: PatentConfig | None = None):
         """
         Инициализация парсера.
-        
+
         Args:
             config: Конфигурация парсера
         """
         super().__init__(source="Patents")
         self.config = config or PatentConfig()
-        self._client: Optional[httpx.AsyncClient] = None
-    
+        self._client: httpx.AsyncClient | None = None
+
     async def _get_client(self) -> httpx.AsyncClient:
         """Получить HTTP клиент."""
         if self._client is None or self._client.is_closed:
@@ -60,27 +60,27 @@ class PatentParser(BaseParser):
                 follow_redirects=True,
             )
         return self._client
-    
+
     async def close(self):
         """Закрыть соединение."""
         if self._client and not self._client.is_closed:
             await self._client.aclose()
             self._client = None
-    
+
     async def search(
         self,
         query: str,
         limit: int = 20,
         source: str = "google",  # google или espacenet
-    ) -> List[dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Поиск патентов.
-        
+
         Args:
             query: Поисковый запрос
             limit: Максимум результатов
             source: Источник (google или espacenet)
-            
+
         Returns:
             Список словарей с результатами
         """
@@ -88,79 +88,79 @@ class PatentParser(BaseParser):
             return await self._search_google(query, limit)
         else:
             return await self._search_espacenet(query, limit)
-    
-    async def _search_google(self, query: str, limit: int) -> List[dict[str, Any]]:
+
+    async def _search_google(self, query: str, limit: int) -> list[dict[str, Any]]:
         """Поиск на Google Patents."""
         client = await self._get_client()
         results = []
-        
+
         try:
             # Google Patents search URL
             search_url = f"{self.GOOGLE_PATENTS_URL}/?q={query.replace(' ', '%20')}"
-            
+
             logger.info(f"Searching Google Patents: {query}")
             response = await client.get(search_url)
-            
+
             if response.status_code != 200:
                 logger.warning(f"Got status {response.status_code}")
                 return results
-            
+
             soup = BeautifulSoup(response.text, 'html.parser')
-            
+
             # Найти элементы патентов
             patent_elements = soup.select("patent-search-result")
-            
+
             for elem in patent_elements[:limit]:
                 patent_data = await self._parse_google_patent(elem)
                 if patent_data:
                     results.append(patent_data)
-            
+
             logger.info(f"Found {len(results)} patents on Google Patents")
-            
+
         except Exception as e:
             logger.error(f"Google Patents search failed: {e}")
-        
+
         return results
-    
-    async def _search_espacenet(self, query: str, limit: int) -> List[dict[str, Any]]:
+
+    async def _search_espacenet(self, query: str, limit: int) -> list[dict[str, Any]]:
         """Поиск на Espacenet."""
         client = await self._get_client()
         results = []
-        
+
         try:
             # Espacenet search URL
             search_url = f"{self.ESPACENET_URL}/patentsearch/family.json?q={query.replace(' ', '%20')}"
-            
+
             logger.info(f"Searching Espacenet: {query}")
             response = await client.get(search_url)
-            
+
             if response.status_code != 200:
                 logger.warning(f"Got status {response.status_code}")
                 return results
-            
+
             data = response.json()
-            
+
             # Распарсить JSON ответ
             if "results" in data:
                 for item in data["results"][:limit]:
                     patent_data = self._parse_espacenet_patent(item)
                     if patent_data:
                         results.append(patent_data)
-            
+
             logger.info(f"Found {len(results)} patents on Espacenet")
-            
+
         except Exception as e:
             logger.error(f"Espacenet search failed: {e}")
-        
+
         return results
-    
-    async def _parse_google_patent(self, element) -> Optional[dict[str, Any]]:
+
+    async def _parse_google_patent(self, element) -> dict[str, Any] | None:
         """
         Распарсить патент с Google Patents.
-        
+
         Args:
             element: BeautifulSoup элемент
-            
+
         Returns:
             Словарь с данными патента
         """
@@ -168,70 +168,70 @@ class PatentParser(BaseParser):
             data = {
                 "source": "Google Patents",
             }
-            
+
             # Номер патента
             number_elem = element.select_one(".patent-number")
             if number_elem:
                 data["patent_number"] = number_elem.get_text(strip=True)
                 data["source_id"] = data["patent_number"]
-            
+
             # Заголовок
             title_elem = element.select_one(".patent-title")
             if title_elem:
                 data["title"] = title_elem.get_text(strip=True)
-            
+
             # Заявители
             applicants_elem = element.select_one(".applicant")
             if applicants_elem:
                 data["applicants"] = [
-                    a.get_text(strip=True) 
+                    a.get_text(strip=True)
                     for a in applicants_elem.select("a")
                 ]
-            
+
             # Изобретатели
             inventors_elem = element.select_one(".inventor")
             if inventors_elem:
                 data["inventors"] = [
-                    i.get_text(strip=True) 
+                    i.get_text(strip=True)
                     for i in inventors_elem.select("a")
                 ]
-            
+
             # Дата публикации
             date_elem = element.select_one(".publication-date")
             if date_elem:
                 data["publication_date"] = date_elem.get_text(strip=True)
-            
+
             # IPC классы
             ipc_elem = element.select_one(".ipc-class")
             if ipc_elem:
                 data["ipc_classes"] = [
-                    ipc.get_text(strip=True) 
+                    ipc.get_text(strip=True)
                     for ipc in ipc_elem.select("a")
                 ]
-            
+
             # URL
             link_elem = element.select_one("a[href^='/patent/']")
             if link_elem:
                 data["url"] = f"{self.GOOGLE_PATENTS_URL}{link_elem.get('href')}"
-            
+
             # Аннотация
             abstract_elem = element.select_one(".abstract")
             if abstract_elem:
                 data["abstract"] = abstract_elem.get_text(strip=True)
-            
+
             return data
-            
+
         except Exception as e:
             logger.error(f"Error parsing Google patent: {e}")
             return None
-    
-    def _parse_espacenet_patent(self, item: dict) -> Optional[dict[str, Any]]:
+
+    def _parse_espacenet_patent(self, item: dict) -> dict[str, Any] | None:
         """
         Распарсить патент с Espacenet.
-        
+
         Args:
             item: JSON объект патента
-            
+
         Returns:
             Словарь с данными патента
         """
@@ -244,39 +244,39 @@ class PatentParser(BaseParser):
                 "publication_date": item.get("publicationDate", ""),
                 "url": f"{self.ESPACENET_URL}/patentsearch/family/{item.get('docNumber')}",
             }
-            
+
             # Заявители
             if "applicant" in item:
                 data["applicants"] = [item["applicant"]] if isinstance(item["applicant"], str) else item["applicant"]
-            
+
             # Изобретатели
             if "inventor" in item:
                 data["inventors"] = [item["inventor"]] if isinstance(item["inventor"], str) else item["inventor"]
-            
+
             # IPC классы
             if "classification" in item:
                 data["ipc_classes"] = [item["classification"]] if isinstance(item["classification"], str) else item["classification"]
-            
+
             return data
-            
+
         except Exception as e:
             logger.error(f"Error parsing Espacenet patent: {e}")
             return None
-    
-    async def parse_search_results(self, data: List[dict[str, Any]]) -> List[Paper]:
+
+    async def parse_search_results(self, data: list[dict[str, Any]]) -> list[Paper]:
         """
         Распарсить результаты поиска в список Paper.
-        
+
         Для патентов используем адаптированную модель Paper.
-        
+
         Args:
             data: Список словарей с результатами
-            
+
         Returns:
             Список Paper
         """
         papers = []
-        
+
         for item in data:
             # Адаптировать патент к модели Paper
             paper = Paper(
@@ -291,59 +291,59 @@ class PatentParser(BaseParser):
                 url=item.get("url"),
                 keywords=item.get("ipc_classes", []),  # IPC классы как keywords
             )
-            
+
             # Нормализовать
             paper = self.normalize_paper(paper)
-            
+
             # Валидировать
             is_valid, errors = self.validate_paper(paper)
             if is_valid:
                 papers.append(paper)
             else:
                 logger.warning(f"Invalid patent: {errors}")
-        
+
         return papers
-    
-    async def parse_full_text(self, url: str, metadata: dict[str, Any]) -> Optional[Paper]:
+
+    async def parse_full_text(self, url: str, metadata: dict[str, Any]) -> Paper | None:
         """
         Распарсить полный текст патента.
-        
+
         Args:
             url: URL патента
             metadata: Метаданные патента
-            
+
         Returns:
             Paper с полным текстом
         """
         client = await self._get_client()
-        
+
         try:
             response = await client.get(url)
-            
+
             if response.status_code != 200:
                 logger.warning(f"Got status {response.status_code}")
                 return None
-            
+
             soup = BeautifulSoup(response.text, 'html.parser')
-            
+
             # Полный текст патента
             full_text = ""
-            
+
             # Описание
             description_elem = soup.select_one(".description")
             if description_elem:
                 full_text = description_elem.get_text(strip=True)
-            
+
             #Claims (формула изобретения)
             claims_elem = soup.select_one(".claims")
             if claims_elem:
                 metadata["claims"] = claims_elem.get_text(strip=True)
-            
+
             # Обновить метаданные
             abstract_elem = soup.select_one(".abstract")
             if abstract_elem:
                 metadata["abstract"] = abstract_elem.get_text(strip=True)
-            
+
             paper = Paper(
                 title=metadata.get("title", ""),
                 authors=metadata.get("inventors", []) or metadata.get("applicants", []),
@@ -356,39 +356,39 @@ class PatentParser(BaseParser):
                 source=metadata.get("source", self.source),
                 url=url,
             )
-            
+
             return self.normalize_paper(paper)
-            
+
         except Exception as e:
             logger.error(f"Error parsing patent full text: {e}")
             return None
-    
-    async def extract_keywords(self, paper: Paper) -> List[str]:
+
+    async def extract_keywords(self, paper: Paper) -> list[str]:
         """
         Извлечь ключевые слова из патента.
-        
+
         Для патентов используем IPC классы.
-        
+
         Args:
             paper: Патент
-            
+
         Returns:
             Список ключевых слов
         """
         if paper.keywords:
             return paper.keywords
-        
+
         # Извлечь IPC классы из текста
         keywords = []
-        
+
         if paper.abstract or paper.full_text:
             text = (paper.abstract or "") + " " + (paper.full_text or "")
-            
+
             # Найти IPC классы (формат: A61K31/00)
             ipc_pattern = r'\b[A-H]\d{2}[A-Z]\d{1,4}/\d{2,4}\b'
             matches = re.findall(ipc_pattern, text, re.IGNORECASE)
             keywords.extend(matches[:10])
-        
+
         return keywords
 
 
@@ -396,20 +396,20 @@ async def parse_patents(
     query: str,
     limit: int = 20,
     source: str = "google",
-) -> List[Paper]:
+) -> list[Paper]:
     """
     Быстрый парсинг патентов.
-    
+
     Args:
         query: Поисковый запрос
         limit: Максимум результатов
         source: Источник (google или espacenet)
-        
+
     Returns:
         Список Paper
     """
     parser = PatentParser()
-    
+
     try:
         results = await parser.search(query, limit, source)
         papers = await parser.parse_search_results(results)
@@ -421,12 +421,12 @@ async def parse_patents(
 if __name__ == "__main__":
     # Пример использования
     import asyncio
-    
+
     async def main():
         papers = await parse_patents("nickel alloy", limit=5, source="google")
         print(f"Found {len(papers)} patents")
-        
+
         for paper in papers:
             print(f"- {paper.title} ({paper.doi})")
-    
+
     asyncio.run(main())

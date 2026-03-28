@@ -1,6 +1,7 @@
 """API endpoints for auth."""
 
 from datetime import timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession

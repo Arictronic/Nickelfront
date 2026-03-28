@@ -1,8 +1,8 @@
 """Схемы данных для научных статей."""
 
-from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Optional, List
+
+from pydantic import BaseModel, Field
 
 
 class PaperBase(BaseModel):
@@ -10,15 +10,23 @@ class PaperBase(BaseModel):
 
     title: str = Field(..., description="Название статьи")
     authors: list[str] = Field(default_factory=list, description="Список авторов")
-    publication_date: Optional[datetime] = Field(None, description="Дата публикации")
-    journal: Optional[str] = Field(None, description="Название журнала/источника")
-    doi: Optional[str] = Field(None, description="DOI статьи")
-    abstract: Optional[str] = Field(None, description="Аннотация")
-    full_text: Optional[str] = Field(None, description="Полный текст статьи")
+    publication_date: datetime | None = Field(None, description="Дата публикации")
+    journal: str | None = Field(None, description="Название журнала/источника")
+    doi: str | None = Field(None, description="DOI статьи")
+    abstract: str | None = Field(None, description="Аннотация")
+    full_text: str | None = Field(None, description="Полный текст статьи")
     keywords: list[str] = Field(default_factory=list, description="Ключевые слова")
     source: str = Field(..., description="Источник (CORE, arXiv, etc.)")
-    source_id: Optional[str] = Field(None, description="ID в источнике")
-    url: Optional[str] = Field(None, description="URL статьи")
+    source_id: str | None = Field(None, description="ID в источнике")
+    url: str | None = Field(None, description="URL статьи")
+    pdf_url: str | None = Field(None, description="URL PDF")
+    pdf_local_path: str | None = Field(None, description="Локальный путь к PDF")
+    processing_status: str = Field(default="pending", description="Статус обработки")
+    content_task_id: str | None = Field(None, description="ID Celery задачи обработки контента")
+    processing_error: str | None = Field(None, description="Текст ошибки обработки")
+    summary_ru: str | None = Field(None, description="Краткая суть статьи на русском")
+    analysis_ru: str | None = Field(None, description="Анализ статьи на русском")
+    translation_ru: str | None = Field(None, description="Перевод статьи на русский")
 
 
 class PaperCreate(PaperBase):
@@ -30,9 +38,9 @@ class PaperCreate(PaperBase):
 class Paper(PaperBase):
     """Схема статьи."""
 
-    id: Optional[int] = Field(None, description="ID в БД")
-    created_at: Optional[datetime] = Field(None, description="Дата добавления в БД")
-    updated_at: Optional[datetime] = Field(None, description="Дата обновления")
+    id: int | None = Field(None, description="ID в БД")
+    created_at: datetime | None = Field(None, description="Дата добавления в БД")
+    updated_at: datetime | None = Field(None, description="Дата обновления")
 
     class Config:
         from_attributes = True
@@ -64,9 +72,9 @@ class VectorSearchRequest(BaseModel):
 
     query: str = Field(..., description="Поисковый запрос")
     limit: int = Field(default=10, ge=1, le=100, description="Макс. количество результатов")
-    source: Optional[str] = Field(None, description="Фильтр по источнику (CORE, arXiv)")
-    date_from: Optional[str] = Field(None, description="Дата от (YYYY-MM-DD)")
-    date_to: Optional[str] = Field(None, description="Дата до (YYYY-MM-DD)")
+    source: str | None = Field(None, description="Фильтр по источнику (CORE, arXiv)")
+    date_from: str | None = Field(None, description="Дата от (YYYY-MM-DD)")
+    date_to: str | None = Field(None, description="Дата до (YYYY-MM-DD)")
     search_type: str = Field(default="vector", description="Тип поиска: vector, semantic, hybrid")
 
 
@@ -99,8 +107,8 @@ class VectorStatsResponse(BaseModel):
     """Ответ со статистикой векторного поиска."""
 
     vector_store: VectorStats
-    embedding_model: Optional[str] = Field(None, description="Модель эмбеддингов")
-    embedding_dim: Optional[int] = Field(None, description="Размерность эмбеддингов")
+    embedding_model: str | None = Field(None, description="Модель эмбеддингов")
+    embedding_dim: int | None = Field(None, description="Размерность эмбеддингов")
     embedding_available: bool = Field(..., description="Доступность эмбеддингов")
 
 
@@ -141,10 +149,10 @@ class QwenMessageRequest(BaseModel):
     """Запрос на отправку сообщения Qwen."""
 
     message: str = Field(..., min_length=1, max_length=50000, description="Текст сообщения")
-    session_id: Optional[str] = Field(None, description="ID сессии (создастся новая если не указан)")
+    session_id: str | None = Field(None, description="ID сессии (создастся новая если не указан)")
     thinking_enabled: bool = Field(default=True, description="Режим мышления")
     search_enabled: bool = Field(default=False, description="Поиск в интернете")
-    file_ids: List[str] = Field(default_factory=list, description="ID файлов для ссылки")
+    file_ids: list[str] = Field(default_factory=list, description="ID файлов для ссылки")
     auto_continue: bool = Field(default=True, description="Авто-продолжение ответов")
 
 
@@ -161,13 +169,13 @@ class QwenMessageResponse(BaseModel):
     continue_count: int = Field(default=0, description="Количество продолжений")
     can_continue: bool = Field(default=False, description="Можно ли продолжить")
     auto_continue_performed: bool = Field(default=False, description="Авто-продолжение выполнено")
-    error: Optional[str] = Field(None, description="Текст ошибки")
+    error: str | None = Field(None, description="Текст ошибки")
 
 
 class QwenSessionCreateRequest(BaseModel):
     """Запрос на создание сессии."""
 
-    title: Optional[str] = Field(default="Новый чат", description="Заголовок сессии")
+    title: str | None = Field(default="Новый чат", description="Заголовок сессии")
 
 
 class QwenSessionCreateResponse(BaseModel):
@@ -182,13 +190,13 @@ class QwenSessionInfo(BaseModel):
 
     session_id: str = Field(..., description="ID сессии")
     title: str = Field(..., description="Заголовок")
-    created_at: Optional[str] = Field(None, description="Дата создания")
+    created_at: str | None = Field(None, description="Дата создания")
 
 
 class QwenSessionListResponse(BaseModel):
     """Список сессий."""
 
-    sessions: List[QwenSessionInfo] = Field(default_factory=list, description="Список сессий")
+    sessions: list[QwenSessionInfo] = Field(default_factory=list, description="Список сессий")
 
 
 class QwenRenameRequest(BaseModel):
@@ -220,17 +228,17 @@ class QwenConfigResponse(BaseModel):
     auto_continue_enabled: bool = Field(..., description="Авто-продолжение")
     max_continues: int = Field(..., description="Макс. продолжений")
     is_available: bool = Field(..., description="Сервис доступен")
-    base_url: Optional[str] = Field(None, description="URL сервиса")
+    base_url: str | None = Field(None, description="URL сервиса")
 
 
 class QwenConfigUpdateRequest(BaseModel):
     """Запрос на обновление конфигурации."""
 
-    model: Optional[str] = Field(None, description="Модель")
-    thinking_enabled: Optional[bool] = Field(None, description="Режим мышления")
-    search_enabled: Optional[bool] = Field(None, description="Поиск")
-    auto_continue_enabled: Optional[bool] = Field(None, description="Авто-продолжение")
-    max_continues: Optional[int] = Field(None, ge=1, le=20, description="Макс. продолжений")
+    model: str | None = Field(None, description="Модель")
+    thinking_enabled: bool | None = Field(None, description="Режим мышления")
+    search_enabled: bool | None = Field(None, description="Поиск")
+    auto_continue_enabled: bool | None = Field(None, description="Авто-продолжение")
+    max_continues: int | None = Field(None, ge=1, le=20, description="Макс. продолжений")
 
 
 class QwenHealthResponse(BaseModel):

@@ -6,7 +6,7 @@ Qwen Service Client - Клиент для standalone Qwen Service.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
@@ -34,8 +34,8 @@ class QwenServiceClient:
 
     def __init__(
         self,
-        base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
         timeout: float = 120.0,
     ):
         """
@@ -52,7 +52,7 @@ class QwenServiceClient:
         )
         self.api_key = api_key or settings.QWEN_API_KEY
         self.timeout = timeout
-        self._session_id: Optional[str] = None
+        self._session_id: str | None = None
 
         logger.info(
             f"Инициализация QwenServiceClient: url={self.base_url}, "
@@ -60,7 +60,7 @@ class QwenServiceClient:
         )
 
     @property
-    def headers(self) -> Dict[str, str]:
+    def headers(self) -> dict[str, str]:
         """Заголовки для авторизации."""
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -68,7 +68,7 @@ class QwenServiceClient:
         return headers
 
     @property
-    def session_id(self) -> Optional[str]:
+    def session_id(self) -> str | None:
         """Текущий ID сессии."""
         return self._session_id
 
@@ -81,9 +81,9 @@ class QwenServiceClient:
         self,
         method: str,
         endpoint: str,
-        json_data: Optional[Dict[str, Any]] = None,
-        timeout: Optional[float] = None,
-    ) -> Optional[Dict[str, Any]]:
+        json_data: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any] | None:
         """
         Внутренний метод для HTTP запросов.
 
@@ -100,7 +100,7 @@ class QwenServiceClient:
         request_timeout = timeout or self.timeout
 
         try:
-            with httpx.Client(timeout=request_timeout) as client:
+            with httpx.Client(timeout=request_timeout, trust_env=False) as client:
                 response = client.request(
                     method,
                     url,
@@ -120,7 +120,7 @@ class QwenServiceClient:
             logger.error(f"Ошибка запроса к {endpoint}: {e}")
             return None
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         """
         Проверка здоровья сервиса.
 
@@ -130,7 +130,7 @@ class QwenServiceClient:
         result = self._request("GET", "/health")
         return result or {"status": "error", "available": False}
 
-    def get_config(self) -> Dict[str, Any]:
+    def get_config(self) -> dict[str, Any]:
         """
         Получить конфигурацию сервиса.
 
@@ -142,12 +142,12 @@ class QwenServiceClient:
 
     def update_config(
         self,
-        model: Optional[str] = None,
-        thinking_enabled: Optional[bool] = None,
-        search_enabled: Optional[bool] = None,
-        auto_continue_enabled: Optional[bool] = None,
-        max_continues: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        model: str | None = None,
+        thinking_enabled: bool | None = None,
+        search_enabled: bool | None = None,
+        auto_continue_enabled: bool | None = None,
+        max_continues: int | None = None,
+    ) -> dict[str, Any]:
         """
         Обновить конфигурацию сервиса.
 
@@ -176,7 +176,7 @@ class QwenServiceClient:
         result = self._request("POST", "/config", json_data=json_data)
         return result or {}
 
-    def create_session(self, title: Optional[str] = None) -> Optional[str]:
+    def create_session(self, title: str | None = None) -> str | None:
         """
         Создать новую сессию.
 
@@ -197,7 +197,7 @@ class QwenServiceClient:
             return self._session_id
         return None
 
-    def list_sessions(self) -> List[Dict[str, Any]]:
+    def list_sessions(self) -> list[dict[str, Any]]:
         """
         Получить список сессий.
 
@@ -207,7 +207,7 @@ class QwenServiceClient:
         result = self._request("GET", "/sessions")
         return result.get("sessions", []) if result else []
 
-    def get_session_info(self, session_id: str) -> Optional[Dict[str, Any]]:
+    def get_session_info(self, session_id: str) -> dict[str, Any] | None:
         """
         Получить информацию о сессии.
 
@@ -262,13 +262,13 @@ class QwenServiceClient:
     def send_message(
         self,
         message: str,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
         thinking_enabled: bool = True,
         search_enabled: bool = False,
-        file_ids: Optional[List[str]] = None,
-        auto_continue: Optional[bool] = None,
+        file_ids: list[str] | None = None,
+        auto_continue: bool | None = None,
         timeout: float = 120.0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Отправить сообщение и получить ответ.
 
@@ -339,7 +339,7 @@ class QwenServiceClient:
         message_id: int,
         thinking_enabled: bool = True,
         timeout: float = 120.0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Продолжить ответ.
 
@@ -383,7 +383,7 @@ class QwenServiceClient:
 
 
 # Глобальный экземпляр
-_qwen_client: Optional[QwenServiceClient] = None
+_qwen_client: QwenServiceClient | None = None
 
 
 def get_qwen_client() -> QwenServiceClient:

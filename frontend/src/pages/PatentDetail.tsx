@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { deletePaper, getPaperById } from "../api/papers";
+import { deletePaper, getPaperById, getPaperPdfUrl, reprocessPaperContent } from "../api/papers";
 import type { Paper } from "../types/paper";
 
 type Tab = "description" | "textParts" | "report";
@@ -59,10 +59,7 @@ export default function PatentDetail() {
   const [tokensPerPart, setTokensPerPart] = useState(350);
   const [activePartIndex, setActivePartIndex] = useState(0);
 
-  const [prompt, setPrompt] = useState("Извлеки метрики металлов: составы/температуры/свойства и связанные условия.");
-  const [reportGeneratedAt, setReportGeneratedAt] = useState<number | null>(null);
-
-  useEffect(() => {
+  const loadPaper = async () => {
     const paperId = Number(id);
     if (!paperId || Number.isNaN(paperId)) {
       setError("Некорректный ID статьи");
@@ -77,7 +74,22 @@ export default function PatentDetail() {
       .then((p) => setPaper(p))
       .catch((e) => setError((e as Error).message))
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    loadPaper();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  useEffect(() => {
+    if (!paper) return;
+    if (paper.processingStatus === "ready" || paper.processingStatus === "failed") return;
+    const timer = setInterval(() => {
+      loadPaper();
+    }, 8000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paper?.id, paper?.processingStatus]);
 
   const fullText = paper?.fullText ?? paper?.abstract ?? "";
 
@@ -128,6 +140,12 @@ export default function PatentDetail() {
     navigate("/papers");
   };
 
+  const onReprocess = async () => {
+    if (!paper) return;
+    await reprocessPaperContent(paper.id);
+    await loadPaper();
+  };
+
   if (loading) return <p className="muted">Загрузка статьи...</p>;
   if (error) return <p className="error">{error}</p>;
   if (!paper) return <p className="muted">Статья не найдена.</p>;
@@ -160,6 +178,9 @@ export default function PatentDetail() {
             <strong>Ключевые слова:</strong> {paper.keywords.length ? paper.keywords.slice(0, 10).join(", ") : "—"}
           </p>
           <p>
+            <strong>Статус обработки:</strong> {paper.processingStatus}
+          </p>
+          <p>
             <strong>full_text:</strong> {paper.fullText ? "Есть" : "Нет"}
           </p>
           <p>
@@ -171,6 +192,19 @@ export default function PatentDetail() {
             ) : (
               "—"
             )}
+          </p>
+          <p>
+            <strong>PDF:</strong>{" "}
+            {paper.pdfUrl || paper.pdfLocalPath ? (
+              <a href={getPaperPdfUrl(paper.id)} target="_blank" rel="noreferrer" className="action-link">
+                Открыть PDF
+              </a>
+            ) : (
+              "—"
+            )}
+          </p>
+          <p>
+            <strong>Worker task:</strong> {paper.contentTaskId ?? "—"}
           </p>
         </div>
       </div>
@@ -191,12 +225,41 @@ export default function PatentDetail() {
         <article className="panel">
           <h3>Abstract</h3>
           {paper.abstract ? <p>{paper.abstract}</p> : <p className="muted">Abstract отсутствует.</p>}
+          {paper.fullText && (
+            <>
+              <h3 style={{ marginTop: 18 }}>Текст статьи</h3>
+              <p className="muted">Символов: {paper.fullText.length}</p>
+              <p style={{ whiteSpace: "pre-wrap" }}>
+                {paper.fullText.slice(0, 3000)}
+                {paper.fullText.length > 3000 ? "…" : ""}
+              </p>
+            </>
+          )}
+          {paper.summaryRu && (
+            <>
+              <h3 style={{ marginTop: 18 }}>Суть статьи (RU)</h3>
+              <p style={{ whiteSpace: "pre-wrap" }}>{paper.summaryRu}</p>
+            </>
+          )}
+          {(paper.pdfUrl || paper.pdfLocalPath) && (
+            <>
+              <h3 style={{ marginTop: 18 }}>PDF</h3>
+              <iframe
+                title="paper-pdf"
+                src={getPaperPdfUrl(paper.id)}
+                style={{ width: "100%", height: 640, border: "1px solid #e5e7eb", borderRadius: 8 }}
+              />
+            </>
+          )}
           <div style={{ marginTop: 12 }}>
             <button className="btn btn-primary" onClick={() => setTab("textParts")}>
               Разбить full_text на части
             </button>
             <button className="btn" style={{ marginLeft: 10 }} onClick={onGenerateReport}>
               Открыть отчет на отдельной странице
+            </button>
+            <button className="btn" style={{ marginLeft: 10 }} onClick={onReprocess}>
+              Переобработать (PDF + AI)
             </button>
           </div>
         </article>
@@ -276,26 +339,20 @@ export default function PatentDetail() {
 
       {tab === "report" && (
         <article className="panel">
-          <div className="filters">
-            <textarea
-              className="input"
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              rows={3}
-              style={{ width: "100%", minHeight: 80, resize: "vertical" }}
-            />
-            <button className="btn btn-primary" onClick={onGenerateReport}>
-              Сформировать отчет (превью)
-            </button>
-          </div>
+          <h3>AI анализ (русский)</h3>
+          {paper.analysisRu ? <p style={{ whiteSpace: "pre-wrap" }}>{paper.analysisRu}</p> : <p className="muted">Анализ ещё не готов.</p>}
+          <h3 style={{ marginTop: 18 }}>Перевод (русский)</h3>
+          {paper.translationRu ? <p style={{ whiteSpace: "pre-wrap" }}>{paper.translationRu}</p> : <p className="muted">Перевод ещё не готов.</p>}
+          {paper.processingError && (
+            <p className="error" style={{ marginTop: 12 }}>
+              Ошибка обработки: {paper.processingError}
+            </p>
+          )}
 
           {!parts.length ? (
             <p className="muted">Нет текста для отчета.</p>
           ) : (
             <div>
-              <p className="muted">
-                Сгенерировано: {reportGeneratedAt ? new Date(reportGeneratedAt).toLocaleTimeString("ru-RU") : "не выполнено"}
-              </p>
               <h3>Общий отчет (превью)</h3>
               {overallReport && (
                 <div className="detail-grid">

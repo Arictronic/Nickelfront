@@ -1,13 +1,15 @@
-from fastapi import APIRouter, HTTPException, Depends, Path
-from sqlalchemy.ext.asyncio import AsyncSession
-from app.services.task_service import create_task, get_task_by_id
-from app.db.session import get_db
-from app.tasks.tasks import get_celery_task_status
-from app.tasks.celery_app import celery_app
-from app.services.celery_cancel import set_cancel_flag, clear_cancel_flag, _cancel_key, _get_client
+import asyncio
+
 from celery.result import AsyncResult
-from shared.schemas.task import TaskCreate, TaskOut, CeleryTaskStatus
-from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, Path
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.session import get_db
+from app.services.celery_cancel import clear_cancel_flag, set_cancel_flag
+from app.services.task_service import create_task, get_task_by_id
+from app.tasks.celery_app import celery_app
+from app.tasks.tasks import get_celery_task_status
+from shared.schemas.task import CeleryTaskStatus, TaskCreate, TaskOut
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -37,18 +39,18 @@ async def get_celery_task_status_endpoint(
 ):
     """
     Получить статус задачи Celery по task_id.
-    
+
     Возвращает текущий статус задачи (PENDING, STARTED, RETRY, FAILURE, SUCCESS)
     и результат выполнения если задача завершена.
     """
-    task_info = get_celery_task_status(task_id)
-    
+    task_info = await asyncio.to_thread(get_celery_task_status, task_id)
+
     if task_info is None:
         raise HTTPException(status_code=404, detail="Задача Celery не найдена")
-    
+
     # Преобразуем результат в формат CeleryTaskStatus
     result = task_info.get("result")
-    
+
     response = CeleryTaskStatus(
         task_id=task_id,
         status=task_info.get("status", "UNKNOWN"),
@@ -66,7 +68,7 @@ async def get_celery_task_status_endpoint(
         args=task_info.get("args"),
         kwargs=task_info.get("kwargs"),
     )
-    
+
     return response
 
 
@@ -81,8 +83,7 @@ async def revoke_celery_task(
     Примечание: на Windows с pool=solo завершение запущенной задачи
     через terminate может остановить весь воркер, поэтому по умолчанию terminate=False.
     """
-    result = AsyncResult(task_id, app=celery_app)
-    current_state = result.state
+    current_state = await asyncio.to_thread(lambda: AsyncResult(task_id, app=celery_app).state)
 
     if current_state in {"SUCCESS", "FAILURE", "REVOKED"}:
         return {
@@ -91,8 +92,8 @@ async def revoke_celery_task(
             "message": "Task already finished",
         }
 
-    set_cancel_flag(task_id)
-    celery_app.control.revoke(task_id, terminate=terminate)
+    await asyncio.to_thread(set_cancel_flag, task_id)
+    await asyncio.to_thread(celery_app.control.revoke, task_id, terminate=terminate)
 
     return {
         "task_id": task_id,
@@ -114,7 +115,7 @@ async def delete_celery_task(
     только очищает флаг отмены для возможности повторного запуска.
     """
     try:
-        clear_cancel_flag(task_id)
+        await asyncio.to_thread(clear_cancel_flag, task_id)
         return {
             "task_id": task_id,
             "status": "deleted",

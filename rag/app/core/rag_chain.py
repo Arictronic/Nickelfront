@@ -7,7 +7,7 @@
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 # Промт для RAG-цепи, специализированный для патентов на суперсплавы
 RAG_PROMPT_TEMPLATE = """
-Ты — эксперт в области материаловедения и металлургии, специализирующийся 
-на суперсплавах и патентном анализе. Твоя задача — отвечать на вопросы 
+Ты — эксперт в области материаловедения и металлургии, специализирующийся
+на суперсплавах и патентном анализе. Твоя задача — отвечать на вопросы
 пользователей, основываясь на предоставленном контексте из патентных документов.
 
 Контекст из патентных документов:
@@ -55,7 +55,7 @@ class RAGChain:
 
     def __init__(
         self,
-        search_k: Optional[int] = None,
+        search_k: int | None = None,
         temperature: float = 0.1,
         max_tokens: int = 1024,
     ):
@@ -72,8 +72,8 @@ class RAGChain:
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-        self._llm: Optional[Any] = None
-        self._chain: Optional[RetrievalQA] = None
+        self._llm: Any | None = None
+        self._chain: RetrievalQA | None = None
 
         logger.info(
             f"Инициализация RAGChain: search_k={self.search_k}, "
@@ -152,7 +152,7 @@ class RAGChain:
             self._chain = self._build_chain()
         return self._chain
 
-    def query(self, question: str) -> Dict[str, Any]:
+    def query(self, question: str) -> dict[str, Any]:
         """
         Обрабатывает вопрос пользователя через RAG-цепь.
 
@@ -199,8 +199,8 @@ class RAGChain:
             raise RuntimeError(f"Не удалось обработать запрос: {e}")
 
     def _format_source_documents(
-        self, documents: List[Document]
-    ) -> List[Dict[str, Any]]:
+        self, documents: list[Document]
+    ) -> list[dict[str, Any]]:
         """
         Форматирует документы-источники для ответа.
 
@@ -224,7 +224,7 @@ class RAGChain:
         self,
         question: str,
         include_scores: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Обрабатывает вопрос с дополнительной информацией об источниках.
 
@@ -267,7 +267,7 @@ class RAGChain:
 rag_chain = RAGChain()
 
 
-def process_query(question: str) -> Dict[str, Any]:
+def process_query(question: str) -> dict[str, Any]:
     """
     Обрабатывает вопрос пользователя через глобальную RAG-цепь.
 
@@ -283,7 +283,7 @@ def process_query(question: str) -> Dict[str, Any]:
 def process_query_with_sources(
     question: str,
     include_scores: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Обрабатывает вопрос с информацией об источниках.
 

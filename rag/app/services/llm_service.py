@@ -6,7 +6,6 @@
 """
 
 import logging
-from typing import Any, Optional
 
 from langchain_community.llms import OpenAI
 
@@ -26,9 +25,9 @@ class LLMService:
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        model_name: Optional[str] = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model_name: str | None = None,
     ):
         """
         Инициализация LLM сервиса.
@@ -43,7 +42,7 @@ class LLMService:
         self.base_url = base_url or settings.llm_api_base_url
         self.model_name = model_name or settings.llm_model_name
 
-        self._llm: Optional[OpenAI] = None
+        self._llm: OpenAI | None = None
 
         logger.info(
             f"Инициализация LLMService: model={self.model_name}, "
@@ -190,8 +189,7 @@ class LLMService:
                 streaming=True,
             )
 
-            for chunk in llm.stream(prompt):
-                yield chunk
+            yield from llm.stream(prompt)
 
         except Exception as e:
             logger.error(f"Ошибка при потоковой генерации: {e}")

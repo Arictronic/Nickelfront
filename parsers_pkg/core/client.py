@@ -4,8 +4,9 @@ CORE - агрегатор Open Access научных статей.
 API документация: https://core.ac.uk/services/api
 """
 
+from typing import Any
+
 import httpx
-from typing import Any, Optional
 from loguru import logger
 
 from parsers_pkg.base import BaseAPIClient
@@ -18,7 +19,7 @@ class COREClient(BaseAPIClient):
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         timeout: float = 30.0,
     ):
         """
@@ -100,7 +101,7 @@ class COREClient(BaseAPIClient):
             logger.error(f"CORE search error: {e}")
             return []
 
-    async def get_article(self, article_id: str) -> Optional[dict[str, Any]]:
+    async def get_article(self, article_id: str) -> dict[str, Any] | None:
         """
         Получить статью по ID.
 
@@ -123,7 +124,7 @@ class COREClient(BaseAPIClient):
             logger.error(f"CORE get article error: {e}")
             return None
 
-    async def get_full_text(self, item_id: str) -> Optional[str]:
+    async def get_full_text(self, item_id: str) -> str | None:
         """
         Получить полный текст статьи.
 

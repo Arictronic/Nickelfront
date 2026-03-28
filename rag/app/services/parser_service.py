@@ -9,7 +9,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pdfplumber
 from langchain.schema import Document
@@ -31,8 +31,8 @@ class PDFParser:
 
     def __init__(
         self,
-        chunk_size: Optional[int] = None,
-        chunk_overlap: Optional[int] = None,
+        chunk_size: int | None = None,
+        chunk_overlap: int | None = None,
     ):
         """
         Инициализация PDF парсера.
@@ -111,7 +111,7 @@ class PDFParser:
 
     def _format_tables(
         self,
-        tables: List[List[List[Optional[str]]]],
+        tables: list[list[list[str | None]]],
         page_num: int,
     ) -> str:
         """
@@ -184,8 +184,8 @@ class PDFParser:
     def parse_to_documents(
         self,
         file_path: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> List[Document]:
+        metadata: dict[str, Any] | None = None,
+    ) -> list[Document]:
         """
         Парсит PDF файл и возвращает список документов LangChain.
 
@@ -245,8 +245,8 @@ class PDFParser:
         self,
         file_bytes: bytes,
         filename: str = "unknown.pdf",
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> List[Document]:
+        metadata: dict[str, Any] | None = None,
+    ) -> list[Document]:
         """
         Парсит PDF данные и возвращает список документов LangChain.
 
@@ -320,9 +320,9 @@ class WebScraper:
         """
         try:
             from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
             from selenium.webdriver.chrome.service import Service
             from webdriver_manager.chrome import ChromeDriverManager
-            from selenium.webdriver.chrome.options import Options
 
             logger.debug("Инициализация WebDriver для Chromium")
 
@@ -352,7 +352,7 @@ class WebScraper:
             logger.error(f"Ошибка при инициализации WebDriver: {e}")
             raise RuntimeError(f"Не удалось инициализировать WebDriver: {e}")
 
-    def scrape_page(self, url: str) -> Optional[str]:
+    def scrape_page(self, url: str) -> str | None:
         """
         Загружает и извлекает текст с веб-страницы.
 
@@ -390,8 +390,8 @@ class WebScraper:
     def scrape_patent(
         self,
         url: str,
-        patent_id: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+        patent_id: str | None = None,
+    ) -> dict[str, Any] | None:
         """
         Заготовка для парсинга страницы патента.
 

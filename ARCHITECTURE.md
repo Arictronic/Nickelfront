@@ -698,39 +698,13 @@ User          API            Celery         Parser        DB           ChromaDB
 
 ## 🚀 Развёртывание
 
-### Docker Compose
+### Локальный запуск (без контейнеров)
 
-```yaml
-services:
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_DB: nickelfront
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-
-  redis:
-    image: redis:7
-
-  backend:
-    build: ./backend
-    depends_on: [postgres, redis]
-    ports: ["8000:8000"]
-
-  celery-worker:
-    build: ./backend
-    command: celery -A app.tasks.celery_app worker
-    depends_on: [postgres, redis]
-
-  frontend:
-    build: ./frontend
-    ports: ["5173:5173"]
-
-  flower:
-    build: ./backend
-    command: celery -A app.tasks.celery_app flower
-    ports: ["5555:5555"]
-```
+1. Настроить `.env` (БД, Redis, токены).
+2. Запустить backend: `run_backend.bat`.
+3. Запустить worker: `run_worker.bat`.
+4. Запустить frontend: `run_frontend.bat`.
+5. Опционально мониторинг задач: `run_flower.bat`.
 
 ---
 
@@ -1632,39 +1606,7 @@ pytest tests/unit/test_auth.py::test_login_user -v
 
 ---
 
-## 🔄 CI/CD
-
-### GitHub Actions
-
-**Файл:** `.github/workflows/tests.yml`
-
-```yaml
-name: Tests CI
-
-on: [push, pull_request]
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:15
-      redis:
-        image: redis:7
-    
-    steps:
-      - uses: actions/checkout@v3
-      - name: Set up Python
-        uses: actions/setup-python@v4
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Run tests
-        run: pytest --cov=app
-```
-
----
-
-## � Скрипты запуска
+## Скрипты запуска
 
 ### CMD скрипты (Windows)
 
@@ -1803,65 +1745,15 @@ sqlalchemy.url = postgresql://user:password@localhost:5432/nickelfront
 keys = root,sqlalchemy,alembic
 ```
 
-### Docker Compose
+### Скрипты запуска
 
-**Файл:** `backend/docker-compose.yml`
+**Файлы:** `run_backend.bat`, `run_worker.bat`, `run_frontend.bat`, `run_flower.bat`
 
-```yaml
-services:
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: pass
-      POSTGRES_DB: nickelfront
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d nickelfront"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7
-    ports:
-      - "6379:6379"
-
-  backend:
-    build: .
-    command: >
-      sh -c "python -m app.db.init_db &&
-             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
-    ports:
-      - "8000:8000"
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://user:pass@postgres:5432/nickelfront
-      - REDIS_URL=redis://redis:6379/0
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  worker:
-    build: .
-    command: celery -A app.tasks.celery_app worker --loglevel=info
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://user:pass@postgres:5432/nickelfront
-      - REDIS_URL=redis://redis:6379/0
-
-  flower:
-    build: .
-    command: celery -A app.tasks.celery_app flower --port=5555
-    ports:
-      - "5555:5555"
-
-  celery_beat:
-    build: .
-    command: celery -A app.tasks.celery_app beat --loglevel=info
+```text
+run_backend.bat   -> uvicorn app.main:app
+run_worker.bat    -> celery -A app.tasks.celery_app worker
+run_frontend.bat  -> npm run dev
+run_flower.bat    -> celery -A app.tasks.celery_app flower
 ```
 
 ### Vite Config
@@ -1888,7 +1780,7 @@ export default defineConfig({
 
 ---
 
-## �🔧 Troubleshooting
+## 🔧 Troubleshooting
 
 ### Частые проблемы
 
@@ -2325,6 +2217,3 @@ vector_service.add_paper(
 | GET | `/api/v1/monitoring/celery/scheduled-tasks` | `monitoring.py` | Расписание |
 
 ---
-
-
-

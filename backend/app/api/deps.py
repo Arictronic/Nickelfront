@@ -1,15 +1,16 @@
 """Dependency для получения текущего пользователя."""
 
-from typing import Optional, Dict, Any
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.ext.asyncio import AsyncSession
-from loguru import logger
+from typing import Any
 
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from loguru import logger
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.security import decode_access_token
 from app.db.session import get_db
 from app.services.user_service import UserService
-from app.core.security import decode_access_token
-from shared.schemas.auth import TokenData, UserResponse
+from shared.schemas.auth import UserResponse
 
 # HTTP Bearer схема
 security = HTTPBearer()
@@ -64,11 +65,11 @@ async def get_current_user(
 
 
 async def get_current_user_optional(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(
+    credentials: HTTPAuthorizationCredentials | None = Depends(
         HTTPBearer(auto_error=False)
     ),
     db: AsyncSession = Depends(get_db),
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """
     Получить текущего пользователя, если токен предоставлен.
 

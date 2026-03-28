@@ -6,8 +6,8 @@ Patents parser module.
 """
 
 from .patent_parser import (
-    PatentParser,
     PatentConfig,
+    PatentParser,
     parse_patents,
 )
 

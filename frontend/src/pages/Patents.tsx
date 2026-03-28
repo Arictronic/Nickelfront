@@ -286,13 +286,14 @@ export default function Patents() {
             <th>Дата</th>
             <th>DOI</th>
             <th>Full text</th>
+            <th>Статус</th>
             <th>Действия</th>
           </tr>
         </thead>
         <tbody>
           {sortedPapers.length === 0 ? (
             <tr>
-              <td colSpan={9} className="muted">
+              <td colSpan={10} className="muted">
                 Нет результатов.
               </td>
             </tr>
@@ -313,6 +314,7 @@ export default function Patents() {
                   <td>{p.publicationDate ? p.publicationDate.slice(0, 10) : "—"}</td>
                   <td>{p.doi ?? "—"}</td>
                   <td>{p.fullText ? "Да" : "Нет"}</td>
+                  <td>{p.processingStatus}</td>
                   <td>
                     <div className="actions-inline">
                       <Link className="action-link" to={`/papers/${p.id}`}>

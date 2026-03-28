@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+
 from loguru import logger
 
 from app.core.config import settings
@@ -22,14 +23,14 @@ def setup_logging():
                 f"{log_file_path.stem}_{{time:YYYY-MM-DD}}{log_file_path.suffix}"
             )
         )
-    
+
     # Добавляем консольный вывод
     logger.add(
         sys.stdout,
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
         level=log_level,
     )
-    
+
     # Добавляем запись в файл
     logger.add(
         log_file_pattern,

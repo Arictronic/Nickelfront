@@ -5,7 +5,6 @@
 """
 
 import logging
-from typing import List, Optional
 
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
@@ -112,7 +111,7 @@ async def ask_question(request: AskRequest) -> AskResponse:
             result = process_query(request.question)
 
         # Форматирование источников
-        sources: List[SourceDocument] = []
+        sources: list[SourceDocument] = []
         for doc in result.get("source_documents", []):
             source_doc = SourceDocument(
                 index=doc.get("index", 0),

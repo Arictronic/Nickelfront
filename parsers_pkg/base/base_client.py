@@ -1,7 +1,8 @@
 """Базовый класс для API клиентов."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any
+
 import httpx
 
 
@@ -11,13 +12,13 @@ class BaseAPIClient(ABC):
     def __init__(
         self,
         base_url: str,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         timeout: float = 30.0,
     ):
         self.base_url = base_url
         self.api_key = api_key
         self.timeout = timeout
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Получить HTTP клиент."""
@@ -25,7 +26,7 @@ class BaseAPIClient(ABC):
             headers = {}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
-            
+
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 headers=headers,
@@ -44,6 +45,6 @@ class BaseAPIClient(ABC):
         pass
 
     @abstractmethod
-    async def get_full_text(self, item_id: str) -> Optional[str]:
+    async def get_full_text(self, item_id: str) -> str | None:
         """Получить полный текст статьи."""
         pass

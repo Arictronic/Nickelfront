@@ -1,13 +1,13 @@
 """arXiv парсер научных статей."""
 
 import re
-from typing import Any, Optional
 from datetime import datetime
+from typing import Any
+
 from loguru import logger
 
 from parsers_pkg.base import BaseParser
 from shared.schemas.paper import Paper
-
 
 # Стоп-слова для извлечения ключевых слов
 STOP_WORDS = {
@@ -53,7 +53,7 @@ class ArxivParser(BaseParser):
         logger.info(f"arXiv: распарсено {len(papers)} статей из {len(data)}")
         return papers
 
-    def _parse_article(self, data: dict[str, Any]) -> Optional[Paper]:
+    def _parse_article(self, data: dict[str, Any]) -> Paper | None:
         """Распарсить одну статью."""
         try:
             # Дата публикации

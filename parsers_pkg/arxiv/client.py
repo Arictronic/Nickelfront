@@ -5,14 +5,14 @@ API документация: https://arxiv.org/help/api
 """
 
 import asyncio
-import httpx
 import xml.etree.ElementTree as ET
-from typing import Any, Optional
 from datetime import datetime
+from typing import Any
+
+import httpx
 from loguru import logger
 
 from parsers_pkg.base import BaseAPIClient
-
 
 # Поисковые запросы для тематики никелевых сплавов
 ARXIV_SEARCH_QUERIES = [
@@ -50,18 +50,18 @@ class ArxivClient(BaseAPIClient):
         """
         super().__init__(base_url="", api_key=None, timeout=timeout)
         self.rate_limit = rate_limit
-        self._last_request_time: Optional[datetime] = None
+        self._last_request_time: datetime | None = None
 
     async def _apply_rate_limit(self):
         """Применить rate limiting между запросами."""
         if not self.rate_limit:
             return
-            
+
         if self._last_request_time:
             elapsed = (datetime.now() - self._last_request_time).total_seconds()
             if elapsed < self.RATE_LIMIT_DELAY:
                 await asyncio.sleep(self.RATE_LIMIT_DELAY - elapsed)
-        
+
         self._last_request_time = datetime.now()
 
     async def search(
@@ -69,7 +69,7 @@ class ArxivClient(BaseAPIClient):
         query: str,
         limit: int = 50,
         offset: int = 0,
-        categories: Optional[list[str]] = None,
+        categories: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Поиск статей в arXiv.
@@ -87,7 +87,7 @@ class ArxivClient(BaseAPIClient):
         client = await self._get_client()
 
         search_query = f"all:{query}"
-        
+
         if categories:
             category_filter = " OR ".join(f"cat:{cat}" for cat in categories)
             search_query = f"({search_query}) AND ({category_filter})"
@@ -143,7 +143,7 @@ class ArxivClient(BaseAPIClient):
         self,
         entry: ET.Element,
         namespaces: dict[str, str],
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Распарсить одну статью из XML."""
         try:
             # ID
@@ -204,7 +204,7 @@ class ArxivClient(BaseAPIClient):
             logger.warning(f"Error parsing arXiv entry: {e}")
             return None
 
-    async def get_full_text(self, item_id: str) -> Optional[str]:
+    async def get_full_text(self, item_id: str) -> str | None:
         """Получить URL на PDF статьи."""
         clean_id = item_id
         if clean_id.startswith('arXiv:'):

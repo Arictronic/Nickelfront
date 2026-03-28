@@ -1,5 +1,5 @@
-from redis import Redis
 from app.core.config import settings
+from redis import Redis
 
 CANCEL_TTL_SECONDS = 24 * 60 * 60
 

@@ -101,30 +101,35 @@ export default function CeleryMonitoring() {
     setError(null);
     
     try {
-      const statusRes = await apiClient.get<CeleryStatus>("/monitoring/celery/status").catch(() => null);
-
-      if (statusRes) {
-        setStatus(statusRes.data);
-      } else {
-        setStatus((prev) => prev);
-      }
-
       const nextTick = pollTickRef.current + 1;
       const shouldFullRefresh = full || nextTick % fullRefreshEvery === 0;
       pollTickRef.current = nextTick;
 
       if (shouldFullRefresh) {
-        const [workersRes, queuesRes, tasksRes, scheduledRes] = await Promise.all([
-          apiClient.get<{ workers: WorkerInfo[] }>("/monitoring/celery/workers").catch(() => null),
-          apiClient.get<{ queues: QueueInfo[] }>("/monitoring/celery/queues").catch(() => null),
-          apiClient.get<{ tasks: TaskInfo[] }>("/monitoring/celery/tasks?limit=20").catch(() => null),
-          apiClient.get<{ scheduled_tasks: ScheduledTask[] }>("/monitoring/celery/scheduled-tasks").catch(() => null),
+        const [statusRes, workersRes, queuesRes, tasksRes, scheduledRes] = await Promise.all([
+          apiClient.get<CeleryStatus>("/monitoring/celery/status", { timeout: 3000 }).catch(() => null),
+          apiClient.get<{ workers: WorkerInfo[] }>("/monitoring/celery/workers", { timeout: 4000 }).catch(() => null),
+          apiClient.get<{ queues: QueueInfo[] }>("/monitoring/celery/queues", { timeout: 4000 }).catch(() => null),
+          apiClient.get<{ tasks: TaskInfo[] }>("/monitoring/celery/tasks?limit=20", { timeout: 4000 }).catch(() => null),
+          apiClient.get<{ scheduled_tasks: ScheduledTask[] }>("/monitoring/celery/scheduled-tasks", { timeout: 3000 }).catch(() => null),
         ]);
 
+        if (statusRes) {
+          setStatus(statusRes.data);
+        }
         if (workersRes) setWorkers(workersRes.data.workers || []);
         if (queuesRes) setQueues(queuesRes.data.queues || []);
         if (tasksRes) setTasks(tasksRes.data.tasks || []);
         if (scheduledRes) setScheduledTasks(scheduledRes.data.scheduled_tasks || []);
+      } else {
+        const statusRes = await apiClient
+          .get<CeleryStatus>("/monitoring/celery/status", { timeout: 3000 })
+          .catch(() => null);
+        if (statusRes) {
+          setStatus(statusRes.data);
+        } else {
+          setStatus((prev) => prev);
+        }
       }
       
       setLoading(false);

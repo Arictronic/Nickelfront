@@ -32,7 +32,7 @@ def upgrade() -> None:
             setweight(to_tsvector('english', coalesce(abstract, '')), 'B') ||
             setweight(to_tsvector('english', coalesce((SELECT string_agg(elem, ' ') FROM jsonb_array_elements_text(keywords::jsonb) AS elem), '')), 'C')
     """)
-    
+
     # Добавляем индекс GIN для полнотекстового поиска
     op.create_index(
         'ix_papers_search_vector',
@@ -41,7 +41,7 @@ def upgrade() -> None:
         unique=False,
         postgresql_using='gin'
     )
-    
+
     # Добавляем индекс для ранжирования по релевантности
     op.create_index(
         'ix_papers_title_trgm',
@@ -51,7 +51,7 @@ def upgrade() -> None:
         postgresql_using='gin',
         postgresql_ops={'title': 'gin_trgm_ops'}
     )
-    
+
     # Добавляем триггер для автоматического обновления search_vector
     op.execute("""
         CREATE OR REPLACE FUNCTION papers_search_vector_update() RETURNS trigger AS $$
@@ -64,7 +64,7 @@ def upgrade() -> None:
         END
         $$ LANGUAGE plpgsql;
     """)
-    
+
     op.execute("""
         CREATE TRIGGER papers_search_vector_trigger
         BEFORE INSERT OR UPDATE ON papers
@@ -75,14 +75,14 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Удалить колонки и индексы для полнотекстового поиска."""
-    
+
     # Удаляем триггер
     op.execute("DROP TRIGGER IF EXISTS papers_search_vector_trigger ON papers")
     op.execute("DROP FUNCTION IF EXISTS papers_search_vector_update()")
-    
+
     # Удаляем индексы
     op.drop_index('ix_papers_search_vector')
     op.drop_index('ix_papers_title_trgm')
-    
+
     # Удаляем колонку
     op.drop_column('papers', 'search_vector')

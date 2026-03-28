@@ -13,6 +13,14 @@ export interface Paper {
   source: PaperSource | string;
   sourceId: string | null;
   url: string | null;
+  pdfUrl: string | null;
+  pdfLocalPath: string | null;
+  processingStatus: string;
+  contentTaskId: string | null;
+  processingError: string | null;
+  summaryRu: string | null;
+  analysisRu: string | null;
+  translationRu: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 }
@@ -87,4 +95,3 @@ export interface CeleryTaskStatus {
   args?: any[];
   kwargs?: Record<string, any>;
 }
-

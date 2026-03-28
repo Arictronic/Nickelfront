@@ -5,9 +5,10 @@
 пакетной обработки и кэширования моделей.
 """
 
-from typing import Optional, List, Dict, Any
-from pathlib import Path
 from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
 from loguru import logger
 
 from app.core.config import settings
@@ -43,9 +44,9 @@ class EmbeddingService:
 
     def __init__(
         self,
-        model_name: Optional[str] = None,
-        embedding_dim: Optional[int] = None,
-        cache_dir: Optional[str] = None,
+        model_name: str | None = None,
+        embedding_dim: int | None = None,
+        cache_dir: str | None = None,
         local_only: bool = False,
     ):
         """
@@ -57,7 +58,7 @@ class EmbeddingService:
             cache_dir: Директория для кэширования моделей.
             local_only: Загружать модели только локально (без скачивания).
         """
-        self._model: Optional[SentenceTransformer] = None
+        self._model: SentenceTransformer | None = None
         self.MODEL_NAME = model_name or settings.EMBEDDING_MODEL
         self.EMBEDDING_DIM = embedding_dim or settings.EMBEDDING_DIM
         self._cache_dir = cache_dir or settings.EMBEDDING_CACHE_DIR
@@ -69,7 +70,7 @@ class EmbeddingService:
         )
 
     @property
-    def model(self) -> Optional[SentenceTransformer]:
+    def model(self) -> SentenceTransformer | None:
         """Ленивая загрузка модели."""
         if not SENTENCE_TRANSFORMERS_AVAILABLE:
             logger.warning("sentence-transformers не установлен. Эмбеддинги недоступны.")
@@ -109,7 +110,7 @@ class EmbeddingService:
                 return None
         return self._model
 
-    def get_embedding(self, text: str) -> Optional[List[float]]:
+    def get_embedding(self, text: str) -> list[float] | None:
         """
         Получить векторный эмбеддинг для текста.
 
@@ -139,7 +140,7 @@ class EmbeddingService:
             return None
 
     @lru_cache(maxsize=1000)
-    def get_embedding_cached(self, text: str) -> Optional[List[float]]:
+    def get_embedding_cached(self, text: str) -> list[float] | None:
         """
         Получить эмбеддинг с кэшированием результатов.
 
@@ -153,9 +154,9 @@ class EmbeddingService:
 
     def get_embeddings_batch(
         self,
-        texts: List[str],
+        texts: list[str],
         batch_size: int = DEFAULT_BATCH_SIZE,
-    ) -> List[List[float]]:
+    ) -> list[list[float]]:
         """
         Получить эмбеддинги для списка текстов (пакетная обработка).
 
@@ -191,7 +192,7 @@ class EmbeddingService:
         self,
         title: str,
         abstract: str,
-        keywords: List[str],
+        keywords: list[str],
     ) -> str:
         """
         Подготовить текст статьи для генерации эмбеддинга.
@@ -217,7 +218,7 @@ class EmbeddingService:
 
         return " | ".join(parts) if parts else ""
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """
         Получить статистику сервиса эмбеддингов.
 
@@ -253,7 +254,7 @@ class EmbeddingService:
 
 
 # Глобальный экземпляр сервиса
-_embedding_service: Optional[EmbeddingService] = None
+_embedding_service: EmbeddingService | None = None
 
 
 def get_embedding_service() -> EmbeddingService:

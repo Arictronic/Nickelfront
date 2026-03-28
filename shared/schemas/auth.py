@@ -1,15 +1,15 @@
 """Схемы данных для авторизации."""
 
-from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime
-from typing import Optional
+
+from pydantic import BaseModel, EmailStr, Field
 
 
 class UserBase(BaseModel):
     """Базовая схема пользователя."""
 
     email: EmailStr = Field(..., description="Email пользователя")
-    username: Optional[str] = Field(None, min_length=2, max_length=100, description="Имя пользователя")
+    username: str | None = Field(None, min_length=2, max_length=100, description="Имя пользователя")
 
 
 class UserCreate(UserBase):
@@ -43,7 +43,7 @@ class Token(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
-    expires_in: Optional[int] = None
+    expires_in: int | None = None
 
 
 class RefreshTokenRequest(BaseModel):
@@ -55,5 +55,5 @@ class RefreshTokenRequest(BaseModel):
 class TokenData(BaseModel):
     """Схема данных токена."""
 
-    email: Optional[str] = None
-    user_id: Optional[int] = None
+    email: str | None = None
+    user_id: int | None = None

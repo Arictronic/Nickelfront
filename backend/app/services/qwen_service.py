@@ -17,10 +17,9 @@ Qwen Service - Интеграция с Qwen API через standalone HTTP се�
 
 import logging
 import threading
-import time
 from collections import deque
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
@@ -59,14 +58,14 @@ class QwenService:
 
     def __init__(
         self,
-        host: Optional[str] = None,
-        port: Optional[int] = None,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
-        thinking_enabled: Optional[bool] = None,
-        search_enabled: Optional[bool] = None,
-        auto_continue_enabled: Optional[bool] = None,
-        max_continues: Optional[int] = None,
+        host: str | None = None,
+        port: int | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        thinking_enabled: bool | None = None,
+        search_enabled: bool | None = None,
+        auto_continue_enabled: bool | None = None,
+        max_continues: int | None = None,
     ):
         """
         Инициализация Qwen сервиса.
@@ -85,7 +84,7 @@ class QwenService:
         self.port = port or settings.QWEN_SERVICE_PORT
         self.api_key = api_key or settings.QWEN_API_KEY
         self.base_url = f"http://{self.host}:{self.port}"
-        
+
         self.model = model or settings.QWEN_MODEL
         self.thinking_enabled = (
             thinking_enabled
@@ -108,7 +107,7 @@ class QwenService:
             else settings.QWEN_MAX_CONTINUES
         )
 
-        self._session_id: Optional[str] = None
+        self._session_id: str | None = None
 
         # Блокировка для потокобезопасности
         self._lock = threading.RLock()
@@ -126,14 +125,14 @@ class QwenService:
     def is_available(self) -> bool:
         """Проверяет доступность сервиса."""
         try:
-            with httpx.Client(timeout=5.0) as client:
+            with httpx.Client(timeout=5.0, trust_env=False) as client:
                 response = client.get(f"{self.base_url}/health")
                 return response.status_code == 200
         except Exception:
             return False
 
     @property
-    def session_id(self) -> Optional[str]:
+    def session_id(self) -> str | None:
         """Текущий ID сессии."""
         return self._session_id
 
@@ -146,9 +145,9 @@ class QwenService:
         self,
         method: str,
         endpoint: str,
-        json_data: Optional[Dict[str, Any]] = None,
+        json_data: dict[str, Any] | None = None,
         timeout: float = 120.0,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         Внутренний метод для HTTP запросов к Qwen Service.
 
@@ -167,7 +166,7 @@ class QwenService:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         try:
-            with httpx.Client(timeout=timeout) as client:
+            with httpx.Client(timeout=timeout, trust_env=False) as client:
                 response = client.request(
                     method,
                     url,
@@ -187,7 +186,7 @@ class QwenService:
             logger.error(f"Ошибка запроса к {endpoint}: {e}")
             return None
 
-    def create_session(self) -> Optional[str]:
+    def create_session(self) -> str | None:
         """
         Создать новую сессию чата.
 
@@ -219,7 +218,7 @@ class QwenService:
             return True
         return False
 
-    def list_sessions(self) -> List[Dict[str, Any]]:
+    def list_sessions(self) -> list[dict[str, Any]]:
         """
         Получить список сессий.
 
@@ -229,7 +228,7 @@ class QwenService:
         result = self._request("GET", "/sessions")
         return result.get("sessions", []) if result else []
 
-    def get_session_info(self, session_id: str) -> Optional[Dict[str, Any]]:
+    def get_session_info(self, session_id: str) -> dict[str, Any] | None:
         """
         Получить информацию о сессии.
 
@@ -266,13 +265,13 @@ class QwenService:
     def send_message(
         self,
         message: str,
-        session_id: Optional[str] = None,
-        thinking_enabled: Optional[bool] = None,
-        search_enabled: Optional[bool] = None,
-        file_ids: Optional[List[str]] = None,
-        auto_continue: Optional[bool] = None,
+        session_id: str | None = None,
+        thinking_enabled: bool | None = None,
+        search_enabled: bool | None = None,
+        file_ids: list[str] | None = None,
+        auto_continue: bool | None = None,
         timeout: float = 120.0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Отправить сообщение и получить ответ через HTTP API.
 
@@ -348,17 +347,17 @@ class QwenService:
 
                 if result:
                     self._session_id = sid
-                    
+
                     # Локальное авто-продолжение (если сервис не сделал сам)
                     continue_count = result.get("continue_count", 0)
                     can_continue = result.get("can_continue", False)
                     response_text = result.get("response", "")
-                    
+
                     # Если сервис не сделал авто-продолжение, но оно включено и можно продолжить
                     if do_auto_continue and continue_count == 0 and can_continue:
                         message_id = result.get("message_id", 0)
                         add_count, add_text = self._auto_continue(sid, message_id, thinking)
-                        
+
                         if add_count > 0:
                             continue_count = add_count
                             response_text = (response_text + "\n\n" + add_text).strip()
@@ -477,7 +476,7 @@ class QwenService:
             return 0, ""
 
         continue_count = 0
-        all_response_parts: List[str] = []
+        all_response_parts: list[str] = []
         current_message_id = message_id
 
         while continue_count < self.max_continues:
@@ -510,7 +509,7 @@ class QwenService:
         message_id: int,
         thinking_enabled: bool = True,
         timeout: float = 120.0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Продолжить ответ через HTTP API.
 
@@ -544,7 +543,7 @@ class QwenService:
             "can_continue": False,
         }
 
-    def get_config(self) -> Dict[str, Any]:
+    def get_config(self) -> dict[str, Any]:
         """
         Получить текущую конфигурацию.
 
@@ -561,7 +560,7 @@ class QwenService:
             "base_url": self.base_url,
         }
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """
         Получить статистику сервиса.
 
@@ -592,11 +591,11 @@ class QwenService:
 
     def update_config(
         self,
-        model: Optional[str] = None,
-        thinking_enabled: Optional[bool] = None,
-        search_enabled: Optional[bool] = None,
-        auto_continue_enabled: Optional[bool] = None,
-        max_continues: Optional[int] = None,
+        model: str | None = None,
+        thinking_enabled: bool | None = None,
+        search_enabled: bool | None = None,
+        auto_continue_enabled: bool | None = None,
+        max_continues: int | None = None,
     ):
         """
         Обновить конфигурацию.
@@ -626,7 +625,7 @@ class QwenService:
 
 
 # Глобальный экземпляр
-_qwen_service: Optional[QwenService] = None
+_qwen_service: QwenService | None = None
 
 
 def get_qwen_service() -> QwenService:

@@ -3,11 +3,13 @@
 
 Запускает REST API сервер для платформы анализа патентов и научных статей.
 """
+# ruff: noqa: E402
 
+import asyncio
 import sys
-from pathlib import Path
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,19 +22,36 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from app.api.v1.endpoints import (
-    tasks as tasks_router,
-    parse as parse_router,
-    auth as auth_router,
-    vector as vector_router,
     analytics as analytics_router,
-    reports as reports_router,
+)
+from app.api.v1.endpoints import (
+    auth as auth_router,
+)
+from app.api.v1.endpoints import (
     monitoring as monitoring_router,
-    search as search_router,
+)
+from app.api.v1.endpoints import (
+    parse as parse_router,
+)
+from app.api.v1.endpoints import (
     qwen as qwen_router,
+)
+from app.api.v1.endpoints import (
     rag as rag_router,
 )
+from app.api.v1.endpoints import (
+    reports as reports_router,
+)
+from app.api.v1.endpoints import (
+    search as search_router,
+)
+from app.api.v1.endpoints import (
+    tasks as tasks_router,
+)
+from app.api.v1.endpoints import (
+    vector as vector_router,
+)
 from app.core.config import settings
-from app.core.logging import setup_logging
 
 
 @asynccontextmanager
@@ -219,8 +238,8 @@ async def health_check():
     embedding_service = get_embedding_service()
     vector_service = get_vector_service()
 
-    embedding_stats = embedding_service.get_stats() if hasattr(embedding_service, 'get_stats') else {}
-    vector_stats = vector_service.get_stats()
+    vector_stats = await asyncio.to_thread(vector_service.get_stats)
+    embedding_available = await asyncio.to_thread(lambda: embedding_service.model is not None)
 
     return {
         "status": "ok",
@@ -229,7 +248,7 @@ async def health_check():
             "database": "connected",  # TODO: добавить проверку БД
             "redis": "connected",  # TODO: добавить проверку Redis
             "embedding": {
-                "available": embedding_service.model is not None,
+                "available": embedding_available,
                 "model": settings.EMBEDDING_MODEL,
                 "dim": settings.EMBEDDING_DIM,
             },

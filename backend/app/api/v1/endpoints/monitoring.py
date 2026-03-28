@@ -1,13 +1,12 @@
 """API endpoints для мониторинга Celery."""
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse
-from typing import Optional, List
-from datetime import datetime
 import asyncio
-import httpx
+from datetime import datetime
+from typing import Any
 
-from app.db.session import AsyncSessionLocal
+import httpx
+from fastapi import APIRouter, HTTPException
+
 from app.core.config import settings
 from app.tasks.celery_app import celery_app
 
@@ -16,6 +15,42 @@ router = APIRouter(prefix="/monitoring", tags=["monitoring"])
 
 # Flower API base URL
 FLOWER_HOST = settings.get_flower_url()
+FLOWER_TIMEOUT = httpx.Timeout(connect=0.35, read=1.8, write=1.0, pool=0.35)
+FLOWER_HTTP_OK_FOR_REACHABILITY = {200, 301, 302, 307, 308, 401, 403, 404}
+
+
+def _flower_url(path: str) -> str:
+    base = FLOWER_HOST.rstrip("/")
+    suffix = path if path.startswith("/") else f"/{path}"
+    return f"{base}{suffix}"
+
+
+async def _flower_probe(client: httpx.AsyncClient) -> bool:
+    try:
+        response = await client.get(FLOWER_HOST)
+    except httpx.RequestError:
+        return False
+    return response.status_code in FLOWER_HTTP_OK_FOR_REACHABILITY
+
+
+async def _flower_get_json(
+    client: httpx.AsyncClient,
+    path: str,
+    params: dict[str, Any] | None = None,
+) -> tuple[Any, bool]:
+    try:
+        response = await client.get(_flower_url(path), params=params)
+    except httpx.RequestError:
+        return None, False
+
+    reachable = response.status_code in FLOWER_HTTP_OK_FOR_REACHABILITY
+    if response.status_code != 200:
+        return None, reachable
+
+    try:
+        return response.json(), reachable
+    except ValueError:
+        return None, reachable
 
 
 def _inspect_workers_fallback() -> list[str]:
@@ -70,7 +105,7 @@ def _inspect_workers_details_fallback() -> list[dict]:
         return []
 
 
-def _inspect_tasks_details_fallback(limit: int = 100, state: Optional[str] = None) -> list[dict]:
+def _inspect_tasks_details_fallback(limit: int = 100, state: str | None = None) -> list[dict]:
     try:
         inspector = celery_app.control.inspect(timeout=0.5)
         active = inspector.active() or {}
@@ -117,54 +152,26 @@ def _inspect_tasks_details_fallback(limit: int = 100, state: Optional[str] = Non
 @router.get("/celery/status")
 async def get_celery_status():
     """
-    Получить статус Celery кластера.
-    
+    Get fast Celery cluster status.
+
     Returns:
-        Информация о воркерах и очередях
+        Summary for workers and tasks.
     """
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            flower_reachable = False
-            # Получаем информацию о воркерах из Flower API
-            try:
-                response = await client.get(f"{FLOWER_HOST}/api/workers")
-                if response.status_code == 200:
-                    workers_data = response.json()
-                    flower_reachable = True
-                else:
-                    workers_data = {}
-                    if response.status_code in {401, 403}:
-                        flower_reachable = True
-            except Exception:
-                workers_data = {}
-            
-            # Получаем информацию об очередях
-            try:
-                response = await client.get(f"{FLOWER_HOST}/api/broker/queues")
-                if response.status_code == 200:
-                    queues_data = response.json()
-                    flower_reachable = True
-                else:
-                    queues_data = {}
-                    if response.status_code in {401, 403}:
-                        flower_reachable = True
-            except Exception:
-                queues_data = {}
-            
-            # Получаем информацию о задачах
-            try:
-                response = await client.get(f"{FLOWER_HOST}/api/tasks")
-                if response.status_code == 200:
-                    tasks_data = response.json()
-                    flower_reachable = True
-                else:
-                    tasks_data = {}
-                    if response.status_code in {401, 403}:
-                        flower_reachable = True
-            except Exception:
-                tasks_data = {}
-        
-        # Агрегируем статистику
+        async with httpx.AsyncClient(timeout=FLOWER_TIMEOUT, follow_redirects=False) as client:
+            probe_ok, workers_result, tasks_result = await asyncio.gather(
+                _flower_probe(client),
+                _flower_get_json(client, "/api/workers"),
+                # Keep the status endpoint fast even when Flower has a large task history.
+                _flower_get_json(client, "/api/tasks", params={"limit": 100}),
+            )
+
+        workers_data, workers_reachable = workers_result
+        tasks_data, tasks_reachable = tasks_result
+        workers_data = workers_data if isinstance(workers_data, dict) else {}
+        tasks_data = tasks_data if isinstance(tasks_data, dict) else {}
+        flower_reachable = bool(probe_ok or workers_reachable or tasks_reachable)
+
         workers_count = len(workers_data) if isinstance(workers_data, dict) else 0
         if workers_count == 0:
             workers_count = len(await asyncio.to_thread(_inspect_workers_fallback))
@@ -172,13 +179,11 @@ async def get_celery_status():
             1
             for w in _safe_dict_values(workers_data)
             if isinstance(w, dict)
-            and (
-                w.get("active", 0) > 0
-                or str(w.get("status", "")).lower() == "online"
-            )
+            and (w.get("active", 0) > 0 or str(w.get("status", "")).lower() == "online")
         )
-        
-        # Статистика задач
+        if active_workers == 0 and workers_count > 0 and not workers_data:
+            active_workers = workers_count
+
         total_tasks = len(tasks_data) if isinstance(tasks_data, dict) else 0
         active_tasks = sum(
             1
@@ -197,7 +202,7 @@ async def get_celery_status():
             for t in _safe_dict_values(tasks_data)
             if isinstance(t, dict) and str(t.get("state", "")).lower() == "failure"
         )
-        
+
         return {
             "status": "online" if workers_count > 0 else "offline",
             "workers": {
@@ -214,9 +219,8 @@ async def get_celery_status():
             "flower_url": FLOWER_HOST,
             "generated_at": datetime.now().isoformat(),
         }
-        
+
     except Exception as e:
-        # Если Flower недоступен, возвращаем базовый статус
         return {
             "status": "offline",
             "workers": {
@@ -240,16 +244,15 @@ async def get_celery_status():
 async def get_workers_info():
     """
     Получить информацию о воркерах.
-    
+
     Returns:
         Список воркеров с деталями
     """
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{FLOWER_HOST}/api/workers")
-            
-            workers_data = response.json() if response.status_code == 200 else {}
-            
+        async with httpx.AsyncClient(timeout=FLOWER_TIMEOUT, follow_redirects=False) as client:
+            workers_data, _ = await _flower_get_json(client, "/api/workers")
+            workers_data = workers_data if isinstance(workers_data, dict) else {}
+
             # Форматируем ответ
             workers = []
             for name, info in (workers_data.items() if isinstance(workers_data, dict) else {}):
@@ -265,13 +268,13 @@ async def get_workers_info():
 
             if len(workers) == 0:
                 workers = await asyncio.to_thread(_inspect_workers_details_fallback)
-            
+
             return {
                 "workers": workers,
                 "total": len(workers),
                 "generated_at": datetime.now().isoformat(),
             }
-            
+
     except httpx.RequestError:
         workers = await asyncio.to_thread(_inspect_workers_details_fallback)
         return {
@@ -293,28 +296,27 @@ async def get_workers_info():
 @router.get("/celery/tasks")
 async def get_tasks_info(
     limit: int = 100,
-    state: Optional[str] = None,
+    state: str | None = None,
 ):
     """
     Получить информацию о задачах.
-    
+
     Args:
         limit: Максимум задач
         state: Фильтр по статусу (SUCCESS, FAILURE, STARTED, PENDING)
-        
+
     Returns:
         Список задач
     """
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            params = {"limit": limit}
+        async with httpx.AsyncClient(timeout=FLOWER_TIMEOUT, follow_redirects=False) as client:
+            params = {"limit": min(limit, 500)}
             if state:
                 params["state"] = state
-            
-            response = await client.get(f"{FLOWER_HOST}/api/tasks", params=params)
-            
-            tasks_data = response.json() if response.status_code == 200 else {}
-            
+
+            tasks_data, _ = await _flower_get_json(client, "/api/tasks", params=params)
+            tasks_data = tasks_data if isinstance(tasks_data, dict) else {}
+
             # Форматируем ответ
             tasks = []
             for task_id, info in (tasks_data.items() if isinstance(tasks_data, dict) else {}):
@@ -331,20 +333,20 @@ async def get_tasks_info(
                     "retries": info.get("retries", 0),
                     "worker": info.get("worker", {}),
                 })
-            
+
             # Сортируем по времени получения
             tasks.sort(key=lambda t: t.get("received", ""), reverse=True)
 
             if len(tasks) == 0:
                 tasks = await asyncio.to_thread(_inspect_tasks_details_fallback, limit, state)
-            
+
             return {
                 "tasks": tasks[:limit],
                 "total": len(tasks),
                 "limit": limit,
                 "generated_at": datetime.now().isoformat(),
             }
-            
+
     except httpx.RequestError:
         tasks = await asyncio.to_thread(_inspect_tasks_details_fallback, limit, state)
         return {
@@ -369,16 +371,16 @@ async def get_tasks_info(
 async def get_queues_info():
     """
     Получить информацию об очередях.
-    
+
     Returns:
         Список очередей
     """
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{FLOWER_HOST}/api/broker/queues")
-            
-            if response.status_code != 200:
-                # Если API очередей недоступно, возвращаем базовую информацию
+        async with httpx.AsyncClient(timeout=FLOWER_TIMEOUT, follow_redirects=False) as client:
+            queues_data, _ = await _flower_get_json(client, "/api/broker/queues")
+
+            if not isinstance(queues_data, dict):
+                # Queue API unavailable: return minimal fallback payload
                 return {
                     "queues": [
                         {"name": "celery", "messages": 0, "consumers": 1},
@@ -386,9 +388,7 @@ async def get_queues_info():
                     "total": 1,
                     "generated_at": datetime.now().isoformat(),
                 }
-            
-            queues_data = response.json()
-            
+
             # Форматируем ответ
             queues = []
             for name, info in (queues_data.items() if isinstance(queues_data, dict) else {}):
@@ -398,13 +398,13 @@ async def get_queues_info():
                     "consumers": info.get("consumers", 0),
                     "unacked": info.get("unacked", 0),
                 })
-            
+
             return {
                 "queues": queues,
                 "total": len(queues),
                 "generated_at": datetime.now().isoformat(),
             }
-            
+
     except httpx.RequestError:
         # Возвращаем базовую информацию при ошибке
         return {
@@ -422,7 +422,7 @@ async def get_queues_info():
 async def get_scheduled_tasks_info():
     """
     Получить информацию о запланированных задачах (Celery Beat).
-    
+
     Returns:
         Список периодических задач
     """
@@ -445,12 +445,12 @@ async def get_scheduled_tasks_info():
                 "kwargs": config.get("kwargs", {}),
                 "options": config.get("options", {}),
             })
-        
+
         return {
             "scheduled_tasks": scheduled_tasks,
             "total": len(scheduled_tasks),
             "generated_at": datetime.now().isoformat(),
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

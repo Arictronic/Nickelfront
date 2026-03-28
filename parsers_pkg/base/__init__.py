@@ -9,7 +9,7 @@ Base module for parsers.
 
 from .base_client import BaseAPIClient
 from .base_parser import BaseParser
-from .deduplication import Deduplicator, DeduplicationResult, check_duplicate
+from .deduplication import DeduplicationResult, Deduplicator, check_duplicate
 
 __all__ = [
     "BaseAPIClient",

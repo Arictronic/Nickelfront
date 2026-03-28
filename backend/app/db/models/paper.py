@@ -35,10 +35,22 @@ class Paper(Base):
     source = Column(String(50), nullable=False, index=True)  # CORE, arXiv, etc.
     source_id = Column(String(200), nullable=True, index=True)  # ID в источнике
     url = Column(String(1000), nullable=True)
+    pdf_url = Column(String(1000), nullable=True)
+    pdf_local_path = Column(String(1000), nullable=True)
 
     # Метаданные
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # Статус обработки
+    processing_status = Column(String(50), nullable=False, default="pending", index=True)
+    content_task_id = Column(String(100), nullable=True, index=True)
+    processing_error = Column(Text, nullable=True)
+
+    # Результаты AI-обработки
+    summary_ru = Column(Text, nullable=True)
+    analysis_ru = Column(Text, nullable=True)
+    translation_ru = Column(Text, nullable=True)
 
     # Индексы
     __table_args__ = (

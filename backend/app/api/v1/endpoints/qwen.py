@@ -1,25 +1,23 @@
 """API endpoints для Qwen чата."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional, List
-from loguru import logger
+import asyncio
 
-from app.db.session import get_db
+from fastapi import APIRouter, HTTPException
+
 from app.services.qwen_service import get_qwen_service
 from shared.schemas.paper import (
-    QwenMessageRequest,
-    QwenMessageResponse,
-    QwenSessionCreateRequest,
-    QwenSessionCreateResponse,
-    QwenSessionListResponse,
-    QwenSessionInfo,
-    QwenRenameRequest,
-    QwenRenameResponse,
-    QwenDeleteResponse,
     QwenConfigResponse,
     QwenConfigUpdateRequest,
+    QwenDeleteResponse,
     QwenHealthResponse,
+    QwenMessageRequest,
+    QwenMessageResponse,
+    QwenRenameRequest,
+    QwenRenameResponse,
+    QwenSessionCreateRequest,
+    QwenSessionCreateResponse,
+    QwenSessionInfo,
+    QwenSessionListResponse,
 )
 
 router = APIRouter(prefix="/qwen", tags=["qwen-chat"])
@@ -35,10 +33,12 @@ async def health_check():
     """
     qwen_service = get_qwen_service()
 
+    is_available = await asyncio.to_thread(lambda: qwen_service.is_available)
+
     return QwenHealthResponse(
-        status="ok" if qwen_service.is_available else "unavailable",
+        status="ok" if is_available else "unavailable",
         model=qwen_service.model,
-        available=qwen_service.is_available,
+        available=is_available,
     )
 
 
@@ -51,7 +51,7 @@ async def get_config():
         Конфигурация сервиса.
     """
     qwen_service = get_qwen_service()
-    config = qwen_service.get_config()
+    config = await asyncio.to_thread(qwen_service.get_config)
 
     return QwenConfigResponse(**config)
 
@@ -70,12 +70,13 @@ async def get_stats():
         Статистика сервиса.
     """
     qwen_service = get_qwen_service()
-    stats = qwen_service.get_stats()
+    stats = await asyncio.to_thread(qwen_service.get_stats)
+    is_available = await asyncio.to_thread(lambda: qwen_service.is_available)
 
     return {
         **stats,
         "model": qwen_service.model,
-        "is_available": qwen_service.is_available,
+        "is_available": is_available,
     }
 
 
@@ -93,7 +94,8 @@ async def update_config(config_update: QwenConfigUpdateRequest):
     """
     qwen_service = get_qwen_service()
 
-    qwen_service.update_config(
+    await asyncio.to_thread(
+        qwen_service.update_config,
         model=config_update.model,
         thinking_enabled=config_update.thinking_enabled,
         search_enabled=config_update.search_enabled,
@@ -101,11 +103,11 @@ async def update_config(config_update: QwenConfigUpdateRequest):
         max_continues=config_update.max_continues,
     )
 
-    return QwenConfigResponse(**qwen_service.get_config())
+    return QwenConfigResponse(**(await asyncio.to_thread(qwen_service.get_config)))
 
 
 @router.post("/sessions", response_model=QwenSessionCreateResponse)
-async def create_session(request: Optional[QwenSessionCreateRequest] = None):
+async def create_session(request: QwenSessionCreateRequest | None = None):
     """
     Создать новую сессию чата.
 
@@ -117,13 +119,13 @@ async def create_session(request: Optional[QwenSessionCreateRequest] = None):
     """
     qwen_service = get_qwen_service()
 
-    if not qwen_service.is_available:
+    if not await asyncio.to_thread(lambda: qwen_service.is_available):
         raise HTTPException(
             status_code=503,
             detail="Qwen сервис недоступен. Проверьте настройку QWEN_TOKEN."
         )
 
-    session_id = qwen_service.create_session()
+    session_id = await asyncio.to_thread(qwen_service.create_session)
 
     if not session_id:
         raise HTTPException(
@@ -135,7 +137,7 @@ async def create_session(request: Optional[QwenSessionCreateRequest] = None):
 
     # Переименовываем сессию если указан заголовок
     if title != "Новый чат":
-        qwen_service.rename_session(session_id, title)
+        await asyncio.to_thread(qwen_service.rename_session, session_id, title)
 
     return QwenSessionCreateResponse(
         session_id=session_id,
@@ -153,10 +155,10 @@ async def list_sessions():
     """
     qwen_service = get_qwen_service()
 
-    if not qwen_service.is_available:
+    if not await asyncio.to_thread(lambda: qwen_service.is_available):
         return QwenSessionListResponse(sessions=[])
 
-    sessions_data = qwen_service.list_sessions()
+    sessions_data = await asyncio.to_thread(qwen_service.list_sessions)
 
     sessions = [
         QwenSessionInfo(
@@ -183,13 +185,13 @@ async def get_session(session_id: str):
     """
     qwen_service = get_qwen_service()
 
-    if not qwen_service.is_available:
+    if not await asyncio.to_thread(lambda: qwen_service.is_available):
         raise HTTPException(
             status_code=503,
             detail="Qwen сервис недоступен"
         )
 
-    session_info = qwen_service.get_session_info(session_id)
+    session_info = await asyncio.to_thread(qwen_service.get_session_info, session_id)
 
     if not session_info:
         raise HTTPException(
@@ -213,13 +215,13 @@ async def delete_session(session_id: str):
     """
     qwen_service = get_qwen_service()
 
-    if not qwen_service.is_available:
+    if not await asyncio.to_thread(lambda: qwen_service.is_available):
         raise HTTPException(
             status_code=503,
             detail="Qwen сервис недоступен"
         )
 
-    success = qwen_service.delete_session(session_id)
+    success = await asyncio.to_thread(qwen_service.delete_session, session_id)
 
     return QwenDeleteResponse(
         status="ok" if success else "error",
@@ -241,13 +243,13 @@ async def rename_session(session_id: str, request: QwenRenameRequest):
     """
     qwen_service = get_qwen_service()
 
-    if not qwen_service.is_available:
+    if not await asyncio.to_thread(lambda: qwen_service.is_available):
         raise HTTPException(
             status_code=503,
             detail="Qwen сервис недоступен"
         )
 
-    success = qwen_service.rename_session(session_id, request.title)
+    success = await asyncio.to_thread(qwen_service.rename_session, session_id, request.title)
 
     if not success:
         raise HTTPException(
@@ -288,7 +290,7 @@ async def send_message(request: QwenMessageRequest):
     """
     qwen_service = get_qwen_service()
 
-    if not qwen_service.is_available:
+    if not await asyncio.to_thread(lambda: qwen_service.is_available):
         return QwenMessageResponse(
             session_id="",
             message=request.message,
@@ -299,7 +301,8 @@ async def send_message(request: QwenMessageRequest):
             error="Qwen сервис недоступен. Проверьте настройку QWEN_TOKEN.",
         )
 
-    result = qwen_service.send_message(
+    result = await asyncio.to_thread(
+        qwen_service.send_message,
         message=request.message,
         session_id=request.session_id,
         thinking_enabled=request.thinking_enabled,

@@ -6,8 +6,8 @@ Spiders module.
 """
 
 from .researchgate_parser import (
-    ResearchGateParser,
     ResearchGateConfig,
+    ResearchGateParser,
     parse_researchgate,
 )
 

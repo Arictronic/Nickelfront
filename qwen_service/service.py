@@ -15,15 +15,13 @@ Qwen Service - Мини-сервис для работы с Qwen API
 - QWEN_MAX_CONTINUES - макс. количество продолжений (по умолчанию 5)
 """
 
-import json
 import logging
 import os
-import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import uvicorn
-from dotenv import load_dotenv
+from dotenv import load_dotenv, set_key
 from fastapi import FastAPI, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -63,9 +61,24 @@ config = {
     "max_continues": DEFAULT_MAX_CONTINUES,
 }
 
+
+def save_config(current_config: dict[str, Any]) -> None:
+    """Persist runtime config into .env."""
+    set_key(str(env_path), "QWEN_TOKEN", str(current_config.get("token", "")))
+    set_key(str(env_path), "QWEN_API_KEY", str(current_config.get("api_key", "")))
+    set_key(str(env_path), "QWEN_MODEL", str(current_config.get("model", DEFAULT_MODEL)))
+    set_key(str(env_path), "QWEN_THINKING_ENABLED", str(current_config.get("thinking_enabled", True)).lower())
+    set_key(str(env_path), "QWEN_SEARCH_ENABLED", str(current_config.get("search_enabled", True)).lower())
+    set_key(
+        str(env_path),
+        "QWEN_AUTO_CONTINUE_ENABLED",
+        str(current_config.get("auto_continue_enabled", DEFAULT_AUTO_CONTINUE_ENABLED)).lower(),
+    )
+    set_key(str(env_path), "QWEN_MAX_CONTINUES", str(current_config.get("max_continues", DEFAULT_MAX_CONTINUES)))
+
 # Инициализация API
 qwen_token = config.get("token", "")
-qwen_api: Optional[QwenAPI] = None
+qwen_api: QwenAPI | None = None
 
 if qwen_token:
     qwen_api = QwenAPI(token=qwen_token, logger=lambda msg: logging.info(msg))
@@ -74,10 +87,10 @@ else:
     logging.warning("Qwen токен не найден в .env!")
 
 # Хранилище сессий в памяти
-active_sessions: Dict[str, Dict[str, Any]] = {}
+active_sessions: dict[str, dict[str, Any]] = {}
 
 # Трекинг авто-продолжений: session_id -> {message_ids: set, count: int, last_message_id: int}
-auto_continue_tracker: Dict[str, Dict[str, Any]] = {}
+auto_continue_tracker: dict[str, dict[str, Any]] = {}
 
 
 # FastAPI приложение
@@ -96,7 +109,7 @@ app.add_middleware(
 security = HTTPBearer(auto_error=False)
 
 
-def verify_token(credentials: Optional[HTTPAuthorizationCredentials] = Security(security)) -> bool:
+def verify_token(credentials: HTTPAuthorizationCredentials | None = Security(security)) -> bool:
     """Проверка API токена"""
     api_key = config.get("api_key", "")
     if not api_key:
@@ -117,8 +130,8 @@ class SendMessageRequest(BaseModel):
     message: str
     thinking_enabled: bool = DEFAULT_THINKING_ENABLED
     search_enabled: bool = DEFAULT_SEARCH_ENABLED
-    file_ids: List[str] = Field(default_factory=list)
-    auto_continue: Optional[bool] = None  # Переопределение глобальной настройки
+    file_ids: list[str] = Field(default_factory=list)
+    auto_continue: bool | None = None  # Переопределение глобальной настройки
 
 
 class ContinueMessageRequest(BaseModel):
@@ -147,11 +160,11 @@ def _can_auto_continue(session_id: str) -> bool:
     """Проверка возможности авто-продолжения"""
     if not config.get("auto_continue_enabled", DEFAULT_AUTO_CONTINUE_ENABLED):
         return False
-    
+
     max_continues = config.get("max_continues", DEFAULT_MAX_CONTINUES)
     tracker = auto_continue_tracker.get(session_id, {})
     count = tracker.get("count", 0)
-    
+
     return count < max_continues
 
 
@@ -163,7 +176,7 @@ def _track_continuation(session_id: str, message_id: int):
             "count": 0,
             "last_message_id": None,
         }
-    
+
     tracker = auto_continue_tracker[session_id]
     if message_id not in tracker["message_ids"]:
         tracker["message_ids"].add(message_id)
@@ -183,7 +196,7 @@ def _reset_continuation_tracker(session_id: str):
 def _should_auto_continue(response_text: str, can_continue_flag: bool) -> bool:
     """
     Автоматическое определение необходимости продолжения ответа.
-    
+
     Признаки того, что ответ не завершён:
     1. can_continue_flag = True (явный флаг от API)
     2. Ответ обрывается на середине предложения
@@ -194,14 +207,14 @@ def _should_auto_continue(response_text: str, can_continue_flag: bool) -> bool:
     # Явный флаг от API
     if can_continue_flag:
         return True
-    
+
     if not response_text:
         return False
-    
+
     text = response_text.strip()
     if len(text) < 50:  # Слишком короткий ответ
         return False
-    
+
     # Проверка на обрыв предложения
     incomplete_endings = [
         '...', '—', '–', '-',  # Многоточие, тире
@@ -213,34 +226,34 @@ def _should_auto_continue(response_text: str, can_continue_flag: bool) -> bool:
         '•', '-', '*',  # Маркеры списков
         '```',  # Незакрытый блок кода
     ]
-    
+
     text_lower = text.lower()
     for ending in incomplete_endings:
         if text_lower.endswith(ending):
             return True
-    
+
     # Проверка на незакрытые скобки
     open_parens = text.count('(') - text.count(')')
     open_brackets = text.count('[') - text.count(']')
     open_braces = text.count('{') - text.count('}')
     if open_parens > 0 or open_brackets > 0 or open_braces > 0:
         return True
-    
+
     # Проверка на незакрытые кавычки
     single_quotes = text.count("'") % 2
     double_quotes = text.count('"') % 2
     if single_quotes > 0 or double_quotes > 0:
         return True
-    
+
     # Проверка на незакрытые блоки кода
     code_block_count = text.count("```")
     if code_block_count % 2 != 0:
         return True
-    
+
     # Ответ выглядит завершённым (есть точка в конце)
     if text.endswith('.') or text.endswith('!') or text.endswith('?') or text.endswith('。」'):
         return False
-    
+
     return False
 
 
@@ -249,7 +262,7 @@ def _send_message_sync(
     message: str,
     thinking_enabled: bool,
     search_enabled: bool,
-    ref_file_ids: Optional[List[str]] = None,
+    ref_file_ids: list[str] | None = None,
     timeout: int = 120,
 ) -> tuple[str, str, int, bool]:
     """
@@ -261,7 +274,7 @@ def _send_message_sync(
     import time
 
     qwen_api.session_id = session_id
-    
+
     start_time = time.time()
     last_activity = start_time
     response_text = ""
@@ -276,7 +289,7 @@ def _send_message_sync(
         response_text = response
         last_activity = time.time()
         chunks_count += 1
-        
+
         # Keep-alive логирование каждые 15 секунд
         elapsed = last_activity - start_time
         if int(elapsed) % 15 == 0 and elapsed > 0:
@@ -288,7 +301,7 @@ def _send_message_sync(
         response_text = response
         last_activity = time.time()
 
-    def on_meta(meta: Dict[str, Any]):
+    def on_meta(meta: dict[str, Any]):
         nonlocal message_id, can_continue
         message_id = int(meta.get("response_message_id", 0))
         can_continue = bool(meta.get("can_continue", False))
@@ -342,7 +355,7 @@ def _continue_message_sync(
 
     qwen_api.session_id = session_id
     qwen_api.last_message_id = message_id
-    
+
     start_time = time.time()
     last_activity = start_time
     response_text = ""
@@ -357,13 +370,13 @@ def _continue_message_sync(
         response_text = response
         last_activity = time.time()
         chunks_count += 1
-        
+
         # Keep-alive логирование каждые 15 секунд
         elapsed = last_activity - start_time
         if int(elapsed) % 15 == 0 and elapsed > 0:
             logging.info(f"  → Продолжение... {int(elapsed)} сек, {chunks_count} чанков")
 
-    def on_meta(meta: Dict[str, Any]):
+    def on_meta(meta: dict[str, Any]):
         nonlocal new_message_id, can_continue
         new_message_id = int(meta.get("response_message_id", 0))
         can_continue = bool(meta.get("can_continue", False))
@@ -373,11 +386,6 @@ def _continue_message_sync(
 
         if new_message_id <= 0:
             new_message_id = int(qwen_api.last_message_id or 0)
-
-    callbacks = StreamCallbacks(
-        on_meta=on_meta,
-        on_complete_parts=on_complete_parts,
-    )
 
     try:
         qwen_api.continue_message(
@@ -424,7 +432,7 @@ async def get_auto_continue_config():
 
 
 @app.post("/config/auto_continue")
-async def set_auto_continue_config(enabled: bool, max_continues: Optional[int] = None):
+async def set_auto_continue_config(enabled: bool, max_continues: int | None = None):
     """Настройка авто-продолжения"""
     config["auto_continue_enabled"] = bool(enabled)
     if max_continues is not None:
@@ -438,11 +446,11 @@ async def set_token(token_config: TokenConfig):
     """Установка токена Qwen"""
     config["token"] = token_config.token
     save_config(config)
-    
+
     # Переинициализация API
     global qwen_api
     qwen_api = QwenAPI(token=token_config.token, logger=lambda msg: logging.info(msg))
-    
+
     return {"status": "ok", "message": "Токен установлен"}
 
 
@@ -479,14 +487,14 @@ async def set_model(model_config: ModelConfig):
 
 
 @app.get("/models")
-async def list_models(credentials: Optional[HTTPAuthorizationCredentials] = Security(security)):
+async def list_models(credentials: HTTPAuthorizationCredentials | None = Security(security)):
     """Получение списка доступных моделей"""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
-    
+
     if not qwen_api:
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
-    
+
     try:
         models = qwen_api.fetch_models()
         return {"models": models}
@@ -496,7 +504,7 @@ async def list_models(credentials: Optional[HTTPAuthorizationCredentials] = Secu
 
 @app.post("/sessions")
 async def create_session(
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
     """Создание новой сессии чата"""
     if not verify_token(credentials):
@@ -528,15 +536,15 @@ async def create_session(
 
 @app.get("/sessions")
 async def list_sessions(
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
     """Получение списка сессий"""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
-    
+
     if not qwen_api:
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
-    
+
     try:
         sessions, _ = qwen_api.fetch_sessions_page()
         return {"sessions": sessions}
@@ -547,15 +555,15 @@ async def list_sessions(
 @app.get("/sessions/{session_id}")
 async def get_session(
     session_id: str,
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
     """Получение информации о сессии"""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
-    
+
     if not qwen_api:
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
-    
+
     try:
         qwen_api.session_id = session_id
         history, messages = qwen_api.fetch_history(session_id)
@@ -567,15 +575,15 @@ async def get_session(
 @app.delete("/sessions/{session_id}")
 async def delete_session(
     session_id: str,
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
     """Удаление сессии"""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
-    
+
     if not qwen_api:
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
-    
+
     try:
         success = qwen_api.delete_session(session_id)
         if success and session_id in active_sessions:
@@ -588,16 +596,16 @@ async def delete_session(
 @app.post("/sessions/{session_id}/rename")
 async def rename_session(
     session_id: str,
-    title_data: Dict[str, str],
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
+    title_data: dict[str, str],
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
     """Переименование сессии"""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
-    
+
     if not qwen_api:
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
-    
+
     title = title_data.get("title", "Новый чат")
     try:
         success = qwen_api.update_session_title(session_id, title)
@@ -611,7 +619,7 @@ async def rename_session(
 @app.post("/messages")
 async def send_message(
     request: SendMessageRequest,
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
     """Отправка сообщения в чат с поддержкой авто-продолжения"""
     if not verify_token(credentials):
@@ -646,10 +654,10 @@ async def send_message(
         all_response_parts = [response_text] if response_text else []
         last_message_id = message_id
         last_response_text = response_text
-        
+
         # Определяем необходимость продолжения автоматически
         need_continue = auto_continue and _should_auto_continue(last_response_text, can_continue)
-        
+
         while need_continue and _can_auto_continue(request.session_id):
             continue_count += 1
             _track_continuation(request.session_id, last_message_id)
@@ -672,7 +680,7 @@ async def send_message(
             last_message_id = new_message_id
             last_response_text = cont_response or last_response_text
             can_continue = new_can_continue
-            
+
             # Снова проверяем необходимость продолжения
             need_continue = auto_continue and _should_auto_continue(last_response_text, can_continue)
 
@@ -705,8 +713,8 @@ async def send_message(
 @app.post("/messages/continue")
 async def continue_message(
     request: ContinueMessageRequest,
-    auto_continue: Optional[bool] = None,
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
+    auto_continue: bool | None = None,
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
     """Продолжение ответа с поддержкой авто-продолжения"""
     if not verify_token(credentials):
@@ -804,20 +812,20 @@ async def continue_message(
 
 @app.post("/files/upload")
 async def upload_file(
-    file_path_data: Dict[str, str],
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
+    file_path_data: dict[str, str],
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
     """Загрузка файла"""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
-    
+
     if not qwen_api:
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
-    
+
     file_path = file_path_data.get("file_path", "")
     if not file_path:
         raise HTTPException(status_code=400, detail="Не указан путь к файлу")
-    
+
     try:
         file_info = qwen_api.upload_file(file_path)
         if not file_info:
@@ -830,15 +838,15 @@ async def upload_file(
 @app.get("/files/{file_id}")
 async def get_file(
     file_id: str,
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
     """Получение информации о файле"""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
-    
+
     if not qwen_api:
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
-    
+
     try:
         file_info = qwen_api.fetch_files([file_id])
         if not file_info:
@@ -850,15 +858,15 @@ async def get_file(
 
 @app.get("/user/info")
 async def get_user_info(
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
     """Получение информации о пользователе"""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
-    
+
     if not qwen_api:
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
-    
+
     try:
         user_info = qwen_api.get_user_info()
         return {"user_info": user_info}

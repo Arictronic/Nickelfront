@@ -1,24 +1,24 @@
 """API endpoints для векторного поиска."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Body
-from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional, List
+import asyncio
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.services.paper_service import PaperService
 from app.services.embedding_service import get_embedding_service
+from app.services.paper_service import PaperService
 from app.services.vector_service import get_vector_service
 from shared.schemas.paper import (
+    VectorClearRequest,
+    VectorClearResponse,
+    VectorRebuildResponse,
     VectorSearchRequest,
     VectorSearchResponse,
     VectorSearchResultItem,
-    Paper,
     VectorStats,
     VectorStatsResponse,
-    VectorRebuildResponse,
-    VectorClearRequest,
-    VectorClearResponse,
 )
 
 router = APIRouter(prefix="/vector", tags=["vector-search"])
@@ -50,7 +50,8 @@ async def vector_search(
     vector_service = get_vector_service()
 
     # Проверяем доступность сервисов
-    if not embedding_service.model:
+    embedding_available = await asyncio.to_thread(lambda: embedding_service.model is not None)
+    if not embedding_available:
         logger.warning("Модель эмбеддингов недоступна, используем текстовый поиск")
         # Fallback на текстовый поиск
         paper_service = PaperService(db)
@@ -67,7 +68,7 @@ async def vector_search(
         )
 
     # Генерируем эмбеддинг для запроса
-    query_embedding = embedding_service.get_embedding(request.query)
+    query_embedding = await asyncio.to_thread(embedding_service.get_embedding, request.query)
 
     if not query_embedding:
         raise HTTPException(status_code=500, detail="Ошибка генерации эмбеддинга")
@@ -75,7 +76,8 @@ async def vector_search(
     # Выполняем векторный поиск
     if request.search_type == "hybrid":
         # Гибридный поиск: векторный + текстовый
-        vector_results = vector_service.search(
+        vector_results = await asyncio.to_thread(
+            vector_service.search,
             query_embedding=query_embedding,
             limit=request.limit,
             source=request.source,
@@ -86,7 +88,6 @@ async def vector_search(
         # Получаем текстовые результаты для сравнения
         paper_service = PaperService(db)
         text_papers = await paper_service.search(query=request.query, limit=request.limit)
-        text_paper_ids = {p.id for p in text_papers}
 
         # Объединяем результаты (приоритет векторным)
         seen_ids = set()
@@ -121,7 +122,8 @@ async def vector_search(
 
     else:
         # Чистый векторный поиск (vector или semantic)
-        vector_results = vector_service.search(
+        vector_results = await asyncio.to_thread(
+            vector_service.search,
             query_embedding=query_embedding,
             limit=request.limit,
             source=request.source if request.search_type == "semantic" else None,
@@ -156,9 +158,10 @@ async def vector_search_stats():
     модели эмбеддингов и статусе сервисов.
     """
     vector_service = get_vector_service()
-    vector_stats = vector_service.get_stats()
+    vector_stats = await asyncio.to_thread(vector_service.get_stats)
 
     embedding_service = get_embedding_service()
+    embedding_available = await asyncio.to_thread(lambda: embedding_service.model is not None)
 
     return VectorStatsResponse(
         vector_store=VectorStats(
@@ -167,9 +170,9 @@ async def vector_search_stats():
             collection=vector_stats.get("collection", "papers"),
             persist_directory=vector_stats.get("persist_directory", "./chroma_db"),
         ),
-        embedding_model=embedding_service.MODEL_NAME if embedding_service.model else None,
-        embedding_dim=embedding_service.EMBEDDING_DIM if embedding_service.model else None,
-        embedding_available=embedding_service.model is not None,
+        embedding_model=embedding_service.MODEL_NAME if embedding_available else None,
+        embedding_dim=embedding_service.EMBEDDING_DIM if embedding_available else None,
+        embedding_available=embedding_available,
     )
 
 
@@ -191,7 +194,8 @@ async def rebuild_vector_index(
     embedding_service = get_embedding_service()
     vector_service = get_vector_service()
 
-    if not embedding_service.model:
+    embedding_available = await asyncio.to_thread(lambda: embedding_service.model is not None)
+    if not embedding_available:
         raise HTTPException(status_code=500, detail="Модель эмбеддингов недоступна")
 
     logger.info(f"Начало перестройки векторного индекса (limit={limit}, batch_size={batch_size})")
@@ -224,14 +228,15 @@ async def rebuild_vector_index(
             continue
 
         # Генерируем новый эмбеддинг
-        text = embedding_service.get_paper_embedding_text(
+        text = await asyncio.to_thread(
+            embedding_service.get_paper_embedding_text,
             title=paper.title,
             abstract=paper.abstract or "",
             keywords=paper.keywords or [],
         )
 
         if text:
-            embedding = embedding_service.get_embedding(text)
+            embedding = await asyncio.to_thread(embedding_service.get_embedding, text)
             if embedding:
                 # Сохраняем эмбеддинг в БД
                 await paper_service.update_paper(paper.id, embedding=embedding)
@@ -246,7 +251,7 @@ async def rebuild_vector_index(
                 })
 
     # Перестраиваем индекс в ChromaDB с пакетным добавлением
-    indexed_count = vector_service.rebuild_index(papers_with_embeddings)
+    indexed_count = await asyncio.to_thread(vector_service.rebuild_index, papers_with_embeddings)
 
     logger.info(f"Векторный индекс перестроен: {indexed_count} статей")
 
@@ -277,7 +282,7 @@ async def clear_vector_index(
     logger.warning("Запрос на очистку векторного индекса")
 
     vector_service = get_vector_service()
-    success = vector_service.clear()
+    success = await asyncio.to_thread(vector_service.clear)
 
     if success:
         logger.info("Векторное хранилище успешно очищено")

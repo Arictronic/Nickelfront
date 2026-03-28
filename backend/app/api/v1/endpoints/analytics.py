@@ -1,25 +1,25 @@
 """API endpoints для аналитики и метрик."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
-from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from app.db.session import get_db
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.db.models.paper import Paper as PaperModel
+from app.db.session import get_db
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 
 @router.get("/metrics/summary")
 async def get_analytics_summary(
-    source: Optional[str] = Query(None, description="Фильтр по источнику"),
+    source: str | None = Query(None, description="Фильтр по источнику"),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Получить сводную статистику.
-    
+
     Returns:
         Dict с основными метриками
     """
@@ -28,52 +28,57 @@ async def get_analytics_summary(
         base_query = select(PaperModel)
         if source and source != "all":
             base_query = base_query.where(PaperModel.source == source)
-        
+
         # Общее количество
         count_query = select(func.count()).select_from(PaperModel)
         if source and source != "all":
             count_query = count_query.where(PaperModel.source == source)
-        
+
         total_count_result = await db.execute(count_query)
         total_count = total_count_result.scalar() or 0
-        
+
         # Количество по источникам
         source_query = select(
             PaperModel.source,
             func.count().label("count")
         ).group_by(PaperModel.source)
-        
+
         source_result = await db.execute(source_query)
         sources = {row.source: row.count for row in source_result}
-        
+
         # Количество с эмбеддингами
         embedding_query = select(func.count()).where(
             PaperModel.embedding.isnot(None)
         )
         if source and source != "all":
             embedding_query = embedding_query.where(PaperModel.source == source)
-        
+
         embedding_result = await db.execute(embedding_query)
         with_embedding = embedding_result.scalar() or 0
-        
+
         # Средняя полнота данных
         papers_query = base_query.limit(1000)
         papers_result = await db.execute(papers_query)
         papers = papers_result.scalars().all()
-        
+
         # Вычисляем метрики
         quality_scores = []
         for paper in papers:
             score = 0
-            if paper.abstract: score += 20
-            if paper.full_text: score += 30
-            if paper.keywords: score += 20
-            if paper.doi: score += 15
-            if paper.authors: score += 15
+            if paper.abstract:
+                score += 20
+            if paper.full_text:
+                score += 30
+            if paper.keywords:
+                score += 20
+            if paper.doi:
+                score += 15
+            if paper.authors:
+                score += 15
             quality_scores.append(min(100, score))
-        
+
         avg_quality = sum(quality_scores) / len(quality_scores) if quality_scores else 0
-        
+
         return {
             "total_papers": total_count,
             "papers_by_source": sources,
@@ -82,7 +87,7 @@ async def get_analytics_summary(
             "avg_quality_score": round(avg_quality, 2),
             "generated_at": datetime.now().isoformat(),
         }
-        
+
     except HTTPException:
         raise
     except HTTPException:
@@ -103,12 +108,12 @@ async def get_analytics_summary(
 async def get_publications_trend(
     group_by: str = Query(default="month", description="Группировка: day, week, month, year"),
     limit: int = Query(default=12, description="Максимум периодов"),
-    source: Optional[str] = Query(None, description="Фильтр по источнику"),
+    source: str | None = Query(None, description="Фильтр по источнику"),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Получить тренд публикаций.
-    
+
     Returns:
         Список периодов с количеством публикаций
     """
@@ -139,22 +144,22 @@ async def get_publications_trend(
                 date_trunc = func.date_trunc("day", PaperModel.publication_date)
             else:
                 date_trunc = func.date_trunc("month", PaperModel.publication_date)
-        
+
         query = select(
             date_trunc.label("period"),
             func.count().label("count")
         ).where(
             PaperModel.publication_date.isnot(None)
         )
-        
+
         if source and source != "all":
             query = query.where(PaperModel.source == source)
-        
+
         query = query.group_by("period").order_by("period").limit(limit)
-        
+
         result = await db.execute(query)
         rows = result.all()
-        
+
         trend = [
             {
                 "period": row.period.strftime("%Y-%m-%d") if hasattr(row.period, "strftime") else str(row.period),
@@ -162,13 +167,13 @@ async def get_publications_trend(
             }
             for row in rows
         ]
-        
+
         return {
             "trend": trend,
             "group_by": group_by,
             "generated_at": datetime.now().isoformat(),
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -177,31 +182,31 @@ async def get_publications_trend(
 async def get_top_items(
     item_type: str = Query(..., description="Тип: journals, authors, keywords"),
     limit: int = Query(default=10, description="Максимум элементов"),
-    source: Optional[str] = Query(None, description="Фильтр по источнику"),
+    source: str | None = Query(None, description="Фильтр по источнику"),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Получить топ элементов.
-    
+
     Args:
         item_type: journals, authors, keywords
-        
+
     Returns:
         Список элементов с количеством
     """
     try:
         query = select(PaperModel)
-        
+
         if source and source != "all":
             query = query.where(PaperModel.source == source)
-        
+
         query = query.limit(2000)  # Ограничение для обработки
-        
+
         result = await db.execute(query)
         papers = result.scalars().all()
-        
+
         from collections import Counter
-        
+
         if item_type == "journals":
             items = [p.journal for p in papers if p.journal]
             counter = Counter(items)
@@ -219,18 +224,18 @@ async def get_top_items(
             counter = Counter(items)
         else:
             raise HTTPException(status_code=400, detail=f"Неизвестный тип: {item_type}")
-        
+
         top_items = [
             {"name": name, "count": count}
             for name, count in counter.most_common(limit)
         ]
-        
+
         return {
             "item_type": item_type,
             "items": top_items,
             "generated_at": datetime.now().isoformat(),
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -243,7 +248,7 @@ async def get_source_distribution(
 ):
     """
     Получить распределение по источникам.
-    
+
     Returns:
         Dict с распределением
     """
@@ -252,10 +257,10 @@ async def get_source_distribution(
             PaperModel.source,
             func.count().label("count")
         ).group_by(PaperModel.source)
-        
+
         result = await db.execute(query)
         rows = result.all()
-        
+
         distribution = {
             row.source: {
                 "count": row.count,
@@ -263,46 +268,46 @@ async def get_source_distribution(
             }
             for row in rows
         }
-        
+
         total = sum(d["count"] for d in distribution.values())
         if total > 0:
             for source in distribution:
                 distribution[source]["percent"] = round(
                     distribution[source]["count"] / total * 100, 2
                 )
-        
+
         return {
             "distribution": distribution,
             "total": total,
             "generated_at": datetime.now().isoformat(),
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/metrics/quality-report")
 async def get_quality_report(
-    source: Optional[str] = Query(None, description="Фильтр по источнику"),
+    source: str | None = Query(None, description="Фильтр по источнику"),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Получить отчёт о качестве данных.
-    
+
     Returns:
         Dict с метриками качества
     """
     try:
         query = select(PaperModel)
-        
+
         if source and source != "all":
             query = query.where(PaperModel.source == source)
-        
+
         query = query.limit(2000)
-        
+
         result = await db.execute(query)
         papers = result.scalars().all()
-        
+
         if not papers:
             empty_completeness = {
                 "with_abstract": {"count": 0, "percent": 0},
@@ -326,34 +331,39 @@ async def get_quality_report(
                 },
                 "generated_at": datetime.now().isoformat(),
             }
-        
+
         # Метрики качества
         total = len(papers)
-        
+
         with_abstract = sum(1 for p in papers if p.abstract and len(p.abstract) > 0)
         with_full_text = sum(1 for p in papers if p.full_text and len(p.full_text) > 0)
         with_keywords = sum(1 for p in papers if p.keywords and len(p.keywords) > 0)
         with_doi = sum(1 for p in papers if p.doi and len(p.doi) > 0)
         with_authors = sum(1 for p in papers if p.authors and len(p.authors) > 0)
         with_embedding = sum(1 for p in papers if p.embedding and len(p.embedding) > 0)
-        
+
         # Средние значения
         avg_abstract_len = sum(len(p.abstract) for p in papers if p.abstract) / max(1, with_abstract)
         avg_keywords = sum(len(p.keywords) for p in papers if p.keywords) / max(1, with_keywords)
-        
+
         # Оценка качества
         quality_scores = []
         for paper in papers:
             score = 0
-            if paper.abstract: score += 20
-            if paper.full_text: score += 30
-            if paper.keywords: score += 20
-            if paper.doi: score += 15
-            if paper.authors: score += 15
+            if paper.abstract:
+                score += 20
+            if paper.full_text:
+                score += 30
+            if paper.keywords:
+                score += 20
+            if paper.doi:
+                score += 15
+            if paper.authors:
+                score += 15
             quality_scores.append(min(100, score))
-        
+
         avg_quality = sum(quality_scores) / len(quality_scores) if quality_scores else 0
-        
+
         return {
             "total": total,
             "completeness": {
@@ -375,6 +385,6 @@ async def get_quality_report(
             },
             "generated_at": datetime.now().isoformat(),
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

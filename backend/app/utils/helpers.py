@@ -6,10 +6,12 @@
 
 import hashlib
 import time
+from collections.abc import Callable
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Optional, Callable, TypeVar
 from functools import wraps
+from pathlib import Path
+from typing import Any, TypeVar
+
 from loguru import logger
 
 T = TypeVar('T')
@@ -81,7 +83,7 @@ def ensure_directory(path: str) -> Path:
 
 def generate_unique_filename(
     original_filename: str,
-    prefix: Optional[str] = None,
+    prefix: str | None = None,
 ) -> str:
     """
     Генерирует уникальное имя файла с временной меткой.
@@ -204,8 +206,8 @@ class Timer:
             operation_name: Название операции для логирования.
         """
         self.operation_name = operation_name
-        self.start_time: Optional[float] = None
-        self.end_time: Optional[float] = None
+        self.start_time: float | None = None
+        self.end_time: float | None = None
 
     def __enter__(self) -> "Timer":
         """Начало замера времени."""

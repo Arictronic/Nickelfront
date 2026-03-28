@@ -8,7 +8,7 @@ import hashlib
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ def ensure_directory(path: str) -> Path:
 
 def generate_unique_filename(
     original_filename: str,
-    prefix: Optional[str] = None,
+    prefix: str | None = None,
 ) -> str:
     """
     Генерирует уникальное имя файла с временной меткой.
@@ -104,8 +104,8 @@ class Timer:
             operation_name: Название операции для логирования.
         """
         self.operation_name = operation_name
-        self.start_time: Optional[float] = None
-        self.end_time: Optional[float] = None
+        self.start_time: float | None = None
+        self.end_time: float | None = None
 
     def __enter__(self) -> "Timer":
         """Начало замера времени."""

@@ -6,14 +6,13 @@ Fully self-contained implementation for qwen_service
 from __future__ import annotations
 
 import json
-import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 from uuid import uuid4
 
 import requests
-
 
 # ============================================================================
 # Data Classes (replacing Domain.chat.ports)
@@ -21,21 +20,21 @@ import requests
 
 @dataclass
 class StreamCallbacks:
-    on_parts: Optional[Callable[[str, str], None]] = None
-    on_meta: Optional[Callable[[Dict[str, Any]], None]] = None
-    on_complete_parts: Optional[Callable[[str, str], None]] = None
-    on_error: Optional[Callable[[str], None]] = None
+    on_parts: Callable[[str, str], None] | None = None
+    on_meta: Callable[[dict[str, Any]], None] | None = None
+    on_complete_parts: Callable[[str, str], None] | None = None
+    on_error: Callable[[str], None] | None = None
 
 
 @dataclass
 class SendRequest:
     session_id: str
     prompt: str
-    ref_file_ids: List[str] = field(default_factory=list)
+    ref_file_ids: list[str] = field(default_factory=list)
     thinking_enabled: bool = False
     search_enabled: bool = False
     preempt: bool = False
-    messages: List[Dict[str, Any]] = field(default_factory=list)
+    messages: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -52,18 +51,36 @@ class ContinueRequest:
 class QwenSseParser:
     """Parser for Qwen SSE stream responses"""
 
+    @staticmethod
+    def _extract_thinking_text(delta: dict[str, Any]) -> str:
+        extra = delta.get("extra") or {}
+        if not isinstance(extra, dict):
+            return ""
+
+        thought = extra.get("summary_thought") or {}
+        if not isinstance(thought, dict):
+            return ""
+
+        content = thought.get("content")
+        if isinstance(content, list):
+            return " ".join(str(part) for part in content if part).strip()
+        if isinstance(content, str):
+            return content.strip()
+        return ""
+
     def parse(
         self,
         resp: requests.Response,
         thinking_enabled: bool,
-        on_parts: Optional[Callable[[str, str], None]] = None,
-        on_complete_parts: Optional[Callable[[str, str], None]] = None,
-        on_meta: Optional[Callable[[Dict[str, Any]], None]] = None,
-    ) -> Tuple[str, str, Dict[str, Any]]:
-        think_parts: List[str] = []
-        response_parts: List[str] = []
-        meta: Dict[str, Any] = {}
-        response_id: Optional[str] = None
+        on_parts: Callable[[str, str], None] | None = None,
+        on_complete_parts: Callable[[str, str], None] | None = None,
+        on_meta: Callable[[dict[str, Any]], None] | None = None,
+        on_error: Callable[[str], None] | None = None,
+    ) -> tuple[str, str, dict[str, Any]]:
+        think_parts: list[str] = []
+        response_parts: list[str] = []
+        meta: dict[str, Any] = {}
+        response_id: str | None = None
         response_status: str = "FINISHED"
 
         try:
@@ -86,21 +103,30 @@ class QwenSseParser:
                 # Extract response ID
                 if "id" in data and not response_id:
                     response_id = data["id"]
+                created_meta = data.get("response.created")
+                if isinstance(created_meta, dict):
+                    response_id = response_id or created_meta.get("response_id")
+                    parent_id = created_meta.get("parent_id")
+                    if parent_id:
+                        meta["parent_id"] = parent_id
 
                 # Extract choices
                 choices = data.get("choices") or []
                 for choice in choices:
                     delta = choice.get("delta") or {}
                     content = delta.get("content") or ""
+                    phase = str(delta.get("phase") or "")
 
                     # Check for thinking phase
                     reasoning = delta.get("reasoning_content")
+                    if not reasoning and phase.startswith("thinking"):
+                        reasoning = self._extract_thinking_text(delta) or content
                     if reasoning:
                         think_parts.append(reasoning)
                         if on_parts:
                             on_parts("\n\n".join(think_parts), "".join(response_parts))
 
-                    if content:
+                    if content and not phase.startswith("thinking"):
                         response_parts.append(content)
                         if on_parts:
                             on_parts("\n\n".join(think_parts), "".join(response_parts))
@@ -147,14 +173,15 @@ class QwenTransport:
 
     BASE_URL = "https://chat.qwen.ai/api/v2"
     CHAT_URL = f"{BASE_URL}/chat/completions"
-    SESSIONS_URL = f"{BASE_URL}/chat-sessions"
+    CHATS_URL = f"{BASE_URL}/chats"
+    CHATS_NEW_URL = f"{CHATS_URL}/new"
 
     def __init__(
         self,
         token: str,
-        logger: Optional[Callable[[str], None]] = None,
-        proxy_config: Optional[Dict[str, Any]] = None,
-        user_agent: Optional[str] = None,
+        logger: Callable[[str], None] | None = None,
+        proxy_config: dict[str, Any] | None = None,
+        user_agent: str | None = None,
     ):
         self.token = token.strip()
         self.logger = logger
@@ -166,7 +193,7 @@ class QwenTransport:
         if proxy_config:
             self._setup_proxy(proxy_config)
 
-    def _get_headers(self) -> Dict[str, str]:
+    def _get_headers(self) -> dict[str, str]:
         headers = {
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
@@ -175,10 +202,20 @@ class QwenTransport:
             "Referer": "https://chat.qwen.ai/",
             "User-Agent": self.user_agent,
             "X-Xsrf-Token": self.token,
+            "Authorization": f"Bearer {self.token}",
         }
         return headers
 
-    def _setup_proxy(self, proxy_config: Dict[str, Any]):
+    def _extract_data(self, response_json: dict[str, Any]) -> Any:
+        if isinstance(response_json, dict):
+            if response_json.get("success") is False:
+                err = response_json.get("data") or {}
+                self._log(f"Qwen API error: {err}")
+            if "data" in response_json:
+                return response_json.get("data")
+        return response_json
+
+    def _setup_proxy(self, proxy_config: dict[str, Any]):
         """Configure proxy if provided"""
         proxy_url = proxy_config.get("url")
         if proxy_url:
@@ -192,7 +229,7 @@ class QwenTransport:
             except Exception:
                 pass
 
-    def update_referer(self, session_id: Optional[str]):
+    def update_referer(self, session_id: str | None):
         """Update referer header with session"""
         if session_id:
             self.session.headers["Referer"] = f"https://chat.qwen.ai/c/{session_id}"
@@ -210,16 +247,20 @@ class QwenTransport:
         info = self.get_user_info()
         return bool(info.get("id"))
 
-    def create_session(self, model: str = "qwen3.5-plus") -> Optional[str]:
+    def create_session(self, model: str = "qwen3.5-plus") -> str | None:
         """Create new chat session"""
         payload = {
-            "model": model,
+            "title": "New Chat",
+            "models": [model],
+            "chat_mode": "normal",
             "chat_type": "t2t",
+            "timestamp": int(time.time() * 1000),
+            "project_id": "",
         }
-        resp = self.session.post(self.SESSIONS_URL, json=payload, timeout=30)
+        resp = self.session.post(self.CHATS_NEW_URL, json=payload, timeout=30)
         if resp.status_code == 200:
-            data = resp.json()
-            session_id = data.get("id")
+            data = self._extract_data(resp.json())
+            session_id = data.get("id") if isinstance(data, dict) else None
             if session_id:
                 self.update_referer(session_id)
                 return session_id
@@ -227,37 +268,44 @@ class QwenTransport:
 
     def delete_session(self, session_id: str) -> bool:
         """Delete chat session"""
-        url = f"{self.SESSIONS_URL}/{session_id}"
+        url = f"{self.CHATS_URL}/{session_id}"
         resp = self.session.delete(url, timeout=30)
         return resp.status_code == 200
 
     def update_session_title(self, session_id: str, title: str) -> bool:
         """Update session title"""
-        url = f"{self.SESSIONS_URL}/{session_id}"
+        url = f"{self.CHATS_URL}/{session_id}"
         payload = {"title": title}
         resp = self.session.put(url, json=payload, timeout=30)
         return resp.status_code == 200
 
-    def fetch_sessions_page(self, page: int = 1, exclude_project: bool = True) -> List[dict]:
+    def fetch_sessions_page(self, page: int = 1, exclude_project: bool = True) -> list[dict]:
         """Fetch list of sessions"""
-        params = {"page": page, "page_size": 20}
+        params = {"page": page}
         if exclude_project:
             params["exclude_project"] = "true"
-        resp = self.session.get(self.SESSIONS_URL, params=params, timeout=30)
+        resp = self.session.get(f"{self.CHATS_URL}/", params=params, timeout=30)
         if resp.status_code == 200:
-            data = resp.json()
-            return data.get("items") or []
+            data = self._extract_data(resp.json())
+            if isinstance(data, dict):
+                items = data.get("items")
+                if isinstance(items, list):
+                    return items
+            if isinstance(data, list):
+                return data
         return []
 
     def fetch_chat(self, session_id: str) -> dict:
         """Fetch chat history"""
-        url = f"{self.SESSIONS_URL}/{session_id}/history"
+        url = f"{self.CHATS_URL}/{session_id}"
         resp = self.session.get(url, timeout=30)
         if resp.status_code == 200:
-            return resp.json()
+            data = self._extract_data(resp.json())
+            if isinstance(data, dict):
+                return data
         return {}
 
-    def fetch_models(self) -> List[dict]:
+    def fetch_models(self) -> list[dict]:
         """Fetch available models"""
         url = "https://chat.qwen.ai/api/models"
         resp = self.session.get(url, timeout=30)
@@ -268,7 +316,7 @@ class QwenTransport:
 
     def send_stream(
         self,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
         thinking_enabled: bool,
     ) -> requests.Response:
         """Send streaming chat request"""
@@ -280,6 +328,7 @@ class QwenTransport:
 
         resp = self.session.post(
             self.CHAT_URL,
+            params={"chat_id": payload.get("chat_id", "")},
             json=payload,
             stream=True,
             timeout=120,
@@ -290,7 +339,7 @@ class QwenTransport:
         self,
         session_id: str,
         message_id: str,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
         thinking_enabled: bool,
     ) -> requests.Response:
         """Send continue request"""
@@ -303,6 +352,7 @@ class QwenTransport:
 
         resp = self.session.post(
             self.CHAT_URL,
+            params={"chat_id": payload.get("chat_id", session_id)},
             json=payload,
             stream=True,
             timeout=120,
@@ -323,17 +373,17 @@ class QwenAPI:
     def __init__(
         self,
         token: str,
-        logger: Optional[Callable[[str], None]] = None,
-        proxy_config: Optional[Dict[str, Any]] = None,
-        user_agent: Optional[str] = None,
+        logger: Callable[[str], None] | None = None,
+        proxy_config: dict[str, Any] | None = None,
+        user_agent: str | None = None,
         default_model: str = "qwen3.5-plus",
     ):
         self.token = token
         self.logger = logger
         self.default_model = default_model
-        self.session_id: Optional[str] = None
-        self.last_message_id: Optional[int] = None
-        self.last_response_meta: Dict[str, Any] = {}
+        self.session_id: str | None = None
+        self.last_message_id: int | None = None
+        self.last_response_meta: dict[str, Any] = {}
 
         self.transport = QwenTransport(
             token=token,
@@ -344,10 +394,10 @@ class QwenAPI:
         self.parser = QwenSseParser()
 
         # Message ID mapping (remote <-> local)
-        self._remote_to_local: Dict[str, Dict[str, int]] = {}
-        self._local_to_remote: Dict[str, Dict[int, str]] = {}
-        self._next_local_id: Dict[str, int] = {}
-        self._last_response_remote_id: Dict[str, str] = {}
+        self._remote_to_local: dict[str, dict[str, int]] = {}
+        self._local_to_remote: dict[str, dict[int, str]] = {}
+        self._next_local_id: dict[str, int] = {}
+        self._last_response_remote_id: dict[str, str] = {}
 
     def _log(self, message: str):
         if callable(self.logger):
@@ -390,7 +440,7 @@ class QwenAPI:
         self.default_model = model or "qwen3.5-plus"
         return self.default_model
 
-    def fetch_models(self) -> List[dict]:
+    def fetch_models(self) -> list[dict]:
         return self.transport.fetch_models()
 
     def get_user_info(self) -> dict:
@@ -399,7 +449,7 @@ class QwenAPI:
     def validate_token(self) -> bool:
         return self.transport.validate_token()
 
-    def create_session(self) -> Optional[str]:
+    def create_session(self) -> str | None:
         sid = self.transport.create_session(model=self.default_model)
         if sid:
             self.session_id = sid
@@ -419,14 +469,14 @@ class QwenAPI:
     def update_session_title(self, session_id: str, title: str) -> bool:
         return self.transport.update_session_title(session_id, title)
 
-    def fetch_sessions_page(self, pinned: bool = False) -> Tuple[List[dict], bool]:
+    def fetch_sessions_page(self, pinned: bool = False) -> tuple[list[dict], bool]:
         if pinned:
             return [], False
         items = self.transport.fetch_sessions_page(page=1)
         has_more = len(items) >= 20
         return items, has_more
 
-    def fetch_history(self, session_id: str) -> Tuple[dict, List[dict]]:
+    def fetch_history(self, session_id: str) -> tuple[dict, list[dict]]:
         chat = self.transport.fetch_chat(session_id)
         if not chat:
             return {}, []
@@ -501,7 +551,7 @@ class QwenAPI:
 
         return chat_session, messages
 
-    def _build_feature_config(self, thinking_enabled: bool, search_enabled: bool) -> Dict[str, Any]:
+    def _build_feature_config(self, thinking_enabled: bool, search_enabled: bool) -> dict[str, Any]:
         return {
             "thinking_enabled": thinking_enabled,
             "output_schema": "phase",
@@ -517,8 +567,8 @@ class QwenAPI:
         prompt: str,
         thinking_enabled: bool,
         search_enabled: bool,
-        parent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        parent_id: str | None = None,
+    ) -> dict[str, Any]:
         model = self.get_model()
         remote_user_id = str(uuid4())
         now_sec = int(time.time())
@@ -557,13 +607,10 @@ class QwenAPI:
         try:
             session_id = request.session_id
 
-            # Get last response ID for parent
+            # Для первого сообщения parent_id должен быть None.
+            # Используем только локально сохранённый последний response_id,
+            # чтобы не подхватывать случайные/служебные сообщения из истории.
             parent_id = self._last_response_remote_id.get(session_id)
-            if not parent_id:
-                # Find latest assistant message
-                chat = self.transport.fetch_chat(session_id)
-                if chat:
-                    parent_id = self._find_latest_assistant_id(chat)
 
             payload = self._build_payload(
                 session_id=session_id,
@@ -593,8 +640,8 @@ class QwenAPI:
     def continue_message(
         self,
         message_id: int,
-        on_complete_parts: Optional[Callable[[str, str], None]] = None,
-        on_meta: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_complete_parts: Callable[[str, str], None] | None = None,
+        on_meta: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         """Continue response from a specific message"""
         try:
@@ -629,10 +676,10 @@ class QwenAPI:
                 callbacks=callbacks,
             )
 
-        except Exception as e:
+        except Exception:
             raise
 
-    def _find_latest_assistant_id(self, chat: dict) -> Optional[str]:
+    def _find_latest_assistant_id(self, chat: dict) -> str | None:
         """Find latest assistant message ID in chat"""
         messages_map = chat.get("chat", {}).get("history", {}).get("messages", {})
         if not isinstance(messages_map, dict):
@@ -664,9 +711,9 @@ class QwenAPI:
         callbacks: StreamCallbacks,
     ) -> None:
         """Parse SSE stream and finalize response"""
-        meta_snapshots: List[Dict[str, Any]] = []
+        meta_snapshots: list[dict[str, Any]] = []
 
-        def on_meta_local(meta: Dict[str, Any]):
+        def on_meta_local(meta: dict[str, Any]):
             if isinstance(meta, dict):
                 meta_snapshots.append(dict(meta))
 
@@ -676,6 +723,7 @@ class QwenAPI:
             on_parts=callbacks.on_parts,
             on_complete_parts=None,
             on_meta=on_meta_local,
+            on_error=callbacks.on_error,
         )
 
         final_meta = dict(meta or {})

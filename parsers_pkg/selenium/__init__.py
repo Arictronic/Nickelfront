@@ -6,8 +6,8 @@ Selenium parsers module.
 """
 
 from .sciencedirect_parser import (
-    ScienceDirectParser,
     ScienceDirectConfig,
+    ScienceDirectParser,
     parse_sciencedirect,
 )
 

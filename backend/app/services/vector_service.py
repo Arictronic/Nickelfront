@@ -7,8 +7,9 @@
 """
 
 import os
-from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
+from typing import Any
+
 from loguru import logger
 
 from app.core.config import settings
@@ -28,7 +29,7 @@ class VectorSearchResult:
     paper_id: int
     title: str
     source: str
-    doi: Optional[str]
+    doi: str | None
     similarity: float
     metadata: dict
 
@@ -51,7 +52,7 @@ class ChromaVectorService:
     COLLECTION_NAME = "papers"
     DEFAULT_BATCH_SIZE = 32
 
-    def __init__(self, persist_directory: Optional[str] = None):
+    def __init__(self, persist_directory: str | None = None):
         """
         Инициализация сервиса векторного поиска.
 
@@ -117,12 +118,12 @@ class ChromaVectorService:
     def add_paper(
         self,
         paper_id: int,
-        embedding: List[float],
+        embedding: list[float],
         title: str,
         source: str,
-        doi: Optional[str] = None,
-        publication_date: Optional[str] = None,
-        journal: Optional[str] = None,
+        doi: str | None = None,
+        publication_date: str | None = None,
+        journal: str | None = None,
     ) -> bool:
         """
         Добавить статью в векторную базу.
@@ -180,9 +181,9 @@ class ChromaVectorService:
 
     def add_documents_batch(
         self,
-        documents: List[Dict[str, Any]],
+        documents: list[dict[str, Any]],
         batch_size: int = DEFAULT_BATCH_SIZE,
-    ) -> Tuple[int, int]:
+    ) -> tuple[int, int]:
         """
         Пакетное добавление документов в векторную базу.
 
@@ -252,12 +253,12 @@ class ChromaVectorService:
 
     def search(
         self,
-        query_embedding: List[float],
+        query_embedding: list[float],
         limit: int = 10,
-        source: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-    ) -> List[VectorSearchResult]:
+        source: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[VectorSearchResult]:
         """
         Векторный поиск статей по эмбеддингу запроса.
 
@@ -330,9 +331,9 @@ class ChromaVectorService:
 
     def search_with_scores(
         self,
-        query_embedding: List[float],
+        query_embedding: list[float],
         limit: int = 10,
-    ) -> List[Tuple[VectorSearchResult, float]]:
+    ) -> list[tuple[VectorSearchResult, float]]:
         """
         Векторный поиск с возвратом оценок релевантности.
 
@@ -393,7 +394,7 @@ class ChromaVectorService:
 
         return False
 
-    def rebuild_index(self, papers: List[Dict[str, Any]]) -> int:
+    def rebuild_index(self, papers: list[dict[str, Any]]) -> int:
         """
         Перестроить индекс заново.
 
@@ -426,7 +427,7 @@ class ChromaVectorService:
             logger.error(f"Ошибка перестройки индекса: {e}")
             return 0
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """
         Получить статистику векторной базы.
 
@@ -464,7 +465,7 @@ class ChromaVectorService:
 
 
 # Глобальный экземпляр сервиса
-_vector_service: Optional[ChromaVectorService] = None
+_vector_service: ChromaVectorService | None = None
 
 
 def get_vector_service() -> ChromaVectorService:

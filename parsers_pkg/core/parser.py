@@ -1,8 +1,9 @@
 """CORE парсер научных статей."""
 
 import re
-from typing import Any, Optional
 from datetime import datetime
+from typing import Any
+
 from loguru import logger
 
 from parsers_pkg.base import BaseParser
@@ -43,7 +44,7 @@ class COREParser(BaseParser):
         logger.info(f"CORE: распарсено {len(papers)} статей из {len(data)}")
         return papers
 
-    def _parse_article(self, data: dict[str, Any]) -> Optional[Paper]:
+    def _parse_article(self, data: dict[str, Any]) -> Paper | None:
         """
         Распарсить одну статью.
 

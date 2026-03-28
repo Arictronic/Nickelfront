@@ -4,10 +4,9 @@
 Содержит Pydantic модели для валидации запросов и ответов API.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
-
 
 # === Модели для эндпоинта /ask ===
 
@@ -52,11 +51,11 @@ class SourceDocument(BaseModel):
 
     index: int = Field(..., description="Порядковый номер документа")
     content: str = Field(..., description="Содержание документа")
-    metadata: Dict[str, Any] = Field(
+    metadata: dict[str, Any] = Field(
         default_factory=dict,
         description="Метаданные документа",
     )
-    relevance_score: Optional[float] = Field(
+    relevance_score: float | None = Field(
         default=None,
         description="Оценка релевантности",
     )
@@ -75,7 +74,7 @@ class AskResponse(BaseModel):
 
     answer: str = Field(..., description="Сгенерированный ответ")
     question: str = Field(..., description="Исходный вопрос")
-    sources: List[SourceDocument] = Field(
+    sources: list[SourceDocument] = Field(
         default_factory=list,
         description="Документы-источники",
     )
@@ -179,7 +178,7 @@ class ErrorResponse(BaseModel):
 
     error: str = Field(..., description="Тип ошибки")
     message: str = Field(..., description="Сообщение об ошибке")
-    details: Optional[Dict[str, Any]] = Field(
+    details: dict[str, Any] | None = Field(
         default=None,
         description="Дополнительные детали",
     )

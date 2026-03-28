@@ -3,10 +3,11 @@ RAG Vector Store — векторное хранилище для RAG.
 
 Использует ChromaDB через LangChain для хранения и поиска документов.
 """
+# ruff: noqa: E402
 
 import logging
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
@@ -29,7 +30,7 @@ class RAGVectorStore:
     - Очистка
     """
 
-    def __init__(self, persist_directory: Optional[str] = None):
+    def __init__(self, persist_directory: str | None = None):
         """
         Инициализация менеджера векторного хранилища.
 
@@ -39,8 +40,8 @@ class RAGVectorStore:
         self.persist_directory = persist_directory or str(
             Path(settings.CHROMA_DB_PATH) / "rag"
         )
-        self._vector_store: Optional[Chroma] = None
-        self._client: Optional[chromadb.Client] = None
+        self._vector_store: Chroma | None = None
+        self._client: chromadb.Client | None = None
         self._collection_name = "rag_documents"
 
         logger.info(f"Инициализация RAGVectorStore: {self.persist_directory}")
@@ -66,7 +67,7 @@ class RAGVectorStore:
             metadata={"description": "Документы для RAG"},
         )
 
-    def get_vector_store(self) -> Optional[Chroma]:
+    def get_vector_store(self) -> Chroma | None:
         """Возвращает инициализированное векторное хранилище."""
         if self._vector_store is None:
             logger.info("Инициализация векторного хранилища LangChain")
@@ -77,7 +78,7 @@ class RAGVectorStore:
                 return None
 
             client = self._init_client()
-            collection = self._get_or_create_collection(client)
+            self._get_or_create_collection(client)
 
             # Обёртка эмбеддингов для LangChain
             from langchain.embeddings.base import Embeddings
@@ -86,7 +87,7 @@ class RAGVectorStore:
                 def __init__(self, model):
                     self.model = model
 
-                def embed_documents(self, texts: List[str]) -> List[List[float]]:
+                def embed_documents(self, texts: list[str]) -> list[list[float]]:
                     embeddings = self.model.encode(
                         texts,
                         convert_to_numpy=True,
@@ -95,7 +96,7 @@ class RAGVectorStore:
                     )
                     return embeddings.tolist()
 
-                def embed_query(self, text: str) -> List[float]:
+                def embed_query(self, text: str) -> list[float]:
                     embedding = self.model.encode(
                         text,
                         convert_to_numpy=True,
@@ -119,9 +120,9 @@ class RAGVectorStore:
 
     def add_documents(
         self,
-        documents: List[Any],  # LangChain Document
+        documents: list[Any],  # LangChain Document
         batch_size: int = 32,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Добавить документы в векторное хранилище.
 
@@ -142,7 +143,7 @@ class RAGVectorStore:
             return []
 
         total_docs = len(documents)
-        added_ids: List[str] = []
+        added_ids: list[str] = []
 
         logger.info(f"Добавление {total_docs} документов в векторное хранилище")
 
@@ -167,7 +168,7 @@ class RAGVectorStore:
         self,
         query: str,
         k: int = 4,
-    ) -> List[Any]:
+    ) -> list[Any]:
         """
         Поиск похожих документов.
 
@@ -190,7 +191,7 @@ class RAGVectorStore:
             logger.error(f"Ошибка при поиске документов: {e}")
             return []
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Получить статистику хранилища."""
         try:
             client = self._init_client()
@@ -232,7 +233,7 @@ class RAGVectorStore:
 # Глобальный экземпляр
 from pathlib import Path
 
-_rag_vector_store: Optional[RAGVectorStore] = None
+_rag_vector_store: RAGVectorStore | None = None
 
 
 def get_rag_vector_store() -> RAGVectorStore:

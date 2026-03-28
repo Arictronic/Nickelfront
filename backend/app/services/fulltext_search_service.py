@@ -8,36 +8,37 @@
 - Ранжирование по релевантности
 """
 
-from typing import Optional, List
-from sqlalchemy import select, func, text, String
+
+from sqlalchemy import String, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.db.models.paper import Paper as PaperModel
 
 
 class FullTextSearchService:
     """Сервис полнотекстового поиска."""
-    
+
     def __init__(self, db: AsyncSession):
         self.db = db
-    
+
     async def search(
         self,
         query: str,
         limit: int = 20,
         offset: int = 0,
-        source: Optional[str] = None,
+        source: str | None = None,
         search_mode: str = "plain",  # plain, phrase, websearch
-    ) -> tuple[List[PaperModel], int]:
+    ) -> tuple[list[PaperModel], int]:
         """
         Полнотекстовый поиск статей.
-        
+
         Args:
             query: Поисковый запрос
             limit: Максимум результатов
             offset: Смещение
             source: Фильтр по источнику
             search_mode: Режим поиска (plain, phrase, websearch)
-            
+
         Returns:
             (список статей, общее количество)
         """
@@ -51,7 +52,7 @@ class FullTextSearchService:
         else:
             # Обычный поиск (AND между словами)
             tsquery = func.plainto_tsquery("english", query)
-        
+
         # Базовый запрос с поиском
         search_query = select(
             PaperModel,
@@ -59,30 +60,30 @@ class FullTextSearchService:
         ).where(
             PaperModel.search_vector.op("@@")(tsquery)
         )
-        
+
         # Фильтр по источнику
         if source and source != "all":
             search_query = search_query.where(PaperModel.source == source)
-        
+
         # Подсчёт общего количества
         count_query = select(func.count()).select_from(
             search_query.subquery()
         )
         count_result = await self.db.execute(count_query)
         total = count_result.scalar() or 0
-        
+
         # Сортировка по релевантности и пагинация
         search_query = search_query.order_by(
             text("rank DESC"),
             PaperModel.publication_date.desc()
         ).limit(limit).offset(offset)
-        
+
         result = await self.db.execute(search_query)
         rows = result.all()
         papers = [row[0] for row in rows]
-        
+
         return papers, total
-    
+
     async def search_with_highlight(
         self,
         query: str,
@@ -91,17 +92,17 @@ class FullTextSearchService:
     ) -> dict:
         """
         Поиск с подсветкой совпадений.
-        
+
         Args:
             query: Поисковый запрос
             paper: Статья
             max_length: Максимальная длина сниппета
-            
+
         Returns:
             Dict с подсвеченными полями
         """
         tsquery = func.plainto_tsquery("english", query)
-        
+
         # Создаём сниппеты с подсветкой
         title_snippet = func.ts_headline(
             "english",
@@ -109,14 +110,14 @@ class FullTextSearchService:
             tsquery,
             "StartSel=<mark>, StopSel=</mark>, MaxWords=10, MinWords=5"
         )
-        
+
         abstract_snippet = func.ts_headline(
             "english",
             PaperModel.abstract,
             tsquery,
             "StartSel=<mark>, StopSel=</mark>, MaxWords=30, MinWords=15"
         )
-        
+
         # Выполняем запрос
         snippet_query = select(
             title_snippet.label("title_highlight"),
@@ -124,27 +125,27 @@ class FullTextSearchService:
         ).where(
             PaperModel.id == paper.id
         )
-        
+
         result = await self.db.execute(snippet_query)
         row = result.first()
-        
+
         return {
             "title_highlight": row.title_highlight if row else paper.title,
             "abstract_highlight": row.abstract_highlight if row else paper.abstract,
         }
-    
+
     async def suggest(
         self,
         prefix: str,
         limit: int = 10,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Автодополнение поисковых запросов.
-        
+
         Args:
             prefix: Префикс запроса
             limit: Максимум подсказок
-            
+
         Returns:
             Список подсказок
         """
@@ -156,27 +157,27 @@ class FullTextSearchService:
         ).order_by(
             PaperModel.title
         ).limit(limit)
-        
+
         result = await self.db.execute(suggest_query)
         suggestions = [row.suggestion for row in result.all()]
-        
+
         return suggestions
-    
+
     async def search_keywords(
         self,
-        keywords: List[str],
+        keywords: list[str],
         match_all: bool = True,
         limit: int = 20,
-    ) -> List[PaperModel]:
+    ) -> list[PaperModel]:
         """
         Поиск по ключевым словам.
-        
+
         Args:
             keywords: Список ключевых слов
             match_all: True = все слова должны совпасть (AND)
                       False = любое слово (OR)
             limit: Максимум результатов
-            
+
         Returns:
             Список статей
         """
@@ -186,7 +187,7 @@ class FullTextSearchService:
             conditions.append(
                 PaperModel.keywords.cast(String).ilike(f"%{keyword}%")
             )
-        
+
         # Комбинируем условия
         if match_all:
             # AND - все ключевые слова должны совпасть
@@ -196,31 +197,31 @@ class FullTextSearchService:
             # OR - любое ключевое слово
             from sqlalchemy import or_
             filter_condition = or_(*conditions)
-        
+
         # Выполняем поиск
         search_query = select(PaperModel).where(
             filter_condition
         ).order_by(
             PaperModel.publication_date.desc()
         ).limit(limit)
-        
+
         result = await self.db.execute(search_query)
         papers = result.scalars().all()
-        
+
         return papers
-    
+
     async def get_search_stats(self, query: str) -> dict:
         """
         Получить статистику поискового запроса.
-        
+
         Args:
             query: Поисковый запрос
-            
+
         Returns:
             Dict со статистикой
         """
         tsquery = func.plainto_tsquery("english", query)
-        
+
         # Статистика
         stats_query = select(
             func.count().label("total"),
@@ -229,10 +230,10 @@ class FullTextSearchService:
         ).where(
             PaperModel.search_vector.op("@@")(tsquery)
         )
-        
+
         result = await self.db.execute(stats_query)
         row = result.first()
-        
+
         return {
             "total_matches": row.total if row else 0,
             "avg_relevance": float(row.avg_rank) if row and row.avg_rank else 0,
@@ -245,18 +246,18 @@ async def fulltext_search(
     query: str,
     limit: int = 20,
     offset: int = 0,
-    source: Optional[str] = None,
-) -> tuple[List[PaperModel], int]:
+    source: str | None = None,
+) -> tuple[list[PaperModel], int]:
     """
     Функция для быстрого доступа к полнотекстовому поиску.
-    
+
     Args:
         db: Сессия БД
         query: Поисковый запрос
         limit: Максимум результатов
         offset: Смещение
         source: Фильтр по источнику
-        
+
     Returns:
         (список статей, общее количество)
     """

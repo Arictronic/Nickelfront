@@ -1,8 +1,9 @@
 import sys
 from pathlib import Path
+
 from celery import Celery
 from celery.schedules import crontab
-from celery.signals import task_prerun, task_postrun
+from celery.signals import task_postrun, task_prerun
 from loguru import logger
 
 # Добавляем корень проекта и shared в PATH
@@ -10,7 +11,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(ROOT_DIR / "shared"))
 
-from app.core.config import settings
+from app.core.config import settings  # noqa: E402
 
 celery_app = Celery(
     "worker",
@@ -19,6 +20,7 @@ celery_app = Celery(
     include=[
         "app.tasks.tasks",
         "app.tasks.parse_tasks",
+        "app.tasks.content_tasks",
     ],
 )
 

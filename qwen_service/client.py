@@ -14,12 +14,12 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
 
 import httpx
 
 # Загрузка из .env
 from dotenv import load_dotenv
+
 env_path = Path(__file__).parent.parent / ".env"
 if env_path.exists():
     load_dotenv(env_path)
@@ -103,11 +103,11 @@ class QwenServiceClient:
     def send_message(
         self,
         message: str,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
         thinking_enabled: bool = True,
         search_enabled: bool = True,
-        file_ids: Optional[List[str]] = None,
-        auto_continue: Optional[bool] = None,
+        file_ids: list[str] | None = None,
+        auto_continue: bool | None = None,
     ) -> dict:
         """Отправка сообщения"""
         sid = session_id or self.current_session_id
@@ -154,7 +154,7 @@ class QwenServiceClient:
         """Получение настроек авто-продолжения"""
         return self._request("GET", "/config/auto_continue")
 
-    def set_auto_continue_config(self, enabled: bool, max_continues: Optional[int] = None) -> dict:
+    def set_auto_continue_config(self, enabled: bool, max_continues: int | None = None) -> dict:
         """Настройка авто-продолжения"""
         params = {"enabled": str(enabled).lower()}
         if max_continues is not None:
@@ -282,8 +282,8 @@ def test_service():
     # Итоги
     print_separator("✅ ТЕСТИРОВАНИЕ ЗАВЕРШЕНО")
     print(f"Сессия: {session_id}")
-    print(f"Всего сообщений отправлено: 2")
-    print(f"Сервис работает корректно!")
+    print("Всего сообщений отправлено: 2")
+    print("Сервис работает корректно!")
     print("\nДля остановки сервиса нажмите Ctrl+C в терминале где запущен service.py")
 
 

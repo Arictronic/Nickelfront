@@ -9,7 +9,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -102,7 +102,7 @@ class PDFParser:
 
     def _format_tables(
         self,
-        tables: List[List[List[Optional[str]]]],
+        tables: list[list[list[str | None]]],
         page_num: int,
     ) -> str:
         """
@@ -170,8 +170,8 @@ class PDFParser:
     def parse_to_documents(
         self,
         file_path: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> List[Document]:
+        metadata: dict[str, Any] | None = None,
+    ) -> list[Document]:
         """
         Парсит PDF файл и возвращает список документов LangChain.
 
@@ -223,8 +223,8 @@ class PDFParser:
         self,
         file_bytes: bytes,
         filename: str = "unknown.pdf",
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> List[Document]:
+        metadata: dict[str, Any] | None = None,
+    ) -> list[Document]:
         """
         Парсит PDF данные и возвращает список документов LangChain.
 

@@ -8,13 +8,12 @@ RAG Chain — сервис для генерации ответов на осн�
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document
 
-from app.core.config import settings
 from app.services.qwen_client import get_qwen_client
 from app.services.rag_vector_store import get_rag_vector_store
 
@@ -69,7 +68,7 @@ class RAGChain:
         self.search_k = search_k
         self.max_tokens = max_tokens
 
-        self._chain: Optional[RetrievalQA] = None
+        self._chain: RetrievalQA | None = None
         self._vector_store = None
 
         logger.info(
@@ -90,7 +89,7 @@ class RAGChain:
             input_variables=["context", "question"],
         )
 
-    def _build_chain(self) -> Optional[RetrievalQA]:
+    def _build_chain(self) -> RetrievalQA | None:
         """
         Построить RAG-цепь LangChain.
 
@@ -128,9 +127,10 @@ class RAGChain:
 
         Использует Qwen через HTTP API.
         """
-        from langchain_community.llms import BaseLLM
+        from typing import Any
+
         from langchain.callbacks.manager import CallbackManagerForLLMRun
-        from typing import Any, List, Optional
+        from langchain_community.llms import BaseLLM
 
         class QwenLLM(BaseLLM):
             """Обёртка Qwen API для LangChain."""
@@ -145,8 +145,8 @@ class RAGChain:
             def _call(
                 self,
                 prompt: str,
-                stop: Optional[List[str]] = None,
-                run_manager: Optional[CallbackManagerForLLMRun] = None,
+                stop: list[str] | None = None,
+                run_manager: CallbackManagerForLLMRun | None = None,
                 **kwargs: Any,
             ) -> str:
                 """Вызвать Qwen API."""
@@ -168,13 +168,13 @@ class RAGChain:
         qwen_client = get_qwen_client()
         return QwenLLM(client=qwen_client, max_tokens=self.max_tokens)
 
-    def get_chain(self) -> Optional[RetrievalQA]:
+    def get_chain(self) -> RetrievalQA | None:
         """Возвращает RAG-цепь (создаёт при первом вызове)."""
         if self._chain is None:
             self._chain = self._build_chain()
         return self._chain
 
-    def query(self, question: str) -> Dict[str, Any]:
+    def query(self, question: str) -> dict[str, Any]:
         """
         Обрабатывает вопрос пользователя через RAG-цепь.
 
@@ -221,8 +221,8 @@ class RAGChain:
             }
 
     def _format_source_documents(
-        self, documents: List[Document]
-    ) -> List[Dict[str, Any]]:
+        self, documents: list[Document]
+    ) -> list[dict[str, Any]]:
         """Форматирует документы-источники для ответа."""
         formatted = []
         for i, doc in enumerate(documents, 1):
@@ -238,6 +238,6 @@ class RAGChain:
 rag_chain = RAGChain()
 
 
-def process_query(question: str) -> Dict[str, Any]:
+def process_query(question: str) -> dict[str, Any]:
     """Обработать вопрос через глобальную RAG-цепь."""
     return rag_chain.query(question)

@@ -1,7 +1,7 @@
 """Сервис для работы с refresh-токенами."""
 
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,7 +20,7 @@ class RefreshTokenService:
         """Создать refresh-токен для пользователя и сохранить в БД."""
         raw_token = create_refresh_token()
         token_hash = hash_refresh_token(raw_token)
-        expires_at = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+        expires_at = datetime.now(UTC) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
         token = RefreshToken(
             user_id=user_id,
@@ -31,7 +31,7 @@ class RefreshTokenService:
         await self.db.commit()
         return raw_token
 
-    async def get_by_token(self, raw_token: str) -> Optional[RefreshToken]:
+    async def get_by_token(self, raw_token: str) -> RefreshToken | None:
         """Получить refresh-токен по значению."""
         token_hash = hash_refresh_token(raw_token)
         result = await self.db.execute(
@@ -39,7 +39,7 @@ class RefreshTokenService:
         )
         return result.scalar_one_or_none()
 
-    async def get_valid_token(self, raw_token: str) -> Optional[RefreshToken]:
+    async def get_valid_token(self, raw_token: str) -> RefreshToken | None:
         """Проверить refresh-токен на валидность."""
         token = await self.get_by_token(raw_token)
         if not token:
@@ -48,8 +48,8 @@ class RefreshTokenService:
             return None
         expires_at = token.expires_at
         if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at <= datetime.now(timezone.utc):
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if expires_at <= datetime.now(UTC):
             return None
         return token
 
@@ -57,7 +57,7 @@ class RefreshTokenService:
         """Отозвать refresh-токен."""
         if token.revoked_at is not None:
             return
-        token.revoked_at = datetime.now(timezone.utc)
+        token.revoked_at = datetime.now(UTC)
         await self.db.commit()
 
     async def revoke_user_tokens(self, user_id: int) -> None:
@@ -68,6 +68,6 @@ class RefreshTokenService:
                 RefreshToken.user_id == user_id,
                 RefreshToken.revoked_at.is_(None),
             )
-            .values(revoked_at=datetime.now(timezone.utc))
+            .values(revoked_at=datetime.now(UTC))
         )
         await self.db.commit()

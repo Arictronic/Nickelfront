@@ -15,6 +15,14 @@ type PaperApiModel = {
   source: PaperSource | string;
   source_id: string | null;
   url: string | null;
+  pdf_url: string | null;
+  pdf_local_path: string | null;
+  processing_status: string;
+  content_task_id: string | null;
+  processing_error: string | null;
+  summary_ru: string | null;
+  analysis_ru: string | null;
+  translation_ru: string | null;
   created_at: string | null;
   updated_at: string | null;
 };
@@ -33,6 +41,14 @@ function mapPaper(apiPaper: PaperApiModel): Paper {
     source: apiPaper.source,
     sourceId: apiPaper.source_id ?? null,
     url: apiPaper.url ?? null,
+    pdfUrl: apiPaper.pdf_url ?? null,
+    pdfLocalPath: apiPaper.pdf_local_path ?? null,
+    processingStatus: apiPaper.processing_status ?? "pending",
+    contentTaskId: apiPaper.content_task_id ?? null,
+    processingError: apiPaper.processing_error ?? null,
+    summaryRu: apiPaper.summary_ru ?? null,
+    analysisRu: apiPaper.analysis_ru ?? null,
+    translationRu: apiPaper.translation_ru ?? null,
     createdAt: apiPaper.created_at ?? null,
     updatedAt: apiPaper.updated_at ?? null,
   };
@@ -84,6 +100,19 @@ export async function searchPapers(filters: PaperSearchFilters) {
 export async function getPaperById(paperId: number) {
   const { data } = await apiClient.get<PaperApiModel>(`/papers/id/${paperId}`);
   return mapPaper(data);
+}
+
+export function getPaperPdfUrl(paperId: number) {
+  return `${apiClient.defaults.baseURL}/papers/id/${paperId}/pdf`;
+}
+
+export async function reprocessPaperContent(paperId: number) {
+  const { data } = await apiClient.post<{
+    paper_id: number;
+    task_id: string;
+    status: string;
+  }>(`/papers/id/${paperId}/reprocess`);
+  return data;
 }
 
 export async function deletePaper(paperId: number) {
@@ -293,4 +322,3 @@ export async function getSearchHighlight(paperId: number, query: string) {
   }>(`/search/highlight/${paperId}`, { params: { query } });
   return data;
 }
-

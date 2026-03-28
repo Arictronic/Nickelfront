@@ -1,12 +1,13 @@
 """Сервис для работы с научными статьями."""
 
-from typing import Optional
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, String
+
 from loguru import logger
+from sqlalchemy import String, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.paper import Paper as PaperModel
-from shared.schemas.paper import PaperCreate, Paper as PaperSchema
+from shared.schemas.paper import Paper as PaperSchema
+from shared.schemas.paper import PaperCreate
 
 
 class PaperService:
@@ -54,6 +55,7 @@ class PaperService:
             source=paper_data.source,
             source_id=paper_data.source_id,
             url=paper_data.url,
+            processing_status="pending",
         )
 
         self.db.add(db_paper)
@@ -63,12 +65,12 @@ class PaperService:
         logger.info(f"Создана статья: {db_paper.id} - {db_paper.title[:50]}...")
         return db_paper
 
-    async def get_by_id(self, paper_id: int) -> Optional[PaperSchema]:
+    async def get_by_id(self, paper_id: int) -> PaperSchema | None:
         """Получить статью по ID."""
         result = await self.db.execute(select(PaperModel).where(PaperModel.id == paper_id))
         return result.scalar_one_or_none()
 
-    async def get_by_doi(self, doi: str) -> Optional[PaperSchema]:
+    async def get_by_doi(self, doi: str) -> PaperSchema | None:
         """Получить статью по DOI."""
         result = await self.db.execute(select(PaperModel).where(PaperModel.doi == doi))
         return result.scalar_one_or_none()
@@ -77,7 +79,7 @@ class PaperService:
         self,
         source: str,
         source_id: str,
-    ) -> Optional[PaperSchema]:
+    ) -> PaperSchema | None:
         """Получить статью по ID в источнике."""
         result = await self.db.execute(
             select(PaperModel).where(
@@ -140,7 +142,7 @@ class PaperService:
         self,
         paper_id: int,
         **kwargs,
-    ) -> Optional[PaperSchema]:
+    ) -> PaperSchema | None:
         """
         Обновить статью.
 

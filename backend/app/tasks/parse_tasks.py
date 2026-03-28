@@ -5,22 +5,23 @@
 - arXiv (arxiv.org)
 """
 
-from .celery_app import celery_app
-from app.db.session import AsyncSessionLocal
+import asyncio
+
+from loguru import logger
+
+from app.db.session import async_session_maker
+from app.services.celery_cancel import clear_cancel_flag, is_cancelled
+from app.services.paper_content_service import resolve_pdf_url
 from app.services.paper_service import PaperService
-from app.services.embedding_service import get_embedding_service, EmbeddingService
-from app.services.vector_service import get_vector_service
-from app.services.celery_cancel import is_cancelled, clear_cancel_flag
-from shared.schemas.paper import PaperCreate
-from parsers_pkg.core.client import COREClient
-from parsers_pkg.core.parser import COREParser
+from app.tasks.content_tasks import process_paper_content_task
+from parsers_pkg.arxiv import ARXIV_SEARCH_QUERIES
 from parsers_pkg.arxiv.client import ArxivClient
 from parsers_pkg.arxiv.parser import ArxivParser
-from parsers_pkg.arxiv import ARXIV_SEARCH_QUERIES
-from loguru import logger
-import asyncio
-from typing import Optional
+from parsers_pkg.core.client import COREClient
+from parsers_pkg.core.parser import COREParser
+from shared.schemas.paper import PaperCreate
 
+from .celery_app import celery_app
 
 # Поисковые запросы по тематике никелевых сплавов
 DEFAULT_SEARCH_QUERIES = [
@@ -32,7 +33,7 @@ DEFAULT_SEARCH_QUERIES = [
 ]
 
 
-def _get_task_id(task) -> Optional[str]:
+def _get_task_id(task) -> str | None:
     return getattr(getattr(task, "request", None), "id", None)
 
 
@@ -60,6 +61,7 @@ def _mark_revoked(task, query: str, source: str, current: int = 0, total: int = 
         "total": total,
         "saved_count": 0,
         "embedded_count": 0,
+        "content_queued_count": 0,
         "errors": ["cancelled"],
     }
 
@@ -134,15 +136,6 @@ async def _parse_async(
         client = COREClient()
         parser = COREParser()
 
-    # Инициализируем сервисы эмбеддингов и векторного поиска
-    embedding_service = get_embedding_service()
-    vector_service = get_vector_service()
-
-    # Проверяем доступность модели эмбеддингов
-    embedding_available = embedding_service.model is not None
-    if not embedding_available:
-        logger.warning("Модель эмбеддингов недоступна, статьи будут сохранены без векторов")
-
     stats = {
         "query": query,
         "source": source,
@@ -150,6 +143,7 @@ async def _parse_async(
         "parsed_count": 0,
         "saved_count": 0,
         "embedded_count": 0,
+        "content_queued_count": 0,
         "errors": [],
     }
 
@@ -165,7 +159,7 @@ async def _parse_async(
                 "status": f"Поиск статей по запросу '{query}'..."
             }
         )
-        
+
         if _is_cancelled(self):
             return _mark_revoked(self, query=query, source=source, current=0, total=limit)
 
@@ -187,15 +181,15 @@ async def _parse_async(
                 "status": f"Парсинг результатов ({len(search_results)} найдено)..."
             }
         )
-        
+
         if _is_cancelled(self):
             return _mark_revoked(self, query=query, source=source, current=0, total=limit)
 
         papers = await parser.parse_search_results(search_results)
         stats["parsed_count"] = len(papers)
 
-        # Сохранение в БД
-        async with AsyncSessionLocal() as db:
+        # Сохранение в БД - создаём сессию внутри asyncio.run()
+        async with async_session_maker() as db:
             paper_service = PaperService(db)
 
             for idx, paper in enumerate(papers):
@@ -208,7 +202,7 @@ async def _parse_async(
                         # Дополнительная проверка отмены перед обновлением статуса
                         if _is_cancelled(self):
                             return _mark_revoked(self, query=query, source=source, current=idx, total=len(papers))
-                        
+
                         self.update_state(
                             state="STARTED",
                             meta={
@@ -217,10 +211,11 @@ async def _parse_async(
                                 "current": idx,
                                 "total": len(papers),
                                 "saved_count": stats["saved_count"],
+                                "content_queued_count": stats["content_queued_count"],
                                 "status": f"Сохранение статей ({idx}/{len(papers)})..."
                             }
                         )
-                    
+
                     paper_create = PaperCreate(
                         title=paper.title,
                         authors=paper.authors,
@@ -237,35 +232,27 @@ async def _parse_async(
                     saved_paper = await paper_service.create_paper(paper_create)
                     stats["saved_count"] += 1
 
-                    # Генерируем и сохраняем эмбеддинг если модель доступна
-                    if embedding_available and saved_paper.id:
+                    # Ставим отдельную задачу воркеру на PDF + AI + индексацию
+                    if saved_paper.id:
                         try:
-                            # Формируем текст для эмбеддинга
-                            embedding_text = embedding_service.get_paper_embedding_text(
-                                title=saved_paper.title,
-                                abstract=saved_paper.abstract or "",
-                                keywords=saved_paper.keywords or [],
+                            pdf_url = resolve_pdf_url(
+                                source=saved_paper.source,
+                                source_id=saved_paper.source_id,
+                                url=saved_paper.url,
                             )
-
-                            if embedding_text:
-                                embedding = embedding_service.get_embedding(embedding_text)
-                                if embedding:
-                                    # Сохраняем эмбеддинг в БД
-                                    await paper_service.update_paper(saved_paper.id, embedding=embedding)
-
-                                    # Добавляем в векторную базу ChromaDB
-                                    vector_service.add_paper(
-                                        paper_id=saved_paper.id,
-                                        embedding=embedding,
-                                        title=saved_paper.title,
-                                        source=saved_paper.source,
-                                        doi=saved_paper.doi,
-                                        publication_date=saved_paper.publication_date.isoformat() if saved_paper.publication_date else None,
-                                        journal=saved_paper.journal,
-                                    )
-                                    stats["embedded_count"] += 1
+                            content_task = process_paper_content_task.delay(saved_paper.id)
+                            await paper_service.update_paper(
+                                saved_paper.id,
+                                processing_status="queued_for_content_processing",
+                                content_task_id=content_task.id,
+                                pdf_url=pdf_url,
+                                processing_error=None,
+                            )
+                            stats["content_queued_count"] += 1
                         except Exception as e:
-                            logger.warning(f"Ошибка генерации эмбеддинга для статьи {saved_paper.id}: {e}")
+                            logger.warning(
+                                f"Не удалось поставить content-task для статьи {saved_paper.id}: {e}"
+                            )
 
                 except Exception as e:
                     error_msg = f"Error saving paper '{paper.title[:50]}...': {e}"
@@ -284,6 +271,7 @@ async def _parse_async(
                 "total": len(papers),
                 "saved_count": stats["saved_count"],
                 "embedded_count": stats["embedded_count"],
+                "content_queued_count": stats["content_queued_count"],
                 "status": "Завершено"
             }
         )
@@ -291,7 +279,7 @@ async def _parse_async(
         logger.info(
             f"Парсинг '{query}' ({source}): найдено={stats['found_count']}, "
             f"распарсено={stats['parsed_count']}, сохранено={stats['saved_count']}, "
-            f"эмбеддинги={stats['embedded_count']}"
+            f"в очереди на AI/PDF={stats['content_queued_count']}"
         )
 
         return stats
@@ -321,7 +309,7 @@ def parse_multiple_queries_task(
     total_queries = len(queries)
     results = []
     total_saved = 0
-    
+
     for idx, query in enumerate(queries):
         if _is_cancelled(self):
             return _mark_revoked(self, query=str(query), source=source, current=idx, total=total_queries)
@@ -339,7 +327,7 @@ def parse_multiple_queries_task(
                     "status": f"Обработка запроса {idx + 1}/{total_queries}: '{query}'"
                 }
             )
-            
+
             result = parse_papers_task(
                 query=query,
                 limit=limit_per_query,
@@ -347,7 +335,7 @@ def parse_multiple_queries_task(
             )
             results.append(result)
             total_saved += result.get("saved_count", 0)
-            
+
         except Exception as e:
             logger.error(f"Ошибка при парсинге запроса '{query}': {e}")
             results.append({"query": query, "error": str(e)})
@@ -388,9 +376,9 @@ def parse_all_sources_task(
         return _mark_revoked(self, query='all_sources', source='CORE', current=0, total=2)
 
     logger.info("Запуск парсинга по всем источникам...")
-    
+
     total_sources = 2  # CORE + arXiv
-    
+
     # Парсинг CORE
     self.update_state(
         state="STARTED",
@@ -402,7 +390,7 @@ def parse_all_sources_task(
             "status": "Парсинг источника CORE..."
         }
     )
-    
+
     core_result = parse_multiple_queries_task(
         queries=DEFAULT_SEARCH_QUERIES,
         limit_per_query=limit_per_query,
@@ -420,7 +408,7 @@ def parse_all_sources_task(
             "status": "Парсинг источника arXiv..."
         }
     )
-    
+
     if _is_cancelled(self):
         return _mark_revoked(self, query='all_sources', source='arXiv', current=1, total=2)
 

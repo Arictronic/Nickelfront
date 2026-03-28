@@ -1,13 +1,13 @@
 """Сервис для работы с пользователями."""
 
-from typing import Optional
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from datetime import datetime, timezone
-from loguru import logger
+from datetime import UTC, datetime
 
-from app.db.models.user import User
+from loguru import logger
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.security import get_password_hash, verify_password
+from app.db.models.user import User
 
 
 class UserService:
@@ -16,21 +16,21 @@ class UserService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    async def get_by_email(self, email: str) -> Optional[User]:
+    async def get_by_email(self, email: str) -> User | None:
         """Получить пользователя по email."""
         result = await self.db.execute(
             select(User).where(User.email == email)
         )
         return result.scalar_one_or_none()
 
-    async def get_by_id(self, user_id: int) -> Optional[User]:
+    async def get_by_id(self, user_id: int) -> User | None:
         """Получить пользователя по ID."""
         result = await self.db.execute(
             select(User).where(User.id == user_id)
         )
         return result.scalar_one_or_none()
 
-    async def create_user(self, email: str, password: str, username: Optional[str] = None) -> User:
+    async def create_user(self, email: str, password: str, username: str | None = None) -> User:
         """Создать нового пользователя."""
         password_hash = get_password_hash(password)
 
@@ -51,14 +51,14 @@ class UserService:
 
     async def update_last_login(self, user: User) -> None:
         """Обновить время последнего входа."""
-        user.last_login_at = datetime.now(timezone.utc)
+        user.last_login_at = datetime.now(UTC)
         await self.db.commit()
 
     async def verify_password(self, plain_password: str, hashed_password: str) -> bool:
         """Проверить пароль."""
         return verify_password(plain_password, hashed_password)
 
-    async def authenticate(self, email: str, password: str) -> Optional[User]:
+    async def authenticate(self, email: str, password: str) -> User | None:
         """Аутентифицировать пользователя."""
         user = await self.get_by_email(email)
         if not user:

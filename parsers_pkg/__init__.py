@@ -19,19 +19,18 @@
 """
 
 from .base import (
-    BaseParser,
     BaseAPIClient,
-    Deduplicator,
+    BaseParser,
     DeduplicationResult,
+    Deduplicator,
     check_duplicate,
 )
-
 from .pipelines import (
-    DataPipeline,
     CleaningStage,
-    ValidationStage,
+    DataPipeline,
     DeduplicationStage,
     EnrichmentStage,
+    ValidationStage,
     create_default_pipeline,
     process_papers,
 )
@@ -45,7 +44,7 @@ __all__ = [
     "Deduplicator",
     "DeduplicationResult",
     "check_duplicate",
-    
+
     # Pipelines
     "DataPipeline",
     "CleaningStage",

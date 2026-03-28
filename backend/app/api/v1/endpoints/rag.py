@@ -1,13 +1,14 @@
 """API endpoints для RAG (Retrieval-Augmented Generation)."""
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form
-from typing import List, Optional
+import asyncio
+
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from app.services.rag_chain import process_query
 from app.services.rag_parser import pdf_parser
 from app.services.rag_vector_store import get_rag_vector_store
-from app.services.rag_chain import process_query
 
 router = APIRouter(prefix="/rag", tags=["rag"])
 
@@ -25,9 +26,9 @@ class AskResponse(BaseModel):
 
     answer: str = Field(..., description="Ответ")
     question: str = Field(..., description="Вопрос")
-    sources: List[dict] = Field(default_factory=list, description="Источники")
+    sources: list[dict] = Field(default_factory=list, description="Источники")
     documents_found: int = Field(default=0, description="Найдено документов")
-    error: Optional[str] = Field(None, description="Ошибка")
+    error: str | None = Field(None, description="Ошибка")
 
 
 class UploadResponse(BaseModel):
@@ -58,7 +59,7 @@ async def ask_question(request: AskRequest):
     logger.info(f"Получен вопрос: {request.question[:100]}...")
 
     try:
-        result = process_query(request.question)
+        result = await asyncio.to_thread(process_query, request.question)
 
         if result.get("error"):
             return AskResponse(
@@ -122,7 +123,8 @@ async def upload_document(file: UploadFile = File(...)):
 
         logger.info(f"Парсинг PDF: {file.filename} ({len(file_bytes)} байт)")
 
-        documents = pdf_parser.parse_bytes_to_documents(
+        documents = await asyncio.to_thread(
+            pdf_parser.parse_bytes_to_documents,
             file_bytes=file_bytes,
             filename=file.filename,
         )
@@ -134,7 +136,7 @@ async def upload_document(file: UploadFile = File(...)):
             )
 
         vector_store = get_rag_vector_store()
-        added_ids = vector_store.add_documents(documents)
+        added_ids = await asyncio.to_thread(vector_store.add_documents, documents)
 
         logger.info(f"Файл успешно обработан: {file.filename}")
 
@@ -159,7 +161,7 @@ async def upload_document(file: UploadFile = File(...)):
 async def get_stats():
     """Получить статистику RAG системы."""
     vector_store = get_rag_vector_store()
-    stats = vector_store.get_stats()
+    stats = await asyncio.to_thread(vector_store.get_stats)
 
     return StatsResponse(
         total_documents=stats["total_documents"],
@@ -178,7 +180,7 @@ async def clear_store():
     logger.warning("Запрос на очистку RAG хранилища")
 
     vector_store = get_rag_vector_store()
-    success = vector_store.clear()
+    success = await asyncio.to_thread(vector_store.clear)
 
     if success:
         return {"message": "RAG хранилище очищено", "success": True}

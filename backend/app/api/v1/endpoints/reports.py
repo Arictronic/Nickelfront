@@ -1,13 +1,14 @@
 """API endpoints для экспорта отчётов."""
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
-from fastapi.responses import StreamingResponse, Response
+import asyncio
+
+from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional
 
 from app.db.session import get_db
 from app.services.paper_service import PaperService
-from app.services.report_service import generate_paper_pdf, generate_paper_docx
+from app.services.report_service import generate_paper_docx, generate_paper_pdf
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -19,10 +20,10 @@ async def export_paper_pdf(
 ):
     """
     Экспортировать отчёт по статье в PDF.
-    
+
     Args:
         paper_id: ID статьи
-        
+
     Returns:
         PDF файл
     """
@@ -30,10 +31,10 @@ async def export_paper_pdf(
         # Получаем статью
         paper_service = PaperService(db)
         paper = await paper_service.get_by_id(paper_id)
-        
+
         if not paper:
             raise HTTPException(status_code=404, detail="Статья не найдена")
-        
+
         # Конвертируем SQLAlchemy модель в dict
         paper_dict = {
             "id": paper.id,
@@ -48,10 +49,10 @@ async def export_paper_pdf(
             "full_text": paper.full_text,
             "keywords": paper.keywords or [],
         }
-        
+
         # Генерируем PDF
-        pdf_bytes = generate_paper_pdf(paper_dict)
-        
+        pdf_bytes = await asyncio.to_thread(generate_paper_pdf, paper_dict)
+
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
@@ -59,7 +60,7 @@ async def export_paper_pdf(
                 "Content-Disposition": f"attachment; filename=paper_{paper_id}_report.pdf"
             }
         )
-        
+
     except ImportError as e:
         raise HTTPException(status_code=503, detail=f"Сервис отчётов недоступен: {str(e)}")
     except Exception as e:
@@ -73,10 +74,10 @@ async def export_paper_docx(
 ):
     """
     Экспортировать отчёт по статье в DOCX.
-    
+
     Args:
         paper_id: ID статьи
-        
+
     Returns:
         DOCX файл
     """
@@ -84,10 +85,10 @@ async def export_paper_docx(
         # Получаем статью
         paper_service = PaperService(db)
         paper = await paper_service.get_by_id(paper_id)
-        
+
         if not paper:
             raise HTTPException(status_code=404, detail="Статья не найдена")
-        
+
         # Конвертируем SQLAlchemy модель в dict
         paper_dict = {
             "id": paper.id,
@@ -102,10 +103,10 @@ async def export_paper_docx(
             "full_text": paper.full_text,
             "keywords": paper.keywords or [],
         }
-        
+
         # Генерируем DOCX
-        docx_bytes = generate_paper_docx(paper_dict)
-        
+        docx_bytes = await asyncio.to_thread(generate_paper_docx, paper_dict)
+
         return Response(
             content=docx_bytes,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -113,7 +114,7 @@ async def export_paper_docx(
                 "Content-Disposition": f"attachment; filename=paper_{paper_id}_report.docx"
             }
         )
-        
+
     except ImportError as e:
         raise HTTPException(status_code=503, detail=f"Сервис отчётов недоступен: {str(e)}")
     except Exception as e:
@@ -127,10 +128,10 @@ async def get_paper_report(
 ):
     """
     Получить отчёт по статье в JSON формате.
-    
+
     Args:
         paper_id: ID статьи
-        
+
     Returns:
         JSON с отчётом
     """
@@ -138,14 +139,14 @@ async def get_paper_report(
         # Получаем статью
         paper_service = PaperService(db)
         paper = await paper_service.get_by_id(paper_id)
-        
+
         if not paper:
             raise HTTPException(status_code=404, detail="Статья не найдена")
-        
+
         # Импортируем сервис отчётов из analytics
         try:
             from analytics.reports import generate_paper_report
-            
+
             paper_dict = {
                 "id": paper.id,
                 "title": paper.title,
@@ -159,11 +160,11 @@ async def get_paper_report(
                 "full_text": paper.full_text,
                 "keywords": paper.keywords or [],
             }
-            
-            report = generate_paper_report(paper_dict)
-            
+
+            report = await asyncio.to_thread(generate_paper_report, paper_dict)
+
             return report
-            
+
         except ImportError:
             # Fallback если analytics модуль недоступен
             return {
@@ -178,6 +179,6 @@ async def get_paper_report(
                 "full_text_length": len(paper.full_text) if paper.full_text else 0,
                 "keywords_count": len(paper.keywords) if paper.keywords else 0,
             }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка получения отчёта: {str(e)}")

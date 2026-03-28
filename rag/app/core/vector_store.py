@@ -7,7 +7,7 @@
 
 import logging
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
@@ -29,7 +29,7 @@ class VectorStoreManager:
     Все данные сохраняются на диск для постоянного хранения.
     """
 
-    def __init__(self, persist_directory: Optional[str] = None):
+    def __init__(self, persist_directory: str | None = None):
         """
         Инициализация менеджера векторного хранилища.
 
@@ -38,8 +38,8 @@ class VectorStoreManager:
                 Если не указан, используется путь из настроек.
         """
         self.persist_directory = persist_directory or str(settings.db_dir)
-        self._vector_store: Optional[Chroma] = None
-        self._client: Optional[chromadb.Client] = None
+        self._vector_store: Chroma | None = None
+        self._client: chromadb.Client | None = None
         self._collection_name = "patents_collection"
 
         logger.info(f"Инициализация VectorStoreManager с путем: {self.persist_directory}")
@@ -96,7 +96,7 @@ class VectorStoreManager:
 
             embeddings = get_embeddings_model()
             client = self._init_client()
-            collection = self._get_or_create_collection(client)
+            self._get_or_create_collection(client)
 
             self._vector_store = Chroma(
                 client=client,
@@ -111,9 +111,9 @@ class VectorStoreManager:
 
     def add_documents(
         self,
-        documents: List[Document],
+        documents: list[Document],
         batch_size: int = 32,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Добавляет документы в векторное хранилище.
 
@@ -142,7 +142,7 @@ class VectorStoreManager:
 
         vector_store = self.get_vector_store()
         total_docs = len(documents)
-        added_ids: List[str] = []
+        added_ids: list[str] = []
 
         logger.info(f"Добавление {total_docs} документов в векторное хранилище")
 
@@ -167,9 +167,9 @@ class VectorStoreManager:
     def similarity_search(
         self,
         query: str,
-        k: Optional[int] = None,
-        filter_metadata: Optional[Dict[str, Any]] = None,
-    ) -> List[Document]:
+        k: int | None = None,
+        filter_metadata: dict[str, Any] | None = None,
+    ) -> list[Document]:
         """
         Выполняет поиск похожих документов по запросу.
 
@@ -233,8 +233,8 @@ class VectorStoreManager:
     def similarity_search_with_score(
         self,
         query: str,
-        k: Optional[int] = None,
-    ) -> List[Tuple[Document, float]]:
+        k: int | None = None,
+    ) -> list[tuple[Document, float]]:
         """
         Выполняет поиск похожих документов с оценкой релевантности.
 
@@ -267,7 +267,7 @@ class VectorStoreManager:
             logger.error(f"Ошибка при поиске с оценкой: {e}")
             return []
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """
         Возвращает статистику векторного хранилища.
 
