@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
 from loguru import logger
 
+from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.services.paper_service import PaperService
 from app.tasks.parse_tasks import (
@@ -14,6 +15,7 @@ from app.tasks.parse_tasks import (
     DEFAULT_SEARCH_QUERIES,
 )
 from parsers_pkg.arxiv import ARXIV_SEARCH_QUERIES
+from shared.schemas.auth import UserResponse
 from shared.schemas.paper import Paper, PaperSearchRequest, PaperSearchResponse
 
 router = APIRouter(prefix="/papers", tags=["papers"])
@@ -82,6 +84,7 @@ async def start_parsing(
     query: str = Query(..., description="Поисковый запрос"),
     limit: int = Query(default=50, ge=1, le=100, description="Макс. количество результатов"),
     source: str = Query(default="CORE", description="Источник (CORE или arXiv)"),
+    _current_user: UserResponse = Depends(get_current_user),
 ):
     """
     Запустить парсинг статей.
@@ -109,6 +112,7 @@ async def start_parsing(
 async def start_parsing_all(
     limit_per_query: int = Query(default=50, ge=1, le=100),
     source: str = Query(default="all", description="Источник (CORE, arXiv, all)"),
+    _current_user: UserResponse = Depends(get_current_user),
 ):
     """
     Запустить парсинг по всем стандартным запросам.

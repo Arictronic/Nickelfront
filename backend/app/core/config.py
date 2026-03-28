@@ -70,6 +70,27 @@ class Settings(BaseSettings):
     EMBEDDING_LOCAL_ONLY: bool = False
     EMBEDDING_CACHE_DIR: Optional[str] = "./models"
 
+    # Qwen API (Alibaba Cloud)
+    QWEN_TOKEN: Optional[str] = None
+    QWEN_MODEL: str = "qwen-coder"
+    QWEN_USE_STANDALONE: bool = False
+    QWEN_THINKING_ENABLED: bool = True
+    QWEN_SEARCH_ENABLED: bool = True
+    QWEN_AUTO_CONTINUE_ENABLED: bool = True
+    QWEN_MAX_CONTINUES: int = 5
+    QWEN_RATE_LIMIT_SECONDS: float = 2.0  # Мин. интервал между запросами
+    QWEN_API_KEY: Optional[str] = None  # API ключ для защиты сервиса
+    
+    # Qwen Service (standalone HTTP сервис)
+    QWEN_SERVICE_HOST: str = "127.0.0.1"
+    QWEN_SERVICE_PORT: int = 8767
+
+    # RAG Settings
+    RAG_CHUNK_SIZE: int = 1000
+    RAG_CHUNK_OVERLAP: int = 200
+    RAG_SEARCH_K: int = 4  # Количество документов для поиска
+    RAG_MAX_TOKENS: int = 1024
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "./logs/app.log"

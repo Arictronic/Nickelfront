@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiClient } from "../api/client";
 
 type CeleryStatus = {
@@ -77,60 +77,55 @@ export default function CeleryMonitoring() {
   
   // Scheduled tasks data
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([]);
+  const [fullRefreshEvery] = useState(3); // every 3 light polls
+  const pollTickRef = useRef(0);
+  const refreshingRef = useRef(false);
 
   useEffect(() => {
-    loadMonitoringData();
-    // Auto-refresh every 10 seconds
-    const interval = setInterval(loadMonitoringData, 10000);
+    refreshingRef.current = refreshing;
+  }, [refreshing]);
+
+  useEffect(() => {
+    loadMonitoringData(true);
+    // Light auto-refresh: status only, every 15s.
+    const interval = setInterval(() => {
+      void loadMonitoringData(false);
+    }, 15000);
     return () => clearInterval(interval);
   }, []);
 
-  const loadMonitoringData = async () => {
-    if (refreshing) return;
+  const loadMonitoringData = async (full: boolean = false) => {
+    if (refreshingRef.current) return;
     
     setRefreshing(true);
     setError(null);
     
     try {
-      const [
-        statusRes,
-        workersRes,
-        queuesRes,
-        tasksRes,
-        scheduledRes,
-      ] = await Promise.all([
-        apiClient.get<CeleryStatus>("/monitoring/celery/status").catch(() => null),
-        apiClient.get<{ workers: WorkerInfo[] }>("/monitoring/celery/workers").catch(() => null),
-        apiClient.get<{ queues: QueueInfo[] }>("/monitoring/celery/queues").catch(() => null),
-        apiClient.get<{ tasks: TaskInfo[] }>("/monitoring/celery/tasks?limit=20").catch(() => null),
-        apiClient.get<{ scheduled_tasks: ScheduledTask[] }>("/monitoring/celery/scheduled-tasks").catch(() => null),
-      ]);
+      const statusRes = await apiClient.get<CeleryStatus>("/monitoring/celery/status").catch(() => null);
 
       if (statusRes) {
         setStatus(statusRes.data);
       } else {
-        const hasWorkersData = Array.isArray(workersRes?.data?.workers) && workersRes!.data.workers.length > 0;
-        const hasTasksData = Array.isArray(tasksRes?.data?.tasks) && tasksRes!.data.tasks.length > 0;
-        if (hasWorkersData || hasTasksData) {
-          setStatus((prev) => ({
-            status: "online",
-            workers: { total: workersRes?.data?.workers?.length || 0, active: workersRes?.data?.workers?.length || 0 },
-            tasks: {
-              total: tasksRes?.data?.tasks?.length || 0,
-              active: 0,
-              successful: 0,
-              failed: 0,
-            },
-            flower_available: true,
-            flower_url: prev?.flower_url || "http://localhost:5555",
-            generated_at: new Date().toISOString(),
-          }));
-        }
+        setStatus((prev) => prev);
       }
-      if (workersRes) setWorkers(workersRes.data.workers || []);
-      if (queuesRes) setQueues(queuesRes.data.queues || []);
-      if (tasksRes) setTasks(tasksRes.data.tasks || []);
-      if (scheduledRes) setScheduledTasks(scheduledRes.data.scheduled_tasks || []);
+
+      const nextTick = pollTickRef.current + 1;
+      const shouldFullRefresh = full || nextTick % fullRefreshEvery === 0;
+      pollTickRef.current = nextTick;
+
+      if (shouldFullRefresh) {
+        const [workersRes, queuesRes, tasksRes, scheduledRes] = await Promise.all([
+          apiClient.get<{ workers: WorkerInfo[] }>("/monitoring/celery/workers").catch(() => null),
+          apiClient.get<{ queues: QueueInfo[] }>("/monitoring/celery/queues").catch(() => null),
+          apiClient.get<{ tasks: TaskInfo[] }>("/monitoring/celery/tasks?limit=20").catch(() => null),
+          apiClient.get<{ scheduled_tasks: ScheduledTask[] }>("/monitoring/celery/scheduled-tasks").catch(() => null),
+        ]);
+
+        if (workersRes) setWorkers(workersRes.data.workers || []);
+        if (queuesRes) setQueues(queuesRes.data.queues || []);
+        if (tasksRes) setTasks(tasksRes.data.tasks || []);
+        if (scheduledRes) setScheduledTasks(scheduledRes.data.scheduled_tasks || []);
+      }
       
       setLoading(false);
     } catch (e: any) {
@@ -194,7 +189,7 @@ export default function CeleryMonitoring() {
           >
             🌸 Flower UI
           </a>
-          <button className="btn" onClick={loadMonitoringData} disabled={refreshing}>
+          <button className="btn" onClick={() => void loadMonitoringData(true)} disabled={refreshing}>
             {refreshing ? "Обновление..." : "Обновить"}
           </button>
         </div>
@@ -405,7 +400,7 @@ export default function CeleryMonitoring() {
       )}
 
       <p className="muted" style={{ marginTop: 16, fontSize: 12 }}>
-        Данные обновляются каждые 10 секунд. Flower доступен по адресу: {status?.flower_url || "http://localhost:5555"}
+        Статус обновляется каждые 15 секунд, полный срез реже. Flower: {status?.flower_url || "http://localhost:5555"}
       </p>
     </div>
   );

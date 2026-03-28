@@ -1,7 +1,11 @@
-﻿import { NavLink } from "react-router-dom";
+import { NavLink } from "react-router-dom";
+import { useAuthStore } from "../../store/authStore";
 
 export default function Sidebar() {
+  const user = useAuthStore((s) => s.user);
+  const isAdmin = !!user?.is_admin;
   const cls = ({ isActive }: { isActive: boolean }) => `nav-item${isActive ? " active" : ""}`;
+
   return (
     <aside className="sidebar">
       <div className="sidebar-title">Навигация</div>
@@ -26,13 +30,17 @@ export default function Sidebar() {
         <span>Статус парсинга</span>
       </NavLink>
 
-      <div className="sidebar-section">Технический отдел</div>
-      <NavLink className={cls} to="/celery">
-        <span>Задачи</span>
-      </NavLink>
-      <NavLink className={cls} to="/database">
-        <span>База данных</span>
-      </NavLink>
+      {isAdmin && (
+        <>
+          <div className="sidebar-section">Технический отдел</div>
+          <NavLink className={cls} to="/celery">
+            <span>Задачи</span>
+          </NavLink>
+          <NavLink className={cls} to="/database">
+            <span>База данных</span>
+          </NavLink>
+        </>
+      )}
     </aside>
   );
 }

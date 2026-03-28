@@ -45,7 +45,10 @@ apiClient.interceptors.response.use(
     const status = error.response?.status;
     const url: string = originalRequest.url || "";
 
-    const isAuthRoute = url.includes("/auth/login") || url.includes("/auth/refresh") || url.includes("/auth/register");
+    const isLoginRoute = url.includes("/auth/login");
+    const isRegisterRoute = url.includes("/auth/register");
+    const isRefreshRoute = url.includes("/auth/refresh");
+    const isAuthRoute = isLoginRoute || isRegisterRoute || isRefreshRoute;
 
     if (status === 401 && !originalRequest._retry && !isAuthRoute) {
       const refreshToken = localStorage.getItem("refresh_token");
@@ -98,7 +101,8 @@ apiClient.interceptors.response.use(
       return apiClient(originalRequest);
     }
 
-    if (status === 401 && isAuthRoute) {
+    // Keep login/register errors inside UI form (no forced page reload).
+    if (status === 401 && isRefreshRoute) {
       localStorage.removeItem("auth_token");
       localStorage.removeItem("refresh_token");
       window.location.href = "/login";

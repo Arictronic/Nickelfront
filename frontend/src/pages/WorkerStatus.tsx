@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getPapersCount, getCeleryTaskStatus, revokeCeleryTask, deleteCeleryTask, type CeleryTaskStatus } from "../api/papers";
 
 type ParseJob = {
@@ -35,6 +35,11 @@ export default function WorkerStatus() {
   const [allCount, setAllCount] = useState<number>(0);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number>(Date.now());
   const [error, setError] = useState<string | null>(null);
+  const jobsRef = useRef<ParseJob[]>(jobs);
+
+  useEffect(() => {
+    jobsRef.current = jobs;
+  }, [jobs]);
 
   useEffect(() => {
     getPapersCount("all")
@@ -42,68 +47,92 @@ export default function WorkerStatus() {
       .catch((e) => setError((e as Error).message));
   }, []);
 
+  const refreshJobs = async (baseJobs?: ParseJob[]) => {
+    const sourceJobs = baseJobs ?? jobsRef.current;
+    if (sourceJobs.length === 0) {
+      const total = await getPapersCount("all");
+      setAllCount(total);
+      setLastUpdatedAt(Date.now());
+      return;
+    }
+
+    const updatedJobs = await Promise.all(
+      sourceJobs.map(async (job) => {
+        if (job.status !== "in_progress") return job;
+        if (job.celeryStatus?.status === "REVOKED" || job.status === "cancelled") return job;
+
+        try {
+          const celeryStatus = await getCeleryTaskStatus(job.jobId);
+          const now = Date.now();
+          const isCompleted = celeryStatus.status === "SUCCESS" || celeryStatus.status === "FAILURE";
+          const isRevoked = celeryStatus.status === "REVOKED";
+          const savedCount = celeryStatus.saved_count || celeryStatus.result?.saved_count || 0;
+
+          return {
+            ...job,
+            celeryStatus,
+            lastObservedCount: savedCount > 0 ? savedCount : job.lastObservedCount,
+            lastCountChangeAt: isCompleted ? now : job.lastCountChangeAt,
+            lastPolledAt: now,
+            status: isRevoked ? "cancelled" : isCompleted ? "completed" : "in_progress",
+          } as ParseJob;
+        } catch {
+          const source = job.source === "all" ? "all" : job.source;
+          const current = await getPapersCount(source as any);
+          const now = Date.now();
+          const changed = current !== job.lastObservedCount;
+
+          const next: ParseJob = {
+            ...job,
+            lastObservedCount: current,
+            lastCountChangeAt: changed ? now : job.lastCountChangeAt,
+          };
+
+          const stableMs = 60_000;
+          if (now - next.lastCountChangeAt > stableMs && current > next.initialCount) {
+            next.status = "completed";
+          }
+          return next;
+        }
+      })
+    );
+
+    // If user clicked "clear history" while refresh was in-flight, keep list empty.
+    if (jobsRef.current.length === 0) {
+      const total = await getPapersCount("all");
+      setAllCount(total);
+      setLastUpdatedAt(Date.now());
+      return;
+    }
+
+    setJobs(updatedJobs);
+    jobsRef.current = updatedJobs;
+    saveJobs(updatedJobs);
+
+    const total = await getPapersCount("all");
+    setAllCount(total);
+    setLastUpdatedAt(Date.now());
+  };
+
   // Polling статуса задач Celery
   useEffect(() => {
-    if (jobs.length === 0) return;
+    if (jobsRef.current.length === 0) return;
+    let cancelled = false;
 
     const pollInterval = window.setInterval(async () => {
       try {
-        const updatedJobs = await Promise.all(
-          jobs.map(async (job) => {
-            // Не обновляем завершённые или отменённые задачи
-            if (job.status !== "in_progress") return job;
-            // Если уже отменено, не обновляем статус из API
-            if (job.celeryStatus?.status === "REVOKED" || job.status === "cancelled") return job;
-
-            try {
-              const celeryStatus = await getCeleryTaskStatus(job.jobId);
-              const now = Date.now();
-              const isCompleted = celeryStatus.status === "SUCCESS" || celeryStatus.status === "FAILURE";
-              const isRevoked = celeryStatus.status === "REVOKED";
-              const savedCount = celeryStatus.saved_count || celeryStatus.result?.saved_count || 0;
-
-              const next: ParseJob = {
-                ...job,
-                celeryStatus,
-                lastObservedCount: savedCount > 0 ? savedCount : job.lastObservedCount,
-                lastCountChangeAt: isCompleted ? now : job.lastCountChangeAt,
-                lastPolledAt: now,
-                status: isRevoked ? "cancelled" : isCompleted ? "completed" : "in_progress",
-              };
-
-              return next;
-            } catch {
-              const source = job.source === "all" ? "all" : job.source;
-              const current = await getPapersCount(source as any);
-              const now = Date.now();
-              const changed = current !== job.lastObservedCount;
-
-              const next: ParseJob = {
-                ...job,
-                lastObservedCount: current,
-                lastCountChangeAt: changed ? now : job.lastCountChangeAt,
-              };
-
-              const stableMs = 60_000;
-              if (now - next.lastCountChangeAt > stableMs && current > next.initialCount) {
-                next.status = "completed";
-              }
-              return next;
-            }
-          })
-        );
-
-        setJobs(updatedJobs);
-        saveJobs(updatedJobs);
-        const total = await getPapersCount("all");
-        setAllCount(total);
-        setLastUpdatedAt(Date.now());
+        if (cancelled) return;
+        await refreshJobs();
       } catch (e) {
+        if (cancelled) return;
         setError((e as Error).message);
       }
     }, 5000);
 
-    return () => window.clearInterval(pollInterval);
+    return () => {
+      cancelled = true;
+      window.clearInterval(pollInterval);
+    };
   }, [jobs.length]);
 
   const inProgress = jobs.filter((j) => j.status === "in_progress").length;
@@ -111,8 +140,11 @@ export default function WorkerStatus() {
 
   const clearHistory = () => {
     if (!window.confirm("Очистить историю задач в интерфейсе? (не влияет на celery)")) return;
+    jobsRef.current = [];
     setJobs([]);
     localStorage.removeItem(LS_KEY);
+    setLastUpdatedAt(Date.now());
+    setError(null);
   };
 
   const cancelJob = async (jobId: string) => {
@@ -136,6 +168,7 @@ export default function WorkerStatus() {
           : job
       );
       setJobs(nextJobs);
+      jobsRef.current = nextJobs;
       saveJobs(nextJobs);
     } catch (e) {
       setError((e as Error).message);
@@ -148,10 +181,10 @@ export default function WorkerStatus() {
     }
 
     try {
-      // Вызываем API для удаления флага отмены (опционально)
       await deleteCeleryTask(jobId);
       const nextJobs = jobs.filter((job) => job.jobId !== jobId);
       setJobs(nextJobs);
+      jobsRef.current = nextJobs;
       saveJobs(nextJobs);
     } catch (e) {
       setError((e as Error).message);
@@ -190,8 +223,21 @@ export default function WorkerStatus() {
       <div className="page-head">
         <h2>Статус парсинга</h2>
         <div className="actions">
-          <button className="btn" onClick={() => setJobs(loadJobs())}>
-            Перезагрузить
+          <button
+            className="btn"
+            onClick={async () => {
+              try {
+                setError(null);
+                const fromStorage = loadJobs();
+                jobsRef.current = fromStorage;
+                setJobs(fromStorage);
+                await refreshJobs(fromStorage);
+              } catch (e) {
+                setError((e as Error).message);
+              }
+            }}
+          >
+            Обновить
           </button>
           <button className="btn btn-danger" onClick={clearHistory}>
             Очистить историю

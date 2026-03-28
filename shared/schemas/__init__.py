@@ -1,7 +1,24 @@
 """Общие схемы данных."""
 
 from .task import TaskCreate, TaskOut
-from .paper import Paper, PaperCreate, PaperSearchRequest, PaperSearchResponse
+from .paper import (
+    Paper,
+    PaperCreate,
+    PaperSearchRequest,
+    PaperSearchResponse,
+    QwenMessageRequest,
+    QwenMessageResponse,
+    QwenSessionCreateRequest,
+    QwenSessionCreateResponse,
+    QwenSessionListResponse,
+    QwenSessionInfo,
+    QwenRenameRequest,
+    QwenRenameResponse,
+    QwenDeleteResponse,
+    QwenConfigResponse,
+    QwenConfigUpdateRequest,
+    QwenHealthResponse,
+)
 
 __all__ = [
     "TaskCreate",
@@ -10,4 +27,16 @@ __all__ = [
     "PaperCreate",
     "PaperSearchRequest",
     "PaperSearchResponse",
+    "QwenMessageRequest",
+    "QwenMessageResponse",
+    "QwenSessionCreateRequest",
+    "QwenSessionCreateResponse",
+    "QwenSessionListResponse",
+    "QwenSessionInfo",
+    "QwenRenameRequest",
+    "QwenRenameResponse",
+    "QwenDeleteResponse",
+    "QwenConfigResponse",
+    "QwenConfigUpdateRequest",
+    "QwenHealthResponse",
 ]

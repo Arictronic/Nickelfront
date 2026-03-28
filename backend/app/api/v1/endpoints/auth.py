@@ -48,6 +48,7 @@ async def login(
 ):
     """Login and get access/refresh tokens."""
     user_service = UserService(db)
+    await user_service.ensure_admin_account()
 
     user = await user_service.authenticate(login_data.email, login_data.password)
     if not user:

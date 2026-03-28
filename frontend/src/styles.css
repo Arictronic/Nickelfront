@@ -4,24 +4,44 @@
 :root {
   --bg: #f3f5f9;
   --surface: #ffffff;
+  --surface-2: #f8fafc;
   --text: #0f172a;
   --muted: #64748b;
   --border: #dbe2ea;
   --primary: #1d4ed8;
   --primary-strong: #1e40af;
   --danger: #c81e1e;
+  --input-bg: #ffffff;
+  --input-border: #d1d5db;
+  --button-bg: #ffffff;
+  --button-border: #cfd8e3;
+  --table-bg: #ffffff;
+  --table-head-bg: #f8fafc;
+  --table-border: #e6ecf2;
+  --table-row-border: #edf2f7;
+  --table-row-hover: #f8fbff;
 }
 
 /* Темная тема */
 [data-theme="dark"] {
   --bg: #0f172a;
   --surface: #1e293b;
+  --surface-2: #0f172a;
   --text: #f1f5f9;
   --muted: #94a3b8;
   --border: #334155;
   --primary: #3b82f6;
   --primary-strong: #2563eb;
   --danger: #ef4444;
+  --input-bg: #0f172a;
+  --input-border: #334155;
+  --button-bg: #0f172a;
+  --button-border: #334155;
+  --table-bg: #0f172a;
+  --table-head-bg: #1e293b;
+  --table-border: #334155;
+  --table-row-border: #334155;
+  --table-row-hover: #17243a;
 }
 
 body {
@@ -108,7 +128,7 @@ body {
 .panel h3 {
   margin: 0 0 10px;
   font-size: 15px;
-  color: #334155;
+  color: var(--muted);
 }
 .auth {
   max-width: 520px;
@@ -132,16 +152,17 @@ body {
 .input,
 input,
 select {
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--input-border);
   border-radius: 8px;
   padding: 10px 12px;
-  background: #fff;
+  background: var(--input-bg);
+  color: var(--text);
 }
 .btn {
-  border: 1px solid #cfd8e3;
+  border: 1px solid var(--button-border);
   border-radius: 10px;
-  background: #fff;
-  color: #0f172a;
+  background: var(--button-bg);
+  color: var(--text);
   padding: 10px 13px;
   font-weight: 600;
   cursor: pointer;
@@ -156,7 +177,7 @@ select {
   background: #334155;
 }
 .btn:hover {
-  background: #f8fafc;
+  background: var(--surface-2);
   border-color: #b7c5d8;
 }
 .btn-primary {
@@ -180,24 +201,25 @@ select {
 .table {
   width: 100%;
   border-collapse: collapse;
-  background: #fff;
-  border: 1px solid #e6ecf2;
+  background: var(--table-bg);
+  border: 1px solid var(--table-border);
   border-radius: 12px;
   overflow: hidden;
 }
 .table th,
 .table td {
-  border-bottom: 1px solid #edf2f7;
+  border-bottom: 1px solid var(--table-row-border);
   padding: 12px 10px;
   text-align: left;
+  color: var(--text);
 }
 .table th {
   font-size: 13px;
-  color: #475569;
-  background: #f8fafc;
+  color: var(--muted);
+  background: var(--table-head-bg);
 }
 .table tbody tr:hover td {
-  background: #f8fbff;
+  background: var(--table-row-hover);
 }
 .sortable {
   cursor: pointer;
@@ -210,7 +232,8 @@ select {
 .actions-inline button {
   border: 1px solid #d7e0ea;
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--surface-2);
+  color: var(--text);
   padding: 6px 8px;
   cursor: pointer;
   font-size: 12px;
@@ -218,10 +241,10 @@ select {
 .action-link {
   border: 1px solid #d7e0ea;
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--surface-2);
   padding: 6px 8px;
   text-decoration: none;
-  color: #1e3a8a;
+  color: var(--primary);
   font-size: 12px;
   font-weight: 600;
 }
@@ -311,18 +334,24 @@ select {
 .kpi-status.idle {
   color: #92400e;
 }
+[data-theme="dark"] .kpi-status.ok {
+  color: #22c55e;
+}
+[data-theme="dark"] .kpi-status.idle {
+  color: #f59e0b;
+}
 .chart-grid {
   display: grid;
   grid-template-columns: 2fr 1.2fr;
   gap: 12px;
 }
 .panel iframe {
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
 }
 .pdf-box {
   overflow: auto;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 10px;
   max-height: 540px;
@@ -343,8 +372,8 @@ select {
 }
 .counter-badge {
   border: 1px solid #c7d2e0;
-  background: #fff;
-  color: #334155;
+  background: var(--surface-2);
+  color: var(--text);
   font-size: 13px;
   font-weight: 600;
   border-radius: 999px;
@@ -380,14 +409,14 @@ select {
   height: 34px;
   display: grid;
   place-items: center;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--input-border);
   border-radius: 10px;
-  background: #fff;
-  color: #334155;
+  background: var(--input-bg);
+  color: var(--muted);
   cursor: pointer;
 }
 .icon-btn:hover {
-  background: #f8fafc;
+  background: var(--surface-2);
 }
 .sidebar-title {
   font-size: 12px;
@@ -445,7 +474,7 @@ select {
 
 .input.invalid {
   border-color: var(--danger);
-  background-color: #fef2f2;
+  background-color: color-mix(in srgb, var(--danger) 8%, var(--input-bg));
 }
 
 .input.valid {
@@ -489,13 +518,9 @@ select {
 .password-requirements {
   margin-top: 8px;
   padding: 12px;
-  background: #f8fafc;
+  background: var(--surface-2);
   border-radius: 8px;
   border: 1px solid var(--border);
-}
-
-[data-theme="dark"] .password-requirements {
-  background: #1e293b;
 }
 
 .requirements-title {

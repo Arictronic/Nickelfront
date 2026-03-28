@@ -12,7 +12,7 @@ export default function Login() {
   const [error, setError] = useState("");
 
   const isEmailValid = isValidEmail(email);
-  const isPasswordFilled = password.length >= 6;
+  const isPasswordFilled = password.length >= 5;
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -24,7 +24,7 @@ export default function Login() {
     }
 
     if (!isPasswordFilled) {
-      setError("Введите пароль (минимум 6 символов)");
+      setError("Введите пароль (минимум 5 символов)");
       return;
     }
 
@@ -34,6 +34,10 @@ export default function Login() {
         navigate("/dashboard", { replace: true });
       }, 100);
     } catch (err: any) {
+      if (err?.response?.status === 401) {
+        setError("Доступ не авторизован: неверный email или пароль");
+        return;
+      }
       setError(err.response?.data?.detail || "Ошибка входа");
     }
   };
@@ -97,8 +101,8 @@ export default function Login() {
             )}
           </button>
         </div>
-        {password && password.length < 6 && (
-          <span className="field-error">Минимум 6 символов</span>
+        {password && password.length < 5 && (
+          <span className="field-error">Минимум 5 символов</span>
         )}
       </div>
 

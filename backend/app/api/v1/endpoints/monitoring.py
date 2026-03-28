@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from typing import Optional, List
 from datetime import datetime
+import asyncio
 import httpx
 
 from app.db.session import AsyncSessionLocal
@@ -19,7 +20,7 @@ FLOWER_HOST = settings.get_flower_url()
 
 def _inspect_workers_fallback() -> list[str]:
     try:
-        inspector = celery_app.control.inspect()
+        inspector = celery_app.control.inspect(timeout=0.5)
         ping = inspector.ping() or {}
         return list(ping.keys())
     except Exception:
@@ -28,7 +29,7 @@ def _inspect_workers_fallback() -> list[str]:
 
 def _inspect_active_tasks_fallback() -> int:
     try:
-        inspector = celery_app.control.inspect()
+        inspector = celery_app.control.inspect(timeout=0.5)
         active = inspector.active() or {}
         return sum(len(v or []) for v in active.values())
     except Exception:
@@ -43,7 +44,7 @@ def _safe_dict_values(data):
 
 def _inspect_workers_details_fallback() -> list[dict]:
     try:
-        inspector = celery_app.control.inspect()
+        inspector = celery_app.control.inspect(timeout=0.5)
         ping = inspector.ping() or {}
         active = inspector.active() or {}
         stats = inspector.stats() or {}
@@ -71,7 +72,7 @@ def _inspect_workers_details_fallback() -> list[dict]:
 
 def _inspect_tasks_details_fallback(limit: int = 100, state: Optional[str] = None) -> list[dict]:
     try:
-        inspector = celery_app.control.inspect()
+        inspector = celery_app.control.inspect(timeout=0.5)
         active = inspector.active() or {}
         reserved = inspector.reserved() or {}
         scheduled = inspector.scheduled() or {}
@@ -166,7 +167,7 @@ async def get_celery_status():
         # Агрегируем статистику
         workers_count = len(workers_data) if isinstance(workers_data, dict) else 0
         if workers_count == 0:
-            workers_count = len(_inspect_workers_fallback())
+            workers_count = len(await asyncio.to_thread(_inspect_workers_fallback))
         active_workers = sum(
             1
             for w in _safe_dict_values(workers_data)
@@ -185,7 +186,7 @@ async def get_celery_status():
             if isinstance(t, dict) and str(t.get("state", "")).lower() == "started"
         )
         if active_tasks == 0:
-            active_tasks = _inspect_active_tasks_fallback()
+            active_tasks = await asyncio.to_thread(_inspect_active_tasks_fallback)
         successful_tasks = sum(
             1
             for t in _safe_dict_values(tasks_data)
@@ -263,7 +264,7 @@ async def get_workers_info():
                 })
 
             if len(workers) == 0:
-                workers = _inspect_workers_details_fallback()
+                workers = await asyncio.to_thread(_inspect_workers_details_fallback)
             
             return {
                 "workers": workers,
@@ -272,14 +273,14 @@ async def get_workers_info():
             }
             
     except httpx.RequestError:
-        workers = _inspect_workers_details_fallback()
+        workers = await asyncio.to_thread(_inspect_workers_details_fallback)
         return {
             "workers": workers,
             "total": len(workers),
             "generated_at": datetime.now().isoformat(),
         }
     except Exception as e:
-        workers = _inspect_workers_details_fallback()
+        workers = await asyncio.to_thread(_inspect_workers_details_fallback)
         if workers:
             return {
                 "workers": workers,
@@ -335,7 +336,7 @@ async def get_tasks_info(
             tasks.sort(key=lambda t: t.get("received", ""), reverse=True)
 
             if len(tasks) == 0:
-                tasks = _inspect_tasks_details_fallback(limit=limit, state=state)
+                tasks = await asyncio.to_thread(_inspect_tasks_details_fallback, limit, state)
             
             return {
                 "tasks": tasks[:limit],
@@ -345,7 +346,7 @@ async def get_tasks_info(
             }
             
     except httpx.RequestError:
-        tasks = _inspect_tasks_details_fallback(limit=limit, state=state)
+        tasks = await asyncio.to_thread(_inspect_tasks_details_fallback, limit, state)
         return {
             "tasks": tasks[:limit],
             "total": len(tasks),
@@ -353,7 +354,7 @@ async def get_tasks_info(
             "generated_at": datetime.now().isoformat(),
         }
     except Exception as e:
-        tasks = _inspect_tasks_details_fallback(limit=limit, state=state)
+        tasks = await asyncio.to_thread(_inspect_tasks_details_fallback, limit, state)
         if tasks:
             return {
                 "tasks": tasks[:limit],

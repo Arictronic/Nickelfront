@@ -202,13 +202,22 @@ export default function FullTextSearch() {
         {/* Mode examples */}
         <div style={{ 
           padding: 12, 
-          background: "#f8fafc", 
+          background: "var(--surface-2)", 
           borderRadius: 8, 
           fontSize: 13,
-          border: "1px solid #e2e8f0",
+          border: "1px solid var(--border)",
+          color: "var(--muted)",
         }}>
           <strong>Пример запроса ({searchMode}):</strong>{" "}
-          <code style={{ background: "#e2e8f0", padding: "2px 6px", borderRadius: 4 }}>
+          <code
+            style={{
+              background: "var(--bg)",
+              color: "var(--text)",
+              padding: "2px 6px",
+              borderRadius: 4,
+              border: "1px solid var(--border)",
+            }}
+          >
             {modeExamples[searchMode]}
           </code>
         </div>

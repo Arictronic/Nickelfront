@@ -58,6 +58,7 @@ async def get_current_user(
         email=user.email,
         username=user.username,
         is_active=user.is_active,
+        is_admin=user.email.lower() == "admin@admin.com",
         created_at=user.created_at,
     )
 

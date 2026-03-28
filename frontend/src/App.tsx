@@ -11,7 +11,6 @@ import CeleryMonitoring from "./pages/CeleryMonitoring";
 import FullTextSearch from "./pages/FullTextSearch";
 import WorkerStatus from "./pages/WorkerStatus";
 import Database from "./pages/Database";
-import Landing from "./pages/Landing";
 import PaperReport from "./pages/PaperReport";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
@@ -21,6 +20,28 @@ import ErrorBoundary from "./components/ErrorBoundary";
 function ProtectedRoute({ children }: { children: JSX.Element }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   return isAuthenticated ? children : <Navigate to="/login" replace />;
+}
+
+function AdminRoute({ children }: { children: JSX.Element }) {
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const user = useAuthStore((s) => s.user);
+  const isAdmin = !!user && user.is_admin;
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return isAdmin ? children : <Navigate to="/dashboard" replace />;
+}
+
+function RootRedirect() {
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  return <Navigate to={isAuthenticated ? "/dashboard" : "/login"} replace />;
+}
+
+function AuthOnlyRoute({ children }: { children: JSX.Element }) {
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  return isAuthenticated ? <Navigate to="/dashboard" replace /> : children;
 }
 
 function SessionBootstrap() {
@@ -71,10 +92,24 @@ export default function App() {
     <>
       <SessionBootstrap />
       <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/register" element={<Register />} />
+        <Route
+          path="/login"
+          element={
+            <AuthOnlyRoute>
+              <Login />
+            </AuthOnlyRoute>
+          }
+        />
+        <Route
+          path="/register"
+          element={
+            <AuthOnlyRoute>
+              <Register />
+            </AuthOnlyRoute>
+          }
+        />
         <Route path="/" element={<Layout />}>
-          <Route index element={<Landing />} />
+          <Route index element={<RootRedirect />} />
           <Route
             path="dashboard"
             element={
@@ -126,9 +161,9 @@ export default function App() {
           <Route
             path="celery"
             element={
-              <ProtectedRoute>
+              <AdminRoute>
                 <CeleryMonitoring />
-              </ProtectedRoute>
+              </AdminRoute>
             }
           />
           <Route
@@ -150,11 +185,11 @@ export default function App() {
           <Route
             path="database"
             element={
-              <ProtectedRoute>
+              <AdminRoute>
                 <ErrorBoundary name="База данных">
                   <Database />
                 </ErrorBoundary>
-              </ProtectedRoute>
+              </AdminRoute>
             }
           />
         </Route>

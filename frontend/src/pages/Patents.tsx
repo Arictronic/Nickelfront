@@ -313,13 +313,15 @@ export default function Patents() {
                   <td>{p.publicationDate ? p.publicationDate.slice(0, 10) : "—"}</td>
                   <td>{p.doi ?? "—"}</td>
                   <td>{p.fullText ? "Да" : "Нет"}</td>
-                  <td className="actions-inline">
-                    <Link className="action-link" to={`/papers/${p.id}`}>
-                      Открыть
-                    </Link>
-                    <button type="button" className="btn" onClick={() => deleteByIds([p.id])}>
-                      Удалить
-                    </button>
+                  <td>
+                    <div className="actions-inline">
+                      <Link className="action-link" to={`/papers/${p.id}`}>
+                        Открыть
+                      </Link>
+                      <button type="button" className="btn" onClick={() => deleteByIds([p.id])}>
+                        Удалить
+                      </button>
+                    </div>
                   </td>
                 </tr>
               );

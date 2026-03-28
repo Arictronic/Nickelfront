@@ -68,3 +68,27 @@ class UserService:
         if not user.is_active:
             return None
         return user
+
+    async def ensure_admin_account(self) -> User:
+        """Ensure built-in admin account exists."""
+        admin_email = "admin@admin.com"
+        admin_password = "admin"
+
+        admin = await self.get_by_email(admin_email)
+        if admin:
+            return admin
+
+        admin = User(
+            email=admin_email,
+            username="admin",
+            password_hash=get_password_hash(admin_password),
+            is_active=True,
+            is_verified=True,
+        )
+
+        self.db.add(admin)
+        await self.db.commit()
+        await self.db.refresh(admin)
+
+        logger.warning(f"Auto-created built-in admin account: {admin_email}")
+        return admin
