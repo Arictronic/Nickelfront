@@ -5,6 +5,7 @@ API документация: https://arxiv.org/help/api
 """
 
 import asyncio
+import random
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Any
@@ -39,6 +40,8 @@ class ArxivClient(BaseAPIClient):
 
     BASE_URL = "https://export.arxiv.org/api/query"
     RATE_LIMIT_DELAY = 3.0
+    MAX_RETRIES = 4
+    RETRY_BACKOFF_BASE = 2.0
 
     def __init__(self, timeout: float = 30.0, rate_limit: bool = True):
         """
@@ -100,21 +103,82 @@ class ArxivClient(BaseAPIClient):
             "sortOrder": "descending",
         }
 
-        try:
-            logger.info(f"arXiv: поиск по запросу '{query}', limit={limit}")
-            response = await client.get(self.BASE_URL, params=params)
-            response.raise_for_status()
+        logger.info(f"arXiv: поиск по запросу '{query}', limit={limit}")
 
-            results = self._parse_xml_response(response.text)
-            logger.info(f"arXiv: найдено {len(results)} статей")
-            return results
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                response = await client.get(self.BASE_URL, params=params)
 
-        except httpx.HTTPError as e:
-            logger.error(f"arXiv API error: {e}")
-            return []
-        except Exception as e:
-            logger.error(f"arXiv search error: {e}")
-            return []
+                if response.status_code == 429:
+                    if attempt >= self.MAX_RETRIES:
+                        logger.error(
+                            "arXiv API rate limit (429) exhausted after {} attempts for query='{}'",
+                            attempt,
+                            query,
+                        )
+                        return []
+
+                    retry_after_raw = response.headers.get("Retry-After")
+                    retry_after = 0.0
+                    if retry_after_raw:
+                        try:
+                            retry_after = float(retry_after_raw)
+                        except ValueError:
+                            retry_after = 0.0
+                    backoff = self.RATE_LIMIT_DELAY * (self.RETRY_BACKOFF_BASE ** (attempt - 1))
+                    sleep_for = max(retry_after, backoff) + random.uniform(0.0, 0.8)
+                    logger.warning(
+                        "arXiv API 429 for query='{}' (attempt {}/{}), sleeping {:.1f}s",
+                        query,
+                        attempt,
+                        self.MAX_RETRIES,
+                        sleep_for,
+                    )
+                    await asyncio.sleep(sleep_for)
+                    continue
+
+                if 500 <= response.status_code < 600:
+                    if attempt >= self.MAX_RETRIES:
+                        response.raise_for_status()
+                    sleep_for = (self.RATE_LIMIT_DELAY / 2.0) * (self.RETRY_BACKOFF_BASE ** (attempt - 1))
+                    logger.warning(
+                        "arXiv API {} for query='{}' (attempt {}/{}), retry in {:.1f}s",
+                        response.status_code,
+                        query,
+                        attempt,
+                        self.MAX_RETRIES,
+                        sleep_for,
+                    )
+                    await asyncio.sleep(sleep_for)
+                    continue
+
+                response.raise_for_status()
+                results = self._parse_xml_response(response.text)
+                logger.info(f"arXiv: найдено {len(results)} статей")
+                return results
+
+            except (httpx.TimeoutException, httpx.NetworkError) as e:
+                if attempt >= self.MAX_RETRIES:
+                    logger.error(f"arXiv API network error: {e}")
+                    return []
+                sleep_for = (self.RATE_LIMIT_DELAY / 2.0) * (self.RETRY_BACKOFF_BASE ** (attempt - 1))
+                logger.warning(
+                    "arXiv API transient error for query='{}' (attempt {}/{}): {}. Retry in {:.1f}s",
+                    query,
+                    attempt,
+                    self.MAX_RETRIES,
+                    str(e),
+                    sleep_for,
+                )
+                await asyncio.sleep(sleep_for)
+            except httpx.HTTPError as e:
+                logger.error(f"arXiv API error: {e}")
+                return []
+            except Exception as e:
+                logger.error(f"arXiv search error: {e}")
+                return []
+
+        return []
 
     def _parse_xml_response(self, xml_text: str) -> list[dict[str, Any]]:
         """Распарсить XML ответ от arXiv."""

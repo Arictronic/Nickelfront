@@ -3,12 +3,17 @@
 Поддерживаемые источники:
 - CORE (core.ac.uk)
 - arXiv (arxiv.org)
+- OpenAlex
+- Crossref
+- SemanticScholar
+- EuropePMC
 """
 
 import asyncio
 
 from loguru import logger
 
+from app.core.config import settings
 from app.db.session import async_session_maker
 from app.services.celery_cancel import clear_cancel_flag, is_cancelled
 from app.services.paper_content_service import resolve_pdf_url
@@ -19,8 +24,10 @@ from parsers_pkg.arxiv.client import ArxivClient
 from parsers_pkg.arxiv.parser import ArxivParser
 from parsers_pkg.core.client import COREClient
 from parsers_pkg.core.parser import COREParser
+from parsers_pkg.external import AVAILABLE_EXTERNAL_SOURCES, ExternalParser
 from shared.schemas.paper import PaperCreate
 
+from .async_runner import run_async
 from .celery_app import celery_app
 
 # Поисковые запросы по тематике никелевых сплавов
@@ -31,6 +38,15 @@ DEFAULT_SEARCH_QUERIES = [
     "nickel superalloys corrosion",
     "nickel alloys high temperature",
 ]
+
+EXTERNAL_SEARCH_QUERIES = {
+    "OpenAlex": DEFAULT_SEARCH_QUERIES,
+    "Crossref": DEFAULT_SEARCH_QUERIES,
+    "SemanticScholar": DEFAULT_SEARCH_QUERIES,
+    "EuropePMC": DEFAULT_SEARCH_QUERIES,
+}
+
+AVAILABLE_SOURCES = ["CORE", "arXiv", *list(EXTERNAL_SEARCH_QUERIES.keys())]
 
 
 def _get_task_id(task) -> str | None:
@@ -97,7 +113,7 @@ def parse_papers_task(
                 "status": "Инициализация..."
             }
         )
-        return asyncio.run(_parse_async(self, query, limit, source))
+        return run_async(_parse_async(self, query, limit, source))
     except Exception as e:
         logger.error(f"Ошибка парсинга: {e}")
         self.update_state(
@@ -132,9 +148,18 @@ async def _parse_async(
     if source == "arXiv":
         client = ArxivClient(rate_limit=True)
         parser = ArxivParser()
-    else:
-        client = COREClient()
+    elif source == "CORE":
+        client = COREClient(
+            api_key=settings.CORE_API_KEY,
+            timeout=settings.CORE_API_TIMEOUT,
+        )
         parser = COREParser()
+    elif source in AVAILABLE_EXTERNAL_SOURCES:
+        client_cls = AVAILABLE_EXTERNAL_SOURCES[source]
+        client = client_cls(timeout=40.0)
+        parser = ExternalParser(source=source)
+    else:
+        raise ValueError(f"Unsupported source: {source}")
 
     stats = {
         "query": query,
@@ -304,7 +329,12 @@ def parse_multiple_queries_task(
         source: Источник (CORE или arXiv)
     """
     if queries is None:
-        queries = DEFAULT_SEARCH_QUERIES if source == "CORE" else ARXIV_SEARCH_QUERIES
+        if source == "arXiv":
+            queries = ARXIV_SEARCH_QUERIES
+        elif source == "CORE":
+            queries = DEFAULT_SEARCH_QUERIES
+        else:
+            queries = EXTERNAL_SEARCH_QUERIES.get(source, DEFAULT_SEARCH_QUERIES)
 
     total_queries = len(queries)
     results = []
@@ -366,72 +396,62 @@ def parse_all_sources_task(
     self,
     limit_per_query: int = 50,
 ):
-    """
-    Парсинг по всем источникам (CORE + arXiv).
-
-    Args:
-        limit_per_query: Лимит на каждый запрос
-    """
+    """Парсинг по всем поддерживаемым источникам."""
     if _is_cancelled(self):
-        return _mark_revoked(self, query='all_sources', source='CORE', current=0, total=2)
+        return _mark_revoked(self, query="all_sources", source="CORE", current=0, total=len(AVAILABLE_SOURCES))
 
-    logger.info("Запуск парсинга по всем источникам...")
+    logger.info("Запуск парсинга по всем источникам: {}", AVAILABLE_SOURCES)
 
-    total_sources = 2  # CORE + arXiv
+    total_sources = len(AVAILABLE_SOURCES)
+    results_by_source: dict[str, dict] = {}
+    total_saved = 0
 
-    # Парсинг CORE
-    self.update_state(
-        state="STARTED",
-        meta={
-            "type": "all_sources",
-            "current_source": 1,
-            "total_sources": total_sources,
-            "source": "CORE",
-            "status": "Парсинг источника CORE..."
-        }
-    )
+    for idx, source in enumerate(AVAILABLE_SOURCES, start=1):
+        self.update_state(
+            state="STARTED",
+            meta={
+                "type": "all_sources",
+                "current_source": idx,
+                "total_sources": total_sources,
+                "source": source,
+                "status": f"Парсинг источника {source}...",
+            },
+        )
 
-    core_result = parse_multiple_queries_task(
-        queries=DEFAULT_SEARCH_QUERIES,
-        limit_per_query=limit_per_query,
-        source="CORE",
-    )
+        if _is_cancelled(self):
+            return _mark_revoked(self, query="all_sources", source=source, current=idx - 1, total=total_sources)
 
-    # Парсинг arXiv
-    self.update_state(
-        state="STARTED",
-        meta={
-            "type": "all_sources",
-            "current_source": 2,
-            "total_sources": total_sources,
-            "source": "arXiv",
-            "status": "Парсинг источника arXiv..."
-        }
-    )
+        if source == "arXiv":
+            queries = ARXIV_SEARCH_QUERIES
+        elif source == "CORE":
+            queries = DEFAULT_SEARCH_QUERIES
+        else:
+            queries = EXTERNAL_SEARCH_QUERIES.get(source, DEFAULT_SEARCH_QUERIES)
 
-    if _is_cancelled(self):
-        return _mark_revoked(self, query='all_sources', source='arXiv', current=1, total=2)
+        source_result = parse_multiple_queries_task(
+            queries=queries,
+            limit_per_query=limit_per_query,
+            source=source,
+        )
+        results_by_source[source] = source_result
+        total_saved += source_result.get("total_saved", 0)
 
-    arxiv_result = parse_multiple_queries_task(
-        queries=ARXIV_SEARCH_QUERIES,
-        limit_per_query=limit_per_query,
-        source="arXiv",
-    )
-
-    # Финальный статус
     self.update_state(
         state="SUCCESS",
         meta={
             "type": "all_sources",
             "current_source": total_sources,
             "total_sources": total_sources,
-            "total_saved": core_result["total_saved"] + arxiv_result["total_saved"],
-            "status": "Все источники обработаны"
-        }
+            "total_saved": total_saved,
+            "status": "Все источники обработаны",
+        },
     )
 
+    legacy_core = results_by_source.get("CORE", {"total_saved": 0, "results": []})
+    legacy_arxiv = results_by_source.get("arXiv", {"total_saved": 0, "results": []})
     return {
-        "core": core_result,
-        "arxiv": arxiv_result,
-        "total_saved": core_result["total_saved"] + arxiv_result["total_saved"],
+        "core": legacy_core,
+        "arxiv": legacy_arxiv,
+        "sources": results_by_source,
+        "total_saved": total_saved,
     }

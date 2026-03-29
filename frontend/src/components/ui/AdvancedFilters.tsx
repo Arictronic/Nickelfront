@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { PAPER_SOURCES } from "../../types/paper";
 import type { PaperSource } from "../../types/paper";
 
 interface AdvancedFiltersProps {
@@ -41,7 +42,7 @@ const defaultFilters: FilterState = {
 export default function AdvancedFilters({
   onFilterChange,
   initialFilters = defaultFilters,
-  sources = ["CORE", "arXiv"],
+  sources = [...PAPER_SOURCES],
 }: AdvancedFiltersProps) {
   const [filters, setFilters] = useState<FilterState>(initialFilters);
   const [showAdvanced, setShowAdvanced] = useState(false);

@@ -1,300 +1,93 @@
-# 📦 Развёртывание Nickelfront на сервере
+﻿# Развёртывание Nickelfront
 
-## 🚀 Быстрый старт на сервере
+## Требования
 
-### Вариант 1: Docker Compose (рекомендуется)
+- Python 3.11+
+- Node.js 20+
+- PostgreSQL
+- Redis
+- Nginx
+
+## 1. Подготовка окружения
 
 ```bash
-# 1. Клонируйте репозиторий на сервер
 git clone <repository-url>
 cd Nickelfront
-
-# 2. Настройте .env.docker (при необходимости)
-nano .env.docker
-
-# 3. Запустите все сервисы
-docker-compose -f docker-compose.prod.yml up -d
-
-# 4. Проверьте статус
-docker-compose -f docker-compose.prod.yml ps
-
-# 5. Откройте в браузере
-# http://<ваш-ip>
 ```
 
-**Сервисы:**
-- **Frontend** (порт 80) — веб-интерфейс
-- **Backend** (порт 8001 внутри сети) — API
-- **PostgreSQL** (порт 5432 внутри сети) — база данных
-- **Redis** (порт 6379 внутри сети) — кэш и очередь
-- **Celery Worker** — фоновые задачи
-- **Celery Beat** — периодические задачи
-- **Flower** (порт 5555) — мониторинг Celery
-
----
-
-### Вариант 2: Ручная установка (Linux)
-
-#### 1. Установка зависимостей
+## 2. Backend
 
 ```bash
-# Python
-sudo apt update
-sudo apt install -y python3.11 python3.11-venv python3-pip
-
-# Node.js
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
-
-# PostgreSQL
-sudo apt install -y postgresql postgresql-contrib
-
-# Redis
-sudo apt install -y redis-server
-
-# Nginx
-sudo apt install -y nginx
-```
-
-#### 2. Настройка PostgreSQL
-
-```bash
-sudo -u postgres psql
-CREATE DATABASE nickelfront;
-CREATE USER postgres WITH PASSWORD 'postgres';
-GRANT ALL PRIVILEGES ON DATABASE nickelfront TO postgres;
-\q
-```
-
-#### 3. Настройка Redis
-
-```bash
-sudo systemctl start redis
-sudo systemctl enable redis
-```
-
-#### 4. Установка Backend
-
-```bash
-cd Nickelfront
-
-# Создаём виртуальное окружение
-python3 -m venv venv
+python -m venv venv
+# Linux/macOS
 source venv/bin/activate
+# Windows
+# .\\venv\\Scripts\\activate
 
-# Устанавливаем зависимости
 pip install -r backend/requirements.txt
-
-# Копируем .env
-cp .env.docker .env
-
-# Запускаем backend
-python backend/start_server.py
 ```
 
-#### 5. Сборка Frontend
+Создайте `.env` в корне проекта и заполните ключевые переменные:
+
+```env
+API_HOST=0.0.0.0
+API_PORT=8001
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/nickelfront
+REDIS_URL=redis://localhost:6380/0
+CORS_ORIGINS=["*"]
+```
+
+Примените миграции:
+
+```bash
+cd backend
+alembic upgrade head
+cd ..
+```
+
+## 3. Frontend
 
 ```bash
 cd frontend
-
-# Устанавливаем зависимости
 npm install
-
-# Собираем
 npm run build
-
-# Копируем в nginx
-sudo cp -r dist/* /var/www/nickelfront/
+cd ..
 ```
 
-#### 6. Настройка Nginx
+## 4. Запуск сервисов
+
+В отдельных терминалах:
 
 ```bash
-# Копируем конфигурацию
-sudo cp deploy/nginx.conf /etc/nginx/sites-available/nickelfront
-sudo ln -s /etc/nginx/sites-available/nickelfront /etc/nginx/sites-enabled/
+# API
+python backend/start_server.py
 
-# Проверяем конфигурацию
-sudo nginx -t
-
-# Перезапускаем nginx
-sudo systemctl restart nginx
-sudo systemctl enable nginx
-```
-
-#### 7. Запуск Celery Worker
-
-```bash
-# В отдельном терминале
-source venv/bin/activate
+# Celery worker
 celery -A app.tasks.celery_app worker --loglevel=info -E
-```
 
-#### 8. Запуск Celery Beat
-
-```bash
-# В отдельном терминале
-source venv/bin/activate
+# Celery beat
 celery -A app.tasks.celery_app beat --loglevel=info
+
+# Flower (опционально)
+celery -A app.tasks.celery_app flower --port=5555
 ```
 
----
+## 5. Nginx
 
-## 🔧 Конфигурация
-
-### Переменные окружения
-
-| Переменная | Описание | Значение по умолчанию |
-|------------|----------|----------------------|
-| `API_HOST` | Хост для backend | `0.0.0.0` |
-| `API_PORT` | Порт для backend | `8001` |
-| `DATABASE_URL` | URL PostgreSQL | `postgresql+asyncpg://...` |
-| `REDIS_URL` | URL Redis | `redis://localhost:6380/0` |
-| `CORS_ORIGINS` | Разрешённые домены | `["*"]` |
-| `VITE_API_URL` | URL API для frontend | `` (относительный путь) |
-
-### Важные изменения для работы на сервере
-
-1. **`.env`**:
-   - `API_HOST=0.0.0.0` — слушать все интерфейсы
-   - `CORS_ORIGINS=["*"]` — разрешить все домены
-   - `VITE_API_URL=` — пустое значение для относительного пути
-
-2. **Frontend** (`frontend/src/api/client.ts`):
-   - Использует относительный путь `/api/v1`
-   - Запросы идут на тот же домен, где размещён frontend
-
-3. **Nginx**:
-   - Проксирует `/api/` на `http://localhost:8001/api/`
-   - Раздаёт статику frontend
-
----
-
-## 🔍 Проверка работы
+Используйте конфиг из `deploy/nginx.conf` и проверьте его:
 
 ```bash
-# Проверка backend
-curl http://localhost:8001/health
-
-# Проверка frontend
-curl http://localhost/
-
-# Проверка API через nginx
-curl http://localhost/api/v1/auth/me
-```
-
----
-
-## 📊 Мониторинг
-
-### Flower (Celery мониторинг)
-
-```bash
-# Откройте в браузере
-http://<ваш-ip>:5555
-```
-
-### Логи
-
-```bash
-# Backend логи
-tail -f logs/app.log
-
-# Docker логи
-docker-compose -f docker-compose.prod.yml logs -f backend
-docker-compose -f docker-compose.prod.yml logs -f worker
-```
-
----
-
-## 🔒 Безопасность (продакшен)
-
-Перед развёртыванием в продакшене:
-
-1. **Смените секретные ключи**:
-   ```bash
-   # В .env.docker
-   SECRET_KEY=<сгенерируйте новый ключ>
-   ```
-
-2. **Ограничьте CORS**:
-   ```bash
-   # В .env.docker
-   CORS_ORIGINS=["https://ваш-домен.com"]
-   ```
-
-3. **Настройте HTTPS** (рекомендуется):
-   ```bash
-   # Используйте Let's Encrypt
-   sudo apt install certbot python3-certbot-nginx
-   sudo certbot --nginx -d ваш-домен.com
-   ```
-
-4. **Смените пароли БД**:
-   ```bash
-   # В .env.docker
-   DATABASE_URL=postgresql+asyncpg://user:password@...
-   ```
-
----
-
-## 🐛 Решение проблем
-
-### Backend не запускается
-
-```bash
-# Проверьте логи
-python backend/start_server.py 2>&1 | tee backend.log
-
-# Проверьте подключение к БД
-psql postgresql://user:pass@localhost:5433/nickelfront
-```
-
-### Frontend не видит API
-
-```bash
-# Проверьте nginx конфигурацию
 sudo nginx -t
-
-# Проверьте логи nginx
-sudo tail -f /var/log/nginx/error.log
-
-# Проверьте, что backend работает
-curl http://localhost:8001/health
+sudo systemctl restart nginx
 ```
 
-### Celery не выполняет задачи
+## Проверка
 
 ```bash
-# Проверьте, что worker запущен
-celery -A app.tasks.celery_app inspect ping
-
-# Проверьте Redis
-redis-cli ping
-
-# Проверьте логи worker
-celery -A app.tasks.celery_app worker --loglevel=debug
+curl http://localhost:8001/health
+curl http://localhost/api/v1/papers/count
 ```
 
----
+## Логи
 
-## 📝 Архитектура развёртывания
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                     Nginx (порт 80)                     │
-│  ┌─────────────────┐    ┌─────────────────────────┐    │
-│  │   Frontend      │    │   Proxy /api/           │    │
-│  │   (статика)     │───▶│   → Backend:8001        │    │
-│  └─────────────────┘    └─────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────┐
-│              Backend (FastAPI, порт 8001)               │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
-│  │   Celery     │  │   PostgreSQL │  │    Redis     │ │
-│  │   Worker     │  │   (БД)       │  │   (кэш/оч)   │ │
-│  └──────────────┘  └──────────────┘  └──────────────┘ │
-└─────────────────────────────────────────────────────────┘
-```
+Все логи хранятся в каталоге `logs/`.

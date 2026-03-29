@@ -12,6 +12,9 @@ sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(ROOT_DIR / "shared"))
 
 from app.core.config import settings  # noqa: E402
+from app.core.logging import setup_logging  # noqa: E402
+
+setup_logging(service_name="celery_worker")
 
 celery_app = Celery(
     "worker",

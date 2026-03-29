@@ -7,6 +7,8 @@
 import logging
 import sys
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,12 +18,24 @@ from app.api.routes import router
 from app.config import settings
 
 # Настройка логирования
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+LOGS_DIR = PROJECT_ROOT / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+RAG_LOG_FILE = LOGS_DIR / "rag_api.log"
+
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.DEBUG,
+    format="%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d - %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
+        RotatingFileHandler(
+            filename=str(RAG_LOG_FILE),
+            maxBytes=20 * 1024 * 1024,
+            backupCount=14,
+            encoding="utf-8",
+        ),
     ],
+    force=True,
 )
 
 logger = logging.getLogger(__name__)

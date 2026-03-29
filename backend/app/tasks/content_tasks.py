@@ -1,4 +1,4 @@
-"""Celery-задачи постобработки статей: PDF, анализ, перевод, векторизация."""
+"""Celery tasks for article post-processing: PDF, RU analysis, vector indexing."""
 
 from __future__ import annotations
 
@@ -12,12 +12,14 @@ from app.services.embedding_service import get_embedding_service
 from app.services.paper_content_service import (
     download_pdf_bytes,
     extract_pdf_text,
+    fetch_additional_full_text,
     generate_ai_enrichment_ru,
     resolve_pdf_url,
     save_pdf_locally,
 )
 from app.services.paper_service import PaperService
 from app.services.vector_service import get_vector_service
+from app.tasks.async_runner import run_async
 from app.tasks.celery_app import celery_app
 
 
@@ -39,15 +41,16 @@ async def _set_stage(
 @celery_app.task(bind=True)
 def process_paper_content_task(self, paper_id: int) -> dict[str, Any]:
     try:
-        return asyncio.run(_process_paper_content_async(self, paper_id))
+        return run_async(_process_paper_content_async(self, paper_id))
     except Exception as exc:
-        logger.exception(f"Ошибка post-processing статьи {paper_id}: {exc}")
+        logger.exception("Ошибка post-processing статьи {}: {}", paper_id, exc)
         raise
 
 
 async def _process_paper_content_async(self, paper_id: int) -> dict[str, Any]:
     task_id = getattr(getattr(self, "request", None), "id", None)
     self.update_state(state="STARTED", meta={"paper_id": paper_id, "stage": "started"})
+
     try:
         async with async_session_maker() as db:
             paper_service = PaperService(db)
@@ -77,8 +80,19 @@ async def _process_paper_content_async(self, paper_id: int) -> dict[str, Any]:
             if extracted_text:
                 await _set_stage(paper_service, paper_id, "pdf_parsed", task_id=task_id)
                 await paper_service.update_paper(paper_id, full_text=extracted_text)
+            else:
+                fallback_text = await asyncio.to_thread(
+                    fetch_additional_full_text,
+                    paper.source,
+                    paper.source_id,
+                    paper.url,
+                    paper.abstract or "",
+                )
+                if fallback_text:
+                    await _set_stage(paper_service, paper_id, "fulltext_fallback_parsed", task_id=task_id)
+                    await paper_service.update_paper(paper_id, full_text=fallback_text)
 
-            # Перечитываем актуальную статью после обновления текста
+            # Reload updated paper to use freshest content.
             paper = await paper_service.get_by_id(paper_id)
             content_text = (paper.full_text or paper.abstract or "").strip()
 
@@ -166,5 +180,4 @@ async def _process_paper_content_async(self, paper_id: int) -> dict[str, Any]:
                 task_id=task_id,
                 error=str(exc),
             )
-        self.update_state(state="FAILURE", meta={"paper_id": paper_id, "stage": "failed", "error": str(exc)})
         raise

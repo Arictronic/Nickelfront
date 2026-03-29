@@ -1,10 +1,10 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { getPapersCount } from "../api/papers";
+import { PAPER_SOURCES } from "../types/paper";
 
 export default function Database() {
   const [allCount, setAllCount] = useState(0);
-  const [coreCount, setCoreCount] = useState(0);
-  const [arxivCount, setArxivCount] = useState(0);
+  const [sourceCounts, setSourceCounts] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -12,14 +12,11 @@ export default function Database() {
     setLoading(true);
     setError(null);
     try {
-      const [all, core, arxiv] = await Promise.all([
-        getPapersCount(),
-        getPapersCount("CORE"),
-        getPapersCount("arXiv"),
-      ]);
+      const allPromise = getPapersCount();
+      const sourcePromises = PAPER_SOURCES.map(async (source) => [source, await getPapersCount(source)] as const);
+      const [all, sourceEntries] = await Promise.all([allPromise, Promise.all(sourcePromises)]);
       setAllCount(all);
-      setCoreCount(core);
-      setArxivCount(arxiv);
+      setSourceCounts(Object.fromEntries(sourceEntries));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -63,12 +60,11 @@ export default function Database() {
           <p>
             <strong>Всего статей:</strong> {allCount}
           </p>
-          <p>
-            <strong>CORE:</strong> {coreCount}
-          </p>
-          <p>
-            <strong>arXiv:</strong> {arxivCount}
-          </p>
+          {PAPER_SOURCES.map((source) => (
+            <p key={source}>
+              <strong>{source}:</strong> {sourceCounts[source] ?? 0}
+            </p>
+          ))}
         </div>
       </div>
 

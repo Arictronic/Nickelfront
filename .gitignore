@@ -9,6 +9,7 @@ venv/
 .venv/
 *.egg-info/
 .pytest_cache/
+logs/
 
 # Node
 node_modules/
@@ -38,6 +39,22 @@ models/
 data/
 !data/.gitkeep
 
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+*.dump
+*.bak
+*.mdb
+*.accdb
+*.db-journal
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db-wal
+*.db-shm
+
 # Vector DB
 chroma_db/
 
@@ -52,6 +69,19 @@ celerybeat-schedule.db
 # Logs
 *.log
 *.har
+
+# Docs
+docs/
+**/docs/
+*.md
+*.markdown
+*.mdx
+*.rst
+*.txt
+*.pdf
+*.doc
+*.docx
+*.odt
 
 # OS
 .DS_Store

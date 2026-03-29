@@ -9,7 +9,7 @@ import {
   revokeCeleryTask,
   deleteCeleryTask,
 } from "../api/papers";
-import { Paper } from "../types/paper";
+import { PAPER_SOURCES, Paper, PaperSource } from "../types/paper";
 import { Link } from "react-router-dom";
 
 const COLORS = ["#0088FE", "#00C49F", "#FFBB28"];
@@ -18,7 +18,7 @@ type ParseJob = {
   jobId: string;
   startedAt: number;
   query: string;
-  source: "CORE" | "arXiv" | "all";
+  source: PaperSource | "all";
   initialCount: number;
   lastObservedCount: number;
   lastCountChangeAt: number;
@@ -48,7 +48,7 @@ export default function Dashboard() {
   const [jobs, setJobs] = useState<ParseJob[]>(() => loadJobs());
 
   const [query, setQuery] = useState("nickel-based superalloys");
-  const [source, setSource] = useState<"CORE" | "arXiv">("arXiv");
+  const [source, setSource] = useState<PaperSource>("arXiv");
   const [limit, setLimit] = useState(25);
   const [parsingError, setParsingError] = useState<string | null>(null);
 
@@ -175,7 +175,7 @@ export default function Dashboard() {
         jobId: String(res.task_id),
         startedAt: Date.now(),
         query: res.query,
-        source: res.source as "CORE" | "arXiv",
+        source: res.source as PaperSource,
         initialCount: currentCount,
         lastObservedCount: currentCount,
         lastCountChangeAt: Date.now(),
@@ -286,9 +286,12 @@ export default function Dashboard() {
         <h3>Параметры парсинга</h3>
         <div className="filters">
           <input className="input" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Поисковый запрос" />
-          <select value={source} onChange={(e) => setSource(e.target.value as "CORE" | "arXiv")}>
-            <option value="CORE">CORE</option>
-            <option value="arXiv">arXiv</option>
+          <select value={source} onChange={(e) => setSource(e.target.value as PaperSource)}>
+            {PAPER_SOURCES.map((src) => (
+              <option key={src} value={src}>
+                {src}
+              </option>
+            ))}
           </select>
           <input
             className="input"

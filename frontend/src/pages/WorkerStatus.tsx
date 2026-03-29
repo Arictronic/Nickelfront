@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { getPapersCount, getCeleryTaskStatus, revokeCeleryTask, deleteCeleryTask, type CeleryTaskStatus } from "../api/papers";
+import type { PaperSource } from "../types/paper";
 
 type ParseJob = {
   jobId: string;
   startedAt: number;
   query: string;
-  source: "CORE" | "arXiv" | "all";
+  source: PaperSource | "all";
   initialCount: number;
   lastObservedCount: number;
   lastCountChangeAt: number;

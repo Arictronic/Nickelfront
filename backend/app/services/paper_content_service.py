@@ -1,11 +1,13 @@
-"""Сервис постобработки контента статьи (PDF + AI-анализ + перевод)."""
+"""Article content post-processing helpers (PDF/full-text + RU AI enrichment)."""
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from loguru import logger
@@ -40,6 +42,14 @@ def _clean_arxiv_id(raw: str) -> str:
     return value
 
 
+def _is_probably_pdf_url(raw_url: str) -> bool:
+    if not raw_url:
+        return False
+    parsed = urlparse(raw_url)
+    path = (parsed.path or "").lower()
+    return path.endswith(".pdf") or "/pdf/" in path
+
+
 def resolve_pdf_url(source: str, source_id: str | None, url: str | None) -> str | None:
     src = (source or "").strip().lower()
     raw_url = (url or "").strip()
@@ -50,27 +60,58 @@ def resolve_pdf_url(source: str, source_id: str | None, url: str | None) -> str 
         if arxiv_id:
             return f"https://arxiv.org/pdf/{arxiv_id}.pdf"
 
-    if raw_url and raw_url.lower().endswith(".pdf"):
+    if _is_probably_pdf_url(raw_url):
         return raw_url
 
+    # EuropePMC source_id may come as SOURCE:ID (e.g., PPR:PPR1131117)
+    if src == "europepmc" and sid and ":" in sid:
+        source_db, article_id = sid.split(":", 1)
+        source_db = source_db.strip()
+        article_id = article_id.strip()
+        if source_db and article_id:
+            return f"https://www.ebi.ac.uk/europepmc/webservices/rest/{source_db}/{article_id}/fullTextPDF"
+
     return None
+
+
+def _extract_pdf_link_from_html(base_url: str, html_text: str) -> str | None:
+    if not html_text:
+        return None
+    matches = re.findall(r'href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', html_text, flags=re.IGNORECASE)
+    if not matches:
+        return None
+    return urljoin(base_url, matches[0])
 
 
 def download_pdf_bytes(pdf_url: str, timeout_sec: float = 45.0) -> bytes | None:
     try:
         with httpx.Client(timeout=timeout_sec, follow_redirects=True) as client:
-            response = client.get(pdf_url)
+            response = client.get(pdf_url, headers={"Accept": "application/pdf,application/octet-stream;q=0.9,text/html;q=0.2,*/*;q=0.1"})
             response.raise_for_status()
             content = response.content or b""
             if not content:
                 return None
-            content_type = response.headers.get("content-type", "").lower()
-            if "pdf" not in content_type and not content.startswith(b"%PDF"):
-                logger.warning(f"URL не похож на PDF: {pdf_url} ({content_type})")
-                return None
-            return content
+
+            content_type = (response.headers.get("content-type") or "").lower()
+            if "pdf" in content_type or content.startswith(b"%PDF"):
+                return content
+
+            # Fallback: landing page with a direct PDF link.
+            html_text = response.text or ""
+            guessed_pdf = _extract_pdf_link_from_html(str(response.url), html_text)
+            if guessed_pdf:
+                pdf_resp = client.get(guessed_pdf, headers={"Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.1"})
+                pdf_resp.raise_for_status()
+                pdf_bytes = pdf_resp.content or b""
+                pdf_type = (pdf_resp.headers.get("content-type") or "").lower()
+                if pdf_bytes and ("pdf" in pdf_type or pdf_bytes.startswith(b"%PDF")):
+                    logger.info("Resolved PDF via landing page: {} -> {}", pdf_url, guessed_pdf)
+                    return pdf_bytes
+
+            logger.warning("URL is not a direct PDF and no PDF link detected: {} ({})", pdf_url, content_type)
+            return None
     except Exception as exc:
-        logger.warning(f"Не удалось скачать PDF {pdf_url}: {exc}")
+        logger.warning("Failed to download PDF {}: {}", pdf_url, exc)
         return None
 
 
@@ -86,8 +127,75 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
     try:
         return pdf_parser.extract_text_from_bytes(pdf_bytes)
     except Exception as exc:
-        logger.warning(f"Не удалось извлечь текст из PDF: {exc}")
+        logger.warning("Failed to extract text from PDF: {}", exc)
         return ""
+
+
+def _clean_html_text(raw: str) -> str:
+    text = re.sub(r"<script[\\s\\S]*?</script>", " ", raw, flags=re.IGNORECASE)
+    text = re.sub(r"<style[\\s\\S]*?</style>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _fetch_europepmc_fulltext(source_id: str) -> str:
+    if not source_id:
+        return ""
+
+    if ":" in source_id:
+        source_db, article_id = source_id.split(":", 1)
+    else:
+        source_db, article_id = "PPR", source_id
+
+    source_db = source_db.strip()
+    article_id = article_id.strip()
+    if not source_db or not article_id:
+        return ""
+
+    # Prefer fullTextXML endpoint for maximal text extraction.
+    xml_url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{source_db}/{article_id}/fullTextXML"
+    try:
+        with httpx.Client(timeout=45.0, follow_redirects=True) as client:
+            resp = client.get(xml_url, headers={"Accept": "application/xml,text/xml;q=0.9,*/*;q=0.1"})
+            if resp.status_code == 200 and resp.text:
+                text = _clean_html_text(resp.text)
+                return text[:200000]
+    except Exception as exc:
+        logger.warning("EuropePMC fullTextXML fetch failed for {}: {}", source_id, exc)
+
+    return ""
+
+
+def fetch_additional_full_text(source: str, source_id: str | None, url: str | None, abstract: str = "") -> str:
+    """Fallback full-text fetch when PDF is unavailable.
+
+    Returns non-empty text only when useful content is found.
+    """
+    src = (source or "").strip().lower()
+    sid = (source_id or "").strip()
+    raw_url = (url or "").strip()
+
+    if src == "europepmc":
+        epmc_text = _fetch_europepmc_fulltext(sid)
+        if epmc_text and len(epmc_text) > max(1200, len((abstract or "")) + 500):
+            return epmc_text
+
+    if raw_url:
+        try:
+            with httpx.Client(timeout=40.0, follow_redirects=True) as client:
+                resp = client.get(raw_url, headers={"Accept": "text/html,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.1"})
+                resp.raise_for_status()
+                ctype = (resp.headers.get("content-type") or "").lower()
+                if "text" in ctype or "html" in ctype or "xml" in ctype:
+                    text = _clean_html_text(resp.text or "")
+                    if text and len(text) > max(1200, len((abstract or "")) + 500):
+                        return text[:200000]
+        except Exception as exc:
+            logger.warning("Fallback text fetch failed for {}: {}", raw_url, exc)
+
+    return ""
 
 
 def _fallback_enrichment(

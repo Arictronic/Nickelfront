@@ -1,4 +1,13 @@
-export type PaperSource = "CORE" | "arXiv";
+export const PAPER_SOURCES = [
+  "CORE",
+  "arXiv",
+  "OpenAlex",
+  "Crossref",
+  "SemanticScholar",
+  "EuropePMC",
+] as const;
+
+export type PaperSource = (typeof PAPER_SOURCES)[number];
 
 export interface Paper {
   id: number;

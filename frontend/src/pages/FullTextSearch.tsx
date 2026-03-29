@@ -1,7 +1,8 @@
 import { useEffect, useState, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { fullTextSearch, getSearchSuggestions, getSearchStats } from "../api/papers";
-import type { Paper } from "../types/paper";
+import { PAPER_SOURCES } from "../types/paper";
+import type { Paper, PaperSource } from "../types/paper";
 
 type SearchMode = "plain" | "phrase" | "websearch";
 
@@ -9,7 +10,7 @@ export default function FullTextSearch() {
   // Search state
   const [query, setQuery] = useState("");
   const [searchMode, setSearchMode] = useState<SearchMode>("websearch");
-  const [source, setSource] = useState<"all" | "CORE" | "arXiv">("all");
+  const [source, setSource] = useState<"all" | PaperSource>("all");
   const [limit, setLimit] = useState(20);
   
   // Results state
@@ -168,12 +169,15 @@ export default function FullTextSearch() {
               <span className="muted">Источник:</span>
               <select 
                 value={source} 
-                onChange={(e) => setSource(e.target.value as any)}
+                onChange={(e) => setSource(e.target.value as "all" | PaperSource)}
                 style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #d1d5db" }}
               >
                 <option value="all">Все</option>
-                <option value="CORE">CORE</option>
-                <option value="arXiv">arXiv</option>
+                {PAPER_SOURCES.map((src) => (
+                  <option key={src} value={src}>
+                    {src}
+                  </option>
+                ))}
               </select>
             </label>
 
@@ -339,8 +343,8 @@ export default function FullTextSearch() {
                   <div style={{ marginLeft: 16, textAlign: "right" }}>
                     <span style={{
                       padding: "4px 8px",
-                      background: paper.source === "CORE" ? "#dbeafe" : "#ede9fe",
-                      color: paper.source === "CORE" ? "#1e40af" : "#5b21b6",
+                      background: "#e8eefc",
+                      color: "#1e3a8a",
                       borderRadius: 4,
                       fontSize: 12,
                       fontWeight: 500,

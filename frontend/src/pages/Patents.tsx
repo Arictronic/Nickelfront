@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import Pagination from "../components/ui/Pagination";
 import ExportButton from "../components/ui/ExportButton";
 import { useToast } from "../components/ui/Toast";
+import { PAPER_SOURCES } from "../types/paper";
 import type { Paper, PaperListFilters, PaperSource } from "../types/paper";
 import { deletePaper, getPapersCount, getPapersList, searchPapers } from "../api/papers";
 
@@ -57,7 +58,7 @@ export default function Patents() {
   const clientSideFiltersEnabled = Boolean(filters.query || filters.fullTextOnly || filters.dateFrom || filters.dateTo);
 
   const sourcesForSearch = useMemo<PaperSource[]>(
-    () => (filters.source && filters.source !== "all" ? [filters.source] : ["CORE", "arXiv"]),
+    () => (filters.source && filters.source !== "all" ? [filters.source] : [...PAPER_SOURCES]),
     [filters.source]
   );
 
@@ -230,8 +231,11 @@ export default function Patents() {
             onChange={(e) => setFilters((s) => ({ ...s, source: e.target.value as PaperListFilters["source"] }))}
           >
             <option value="all">Все источники</option>
-            <option value="CORE">CORE</option>
-            <option value="arXiv">arXiv</option>
+            {PAPER_SOURCES.map((src) => (
+              <option key={src} value={src}>
+                {src}
+              </option>
+            ))}
           </select>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input

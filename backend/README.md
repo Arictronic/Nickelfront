@@ -1,6 +1,6 @@
-# Nickelfront Backend
+﻿# Nickelfront Backend
 
-Backend на FastAPI с очередью задач на Celery + Redis.
+Backend на FastAPI с очередью задач Celery + Redis.
 
 ## Быстрый старт
 
@@ -12,23 +12,11 @@ cd backend
 # Установка зависимостей
 pip install -r requirements.txt
 
-# Запуск сервера
+# Запуск API
 ..\run_backend.bat
 
 # Запуск Celery worker (в отдельном окне)
 ..\run_worker.bat
-```
-
-### Docker Compose
-
-```bash
-cd backend
-
-# Запуск всех сервисов
-docker-compose up -d
-
-# Просмотр логов
-docker-compose logs -f worker
 ```
 
 ## API Endpoints
@@ -44,49 +32,6 @@ docker-compose logs -f worker
 | POST | `/api/v1/papers/parse` | Запустить парсинг |
 | POST | `/api/v1/papers/parse-all` | Массовый парсинг |
 | DELETE | `/api/v1/papers/id/{id}` | Удалить статью |
-
-### Примеры
-
-```bash
-# Health check
-curl http://localhost:8000/health
-
-# Получить статьи
-curl http://localhost:8000/api/v1/papers?limit=10
-
-# Запустить парсинг
-curl -X POST "http://localhost:8000/api/v1/papers/parse?query=nickel%20alloys&limit=5&source=arXiv"
-```
-
-## Структура
-
-```
-backend/
-├── app/
-│   ├── api/v1/endpoints/
-│   │   └── parse.py         # API роуты для парсинга
-│   ├── core/
-│   │   ├── config.py        # Настройки приложения
-│   │   └── logging.py       # Логирование
-│   ├── db/
-│   │   ├── models/
-│   │   │   ├── paper.py     # Модель статьи
-│   │   │   └── task.py      # Модель задачи
-│   │   ├── base.py          # Базовый класс SQLAlchemy
-│   │   ├── session.py       # Сессии БД
-│   │   └── init_db.py       # Инициализация БД
-│   ├── services/
-│   │   ├── paper_service.py # Бизнес-логика для статей
-│   │   └── task_service.py  # Бизнес-логика для задач
-│   ├── tasks/
-│   │   ├── celery_app.py    # Настройка Celery
-│   │   └── parse_tasks.py   # Celery задачи для парсинга
-│   └── main.py              # Точка входа FastAPI
-├── tests/                   # Тесты
-├── alembic/                 # Миграции БД
-├── requirements.txt         # Зависимости
-└── .env                     # Переменные окружения
-```
 
 ## Команды Celery
 
@@ -116,12 +61,6 @@ alembic downgrade -1
 ```bash
 # Все тесты
 pytest tests/ -v
-
-# Unit тесты парсеров
-pytest tests/unit/parser/ -v
-
-# Integration тесты
-pytest tests/integration/ -v
 ```
 
 ## Переменные окружения

@@ -17,6 +17,8 @@ Qwen Service - Мини-сервис для работы с Qwen API
 
 import logging
 import os
+import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +62,44 @@ config = {
     "auto_continue_enabled": DEFAULT_AUTO_CONTINUE_ENABLED,
     "max_continues": DEFAULT_MAX_CONTINUES,
 }
+
+
+def setup_qwen_logging() -> Path:
+    """Configure qwen service logging to shared logs directory."""
+    project_root = Path(__file__).resolve().parent.parent
+    logs_dir = project_root / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_file = logs_dir / "qwen_service.log"
+
+    level_name = os.getenv("LOG_LEVEL", "DEBUG").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.setLevel(level)
+
+    formatter = logging.Formatter("%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d - %(message)s")
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(level)
+    stream_handler.setFormatter(formatter)
+
+    file_handler = RotatingFileHandler(
+        filename=str(log_file),
+        maxBytes=20 * 1024 * 1024,
+        backupCount=14,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
+
+    root_logger.addHandler(stream_handler)
+    root_logger.addHandler(file_handler)
+    logging.info("Logging initialized for qwen_service -> %s", log_file)
+    return log_file
+
+
+setup_qwen_logging()
 
 
 def save_config(current_config: dict[str, Any]) -> None:

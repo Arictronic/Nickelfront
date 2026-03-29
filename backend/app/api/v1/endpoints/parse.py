@@ -17,6 +17,7 @@ from app.services.paper_content_service import save_pdf_locally
 from app.services.paper_service import PaperService
 from app.tasks.content_tasks import process_paper_content_task
 from app.tasks.parse_tasks import (
+    AVAILABLE_SOURCES,
     DEFAULT_SEARCH_QUERIES,
     parse_all_sources_task,
     parse_multiple_queries_task,
@@ -77,7 +78,7 @@ async def search_papers(
 async def get_papers(
     limit: int = Query(default=10, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    source: str | None = Query(None, description="Фильтр по источнику (CORE, arXiv)"),
+    source: str | None = Query(None, description="Фильтр по источнику"),
     db: AsyncSession = Depends(get_db),
 ):
     """Получить список всех статей."""
@@ -127,18 +128,16 @@ async def get_papers_count(
 async def start_parsing(
     query: str = Query(..., description="Поисковый запрос"),
     limit: int = Query(default=50, ge=1, le=100, description="Макс. количество результатов"),
-    source: str = Query(default="CORE", description="Источник (CORE или arXiv)"),
+    source: str = Query(default="CORE", description="Источник"),
     _current_user: UserResponse = Depends(get_current_user),
 ):
     """
     Запустить парсинг статей.
 
-    Источники:
-    - **CORE** (core.ac.uk)
-    - **arXiv** (arxiv.org)
+    Доступные источники: CORE, arXiv, OpenAlex, Crossref, SemanticScholar, EuropePMC
     """
-    if source not in ["CORE", "arXiv"]:
-        raise HTTPException(status_code=400, detail="Неподдерживаемый источник. Доступны: CORE, arXiv")
+    if source not in AVAILABLE_SOURCES:
+        raise HTTPException(status_code=400, detail=f"Неподдерживаемый источник. Доступны: {', '.join(AVAILABLE_SOURCES)}")
 
     task = parse_papers_task.delay(query=query, limit=limit, source=source)
     logger.info(f"Запущен парсинг: source={source}, query={query}, task_id={task.id}")
@@ -155,23 +154,28 @@ async def start_parsing(
 @router.post("/parse-all")
 async def start_parsing_all(
     limit_per_query: int = Query(default=50, ge=1, le=100),
-    source: str = Query(default="all", description="Источник (CORE, arXiv, all)"),
+    source: str = Query(default="all", description="Источник (или all)"),
     _current_user: UserResponse = Depends(get_current_user),
 ):
     """
     Запустить парсинг по всем стандартным запросам.
 
     Источники:
-    - **CORE**: nickel-based alloys, superalloys, etc.
-    - **arXiv**: nickel-based alloys, superalloys, inconel, etc.
-    - **all**: оба источника
+    - **CORE**
+    - **arXiv**
+    - **OpenAlex**
+    - **Crossref**
+    - **SemanticScholar**
+    - **EuropePMC**
+    - **all**: все источники
     """
-    if source not in ["CORE", "arXiv", "all"]:
-        raise HTTPException(status_code=400, detail="Неподдерживаемый источник. Доступны: CORE, arXiv, all")
+    allowed_with_all = [*AVAILABLE_SOURCES, "all"]
+    if source not in allowed_with_all:
+        raise HTTPException(status_code=400, detail=f"Неподдерживаемый источник. Доступны: {', '.join(allowed_with_all)}")
 
     if source == "all":
         task = parse_all_sources_task.delay(limit_per_query=limit_per_query)
-        source_list = ["CORE", "arXiv"]
+        source_list = AVAILABLE_SOURCES
     elif source == "arXiv":
         task = parse_multiple_queries_task.delay(
             queries=ARXIV_SEARCH_QUERIES,
@@ -179,13 +183,20 @@ async def start_parsing_all(
             source="arXiv",
         )
         source_list = ["arXiv"]
-    else:
+    elif source == "CORE":
         task = parse_multiple_queries_task.delay(
             queries=DEFAULT_SEARCH_QUERIES,
             limit_per_query=limit_per_query,
             source="CORE",
         )
         source_list = ["CORE"]
+    else:
+        task = parse_multiple_queries_task.delay(
+            queries=DEFAULT_SEARCH_QUERIES,
+            limit_per_query=limit_per_query,
+            source=source,
+        )
+        source_list = [source]
 
     logger.info(f"Запущен массовый парсинг: sources={source_list}, task_id={task.id}")
 
@@ -237,11 +248,11 @@ async def get_paper_pdf(paper_id: int, db: AsyncSession = Depends(get_db)):
                 pdf_bytes = remote.content or b""
 
             if not pdf_bytes:
-                raise HTTPException(status_code=404, detail="PDF РїСѓСЃС‚РѕР№")
+                raise HTTPException(status_code=404, detail="PDF ??????")
 
             content_type = (remote.headers.get("content-type") or "").lower()
             if "pdf" not in content_type and not pdf_bytes.startswith(b"%PDF"):
-                raise HTTPException(status_code=404, detail="РЈРґР°Р»РµРЅРЅС‹Р№ РёСЃС‚РѕС‡РЅРёРє РІРµСЂРЅСѓР» РЅРµ-PDF")
+                raise HTTPException(status_code=404, detail="????????? ???????? ?????? ??-PDF")
 
             try:
                 cached_path = await asyncio.to_thread(save_pdf_locally, paper_id, pdf_bytes)
@@ -258,9 +269,9 @@ async def get_paper_pdf(paper_id: int, db: AsyncSession = Depends(get_db)):
             raise
         except Exception as exc:
             logger.warning("Failed to proxy PDF for paper {}: {}", paper_id, exc)
-            raise HTTPException(status_code=502, detail="РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ PDF")
+            raise HTTPException(status_code=502, detail="?? ??????? ????????? PDF")
 
-    raise HTTPException(status_code=404, detail="PDF не найден")
+    raise HTTPException(status_code=404, detail="PDF ?? ??????")
 
 
 @router.post("/id/{paper_id}/reprocess")

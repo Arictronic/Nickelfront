@@ -1,9 +1,8 @@
-"""CORE API клиент.
+﻿"""CORE API client."""
 
-CORE - агрегатор Open Access научных статей.
-API документация: https://core.ac.uk/services/api
-"""
-
+import asyncio
+import os
+import random
 from typing import Any
 
 import httpx
@@ -13,29 +12,37 @@ from parsers_pkg.base import BaseAPIClient
 
 
 class COREClient(BaseAPIClient):
-    """Клиент для CORE API."""
+    """Client for CORE API v3."""
 
-    BASE_URL = "https://core.ac.uk/api-v2"
+    BASE_URL = "https://api.core.ac.uk/v3"
+    MAX_RETRIES = 4
+    RETRY_BACKOFF_BASE = 2.0
+    RETRY_BASE_SLEEP = 1.5
+    USER_AGENT = "Nickelfront/1.0 (CORE parser)"
 
     def __init__(
         self,
         api_key: str | None = None,
         timeout: float = 30.0,
     ):
-        """
-        Инициализация клиента.
-
-        Args:
-            api_key: API ключ CORE (необязательно для базового поиска)
-            timeout: Таймаут запросов в секундах
-        """
+        resolved_api_key = api_key or os.getenv("CORE_API_KEY")
+        if not resolved_api_key:
+            logger.warning("CORE_API_KEY is not set. CORE API may return 429 rate-limit responses.")
         super().__init__(
             base_url=self.BASE_URL,
-            api_key=api_key,
+            api_key=resolved_api_key,
             timeout=timeout,
         )
-        # CORE требует API ключ только для расширенного доступа
-        # Базовый поиск доступен без ключа с лимитами
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        client = await super()._get_client()
+        client.headers.update(
+            {
+                "User-Agent": self.USER_AGENT,
+                "Accept": "application/json",
+            }
+        )
+        return client
 
     async def search(
         self,
@@ -45,18 +52,7 @@ class COREClient(BaseAPIClient):
         full_text_only: bool = False,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """
-        Поиск статей в CORE.
-
-        Args:
-            query: Поисковый запрос
-            limit: Макс. количество результатов (1-100)
-            offset: Смещение для пагинации
-            full_text_only: Только статьи с полным текстом
-
-        Returns:
-            Список статей в формате CORE API
-        """
+        """Search papers in CORE."""
         client = await self._get_client()
 
         params = {
@@ -64,83 +60,126 @@ class COREClient(BaseAPIClient):
             "limit": min(limit, 100),
             "offset": offset,
         }
-
-        if full_text_only:
-            params["filter"] = "has_full_text:true"
-
-        # Добавляем дополнительные параметры из kwargs
         params.update(kwargs)
 
-        try:
-            response = await client.get("/articles/search", params=params)
-            response.raise_for_status()
-            data = response.json()
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                response = await client.get("/search/works/", params=params)
 
-            results = data.get("results", [])
-            logger.info(f"CORE: найдено {len(results)} статей по запросу '{query}'")
+                if response.status_code in (408, 429) or 500 <= response.status_code < 600:
+                    if attempt >= self.MAX_RETRIES:
+                        response.raise_for_status()
 
-            return results
+                    sleep_for = self.RETRY_BASE_SLEEP * (self.RETRY_BACKOFF_BASE ** (attempt - 1)) + random.uniform(0, 0.7)
+                    logger.warning(
+                        "CORE transient status {} for query='{}' (attempt {}/{}), retry in {:.1f}s",
+                        response.status_code,
+                        query,
+                        attempt,
+                        self.MAX_RETRIES,
+                        sleep_for,
+                    )
+                    await asyncio.sleep(sleep_for)
+                    continue
 
-        except httpx.HTTPStatusError as e:
-            logger.error(f"CORE API error: {e}")
-            if e.response is not None:
-                logger.error(f"Response: {e.response.text}")
+                response.raise_for_status()
+                data = response.json()
+                results = data.get("results", [])
 
-                # Явно сигнализируем о поломке/изменении API CORE,
-                # чтобы задача не завершалась "успешно" с нулём результатов.
-                if e.response.status_code == 404:
-                    raise RuntimeError(
-                        "CORE API endpoint недоступен (404). "
-                        "Вероятно, API CORE изменился; используйте источник arXiv."
-                    ) from e
-            return []
-        except httpx.HTTPError as e:
-            logger.error(f"CORE API error: {e}")
-            return []
-        except Exception as e:
-            logger.error(f"CORE search error: {e}")
-            return []
+                if full_text_only:
+                    results = [
+                        item
+                        for item in results
+                        if item.get("downloadUrl") or item.get("fullText") or item.get("sourceFulltextUrls")
+                    ]
+
+                logger.info("CORE: found {} papers for query '{}'", len(results), query)
+                return results
+
+            except (httpx.TimeoutException, httpx.NetworkError) as e:
+                if attempt >= self.MAX_RETRIES:
+                    logger.error("CORE API network error after {} attempts: {}", attempt, e)
+                    return []
+
+                sleep_for = self.RETRY_BASE_SLEEP * (self.RETRY_BACKOFF_BASE ** (attempt - 1))
+                logger.warning(
+                    "CORE API transient network error for query='{}' (attempt {}/{}): {}. Retry in {:.1f}s",
+                    query,
+                    attempt,
+                    self.MAX_RETRIES,
+                    e,
+                    sleep_for,
+                )
+                await asyncio.sleep(sleep_for)
+
+            except httpx.HTTPStatusError as e:
+                logger.error("CORE API error: {}", e)
+                if e.response is not None:
+                    logger.error("CORE response: {}", e.response.text[:500])
+                return []
+            except httpx.HTTPError as e:
+                logger.error("CORE API error: {}", e)
+                return []
+            except Exception as e:
+                logger.error("CORE search error: {}", e)
+                return []
+
+        return []
 
     async def get_article(self, article_id: str) -> dict[str, Any] | None:
-        """
-        Получить статью по ID.
-
-        Args:
-            article_id: ID статьи в CORE
-
-        Returns:
-            Данные статьи или None
-        """
+        """Get a paper by CORE id."""
         client = await self._get_client()
 
-        try:
-            response = await client.get(f"/articles/{article_id}")
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPError as e:
-            logger.error(f"CORE get article error: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"CORE get article error: {e}")
-            return None
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                response = await client.get(f"/works/{article_id}")
+
+                if response.status_code in (408, 429) or 500 <= response.status_code < 600:
+                    if attempt >= self.MAX_RETRIES:
+                        response.raise_for_status()
+                    sleep_for = self.RETRY_BASE_SLEEP * (self.RETRY_BACKOFF_BASE ** (attempt - 1)) + random.uniform(0, 0.7)
+                    logger.warning(
+                        "CORE get_article transient status {} for id={} (attempt {}/{}), retry in {:.1f}s",
+                        response.status_code,
+                        article_id,
+                        attempt,
+                        self.MAX_RETRIES,
+                        sleep_for,
+                    )
+                    await asyncio.sleep(sleep_for)
+                    continue
+
+                response.raise_for_status()
+                return response.json()
+            except (httpx.TimeoutException, httpx.NetworkError) as e:
+                if attempt >= self.MAX_RETRIES:
+                    logger.error("CORE get article network error after {} attempts: {}", attempt, e)
+                    return None
+                sleep_for = self.RETRY_BASE_SLEEP * (self.RETRY_BACKOFF_BASE ** (attempt - 1))
+                await asyncio.sleep(sleep_for)
+            except httpx.HTTPError as e:
+                logger.error("CORE get article error: {}", e)
+                return None
+            except Exception as e:
+                logger.error("CORE get article error: {}", e)
+                return None
+
+        return None
 
     async def get_full_text(self, item_id: str) -> str | None:
-        """
-        Получить полный текст статьи.
-
-        Args:
-            item_id: ID статьи в CORE
-
-        Returns:
-            Полный текст или None
-        """
-        # CORE не предоставляет полный текст напрямую через API v2
-        # Нужно использовать URL из метаданных статьи
+        """Get full-text URL for a paper."""
         article = await self.get_article(item_id)
 
-        if article and article.get("has_full_text"):
-            # Возвращаем URL для скачивания полного текста
-            return article.get("source_fulltext_url") or article.get("full_text")
+        if article:
+            if article.get("downloadUrl"):
+                return article.get("downloadUrl")
+
+            fulltext_urls = article.get("sourceFulltextUrls") or []
+            if isinstance(fulltext_urls, list) and fulltext_urls:
+                return fulltext_urls[0]
+
+            if article.get("fullText"):
+                return article.get("fullText")
 
         return None
 
@@ -149,26 +188,19 @@ class COREClient(BaseAPIClient):
         query: str,
         limit: int = 10,
     ) -> list[str]:
-        """
-        Получить подсказки для поискового запроса.
-
-        Args:
-            query: Часть запроса
-            limit: Макс. количество подсказок
-
-        Returns:
-            Список подсказок
-        """
+        """Build simple query suggestions from top titles."""
         client = await self._get_client()
 
         try:
-            response = await client.get(
-                "/articles/suggest",
-                params={"q": query, "limit": limit}
-            )
+            response = await client.get("/search/works/", params={"q": query, "limit": min(limit, 20)})
             response.raise_for_status()
             data = response.json()
-            return data.get("suggestions", [])
+            suggestions = []
+            for item in data.get("results", []):
+                title = item.get("title")
+                if title and title not in suggestions:
+                    suggestions.append(title)
+            return suggestions[:limit]
         except Exception as e:
-            logger.error(f"CORE suggest error: {e}")
+            logger.error("CORE suggest error: {}", e)
             return []

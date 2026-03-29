@@ -119,7 +119,7 @@ export async function deletePaper(paperId: number) {
   await apiClient.delete(`/papers/id/${paperId}`);
 }
 
-export async function parsePapers(args: { query: string; limit: number; source: "CORE" | "arXiv" }) {
+export async function parsePapers(args: { query: string; limit: number; source: PaperSource }) {
   const { data } = await apiClient.post<{
     message: string;
     task_id: string;
@@ -137,7 +137,7 @@ export async function parsePapers(args: { query: string; limit: number; source: 
   return data;
 }
 
-export async function parseAll(args: { limitPerQuery: number; source: "CORE" | "arXiv" | "all" }) {
+export async function parseAll(args: { limitPerQuery: number; source: PaperSource | "all" }) {
   const { data } = await apiClient.post<{
     message: string;
     task_id: string;

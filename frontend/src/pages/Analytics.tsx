@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { searchPapers, vectorSearch, getVectorStats, rebuildVectorIndex } from "../api/papers";
+import { PAPER_SOURCES } from "../types/paper";
 import type { PaperSource, SearchType } from "../types/paper";
 import type { Paper, VectorSearchResult } from "../types/paper";
 
@@ -45,7 +46,7 @@ export default function Analytics() {
   };
 
   const sources = useMemo<PaperSource[]>(
-    () => (source === "all" ? ["CORE", "arXiv"] : [source]),
+    () => (source === "all" ? [...PAPER_SOURCES] : [source]),
     [source]
   );
 
@@ -167,8 +168,11 @@ export default function Analytics() {
             />
             <select value={source} onChange={(e) => setSource(e.target.value as PaperSource | "all")}>
               <option value="all">Все источники</option>
-              <option value="CORE">CORE</option>
-              <option value="arXiv">arXiv</option>
+              {PAPER_SOURCES.map((src) => (
+                <option key={src} value={src}>
+                  {src}
+                </option>
+              ))}
             </select>
             <select value={searchType} onChange={(e) => setSearchType(e.target.value as SearchType)}>
               <option value="vector">Векторный</option>

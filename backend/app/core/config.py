@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6380/0"
 
+    # CORE API
+    CORE_API_KEY: str | None = None
+    CORE_API_TIMEOUT: float = 40.0
+    SEMANTIC_SCHOLAR_API_KEY: str | None = None
+
     # API
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8001
@@ -98,7 +103,7 @@ class Settings(BaseSettings):
     PAPER_PDF_DIR: str = "./storage/papers_pdf"
 
     # Logging
-    LOG_LEVEL: str = "INFO"
+    LOG_LEVEL: str = "DEBUG"
     LOG_FILE: str = "./logs/app.log"
 
     @field_validator("DEBUG", mode="before")

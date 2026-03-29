@@ -1,21 +1,24 @@
-"""Парсеры научных статей и патентов.
+﻿"""Парсеры научных статей и патентов.
 
-Поддерживаемые источники:
+Активно используемые источники статей:
 - CORE (core.ac.uk)
 - arXiv (arxiv.org)
-- ScienceDirect (sciencedirect.com) - Selenium
-- ResearchGate (researchgate.net)
-- Google Patents
-- Espacenet
+- OpenAlex
+- Crossref
+- SemanticScholar
+- EuropePMC
 
-Модули:
-- base: Базовые классы и дедупликация
-- pipelines: Конвейеры обработки данных
-- arxiv: Парсер arXiv
-- core: Парсер CORE
-- selenium: Selenium парсеры (ScienceDirect)
-- spiders: Spider парсеры (ResearchGate)
-- patents: Парсеры патентов
+Доступные модули:
+- base: базовые классы и дедупликация
+- pipelines: конвейеры обработки данных
+- arxiv: парсер arXiv
+- core: парсер CORE
+- external: внешние API-источники (OpenAlex/Crossref/SemanticScholar/EuropePMC)
+
+Legacy-модули (не используются в текущем pipeline статей):
+- selenium: Selenium-парсеры
+- spiders: Spider-парсеры
+- patents: парсеры патентов
 """
 
 from .base import (
@@ -38,14 +41,11 @@ from .pipelines import (
 __version__ = "1.0.0"
 
 __all__ = [
-    # Base
     "BaseParser",
     "BaseAPIClient",
     "Deduplicator",
     "DeduplicationResult",
     "check_duplicate",
-
-    # Pipelines
     "DataPipeline",
     "CleaningStage",
     "ValidationStage",

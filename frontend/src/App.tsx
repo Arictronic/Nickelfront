@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+﻿import { useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import * as authApi from "./api/auth";
 import Layout from "./components/layout/Layout";
@@ -14,6 +14,7 @@ import Database from "./pages/Database";
 import PaperReport from "./pages/PaperReport";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
+import Landing from "./pages/Landing";
 import { useAuthStore } from "./store/authStore";
 import ErrorBoundary from "./components/ErrorBoundary";
 
@@ -36,7 +37,7 @@ function AdminRoute({ children }: { children: JSX.Element }) {
 
 function RootRedirect() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
-  return <Navigate to={isAuthenticated ? "/dashboard" : "/login"} replace />;
+  return <Navigate to={isAuthenticated ? "/dashboard" : "/"} replace />;
 }
 
 function AuthOnlyRoute({ children }: { children: JSX.Element }) {
@@ -92,6 +93,7 @@ export default function App() {
     <>
       <SessionBootstrap />
       <Routes>
+        <Route path="/" element={<Landing />} />
         <Route
           path="/login"
           element={
@@ -108,10 +110,9 @@ export default function App() {
             </AuthOnlyRoute>
           }
         />
-        <Route path="/" element={<Layout />}>
-          <Route index element={<RootRedirect />} />
+        <Route element={<Layout />}>
           <Route
-            path="dashboard"
+            path="/dashboard"
             element={
               <ProtectedRoute>
                 <Dashboard />
@@ -119,7 +120,7 @@ export default function App() {
             }
           />
           <Route
-            path="papers"
+            path="/papers"
             element={
               <ProtectedRoute>
                 <Patents />
@@ -127,7 +128,7 @@ export default function App() {
             }
           />
           <Route
-            path="papers/:id"
+            path="/papers/:id"
             element={
               <ProtectedRoute>
                 <PatentDetail />
@@ -135,7 +136,7 @@ export default function App() {
             }
           />
           <Route
-            path="papers/:id/report"
+            path="/papers/:id/report"
             element={
               <ProtectedRoute>
                 <PaperReport />
@@ -143,7 +144,7 @@ export default function App() {
             }
           />
           <Route
-            path="vector-search"
+            path="/vector-search"
             element={
               <ProtectedRoute>
                 <Analytics />
@@ -151,7 +152,7 @@ export default function App() {
             }
           />
           <Route
-            path="metrics"
+            path="/metrics"
             element={
               <ProtectedRoute>
                 <Metrics />
@@ -159,7 +160,7 @@ export default function App() {
             }
           />
           <Route
-            path="celery"
+            path="/celery"
             element={
               <AdminRoute>
                 <CeleryMonitoring />
@@ -167,7 +168,7 @@ export default function App() {
             }
           />
           <Route
-            path="search"
+            path="/search"
             element={
               <ProtectedRoute>
                 <FullTextSearch />
@@ -175,7 +176,7 @@ export default function App() {
             }
           />
           <Route
-            path="jobs"
+            path="/jobs"
             element={
               <ProtectedRoute>
                 <WorkerStatus />
@@ -183,7 +184,7 @@ export default function App() {
             }
           />
           <Route
-            path="database"
+            path="/database"
             element={
               <AdminRoute>
                 <ErrorBoundary name="База данных">
@@ -193,6 +194,7 @@ export default function App() {
             }
           />
         </Route>
+        <Route path="*" element={<RootRedirect />} />
       </Routes>
     </>
   );
