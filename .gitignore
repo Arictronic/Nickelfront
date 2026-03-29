@@ -38,6 +38,8 @@ models/
 *.parquet
 data/
 !data/.gitkeep
+storage/
+!storage/.gitkeep
 
 # Databases
 *.db
