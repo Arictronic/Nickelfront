@@ -54,12 +54,16 @@ async def get_current_user(
         )
 
     logger.debug(f"Текущий пользователь: {user.email}")
+    is_admin = user.email.lower() == "admin@admin.com" or (
+        user.username is not None and user.username.lower() == "admin"
+    )
+
     return UserResponse(
         id=user.id,
         email=user.email,
         username=user.username,
         is_active=user.is_active,
-        is_admin=user.email.lower() == "admin@admin.com",
+        is_admin=is_admin,
         created_at=user.created_at,
     )
 
