@@ -1,6 +1,10 @@
 import { create } from "zustand";
 import type { User } from "../types/user";
 
+const mockDesignReviewUser: User = {
+  email: "design-review@local.test",
+};
+
 interface AuthState {
   user: User | null;
   isAuthenticated: boolean;
@@ -9,8 +13,8 @@ interface AuthState {
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
-  user: null,
-  isAuthenticated: false,
+  user: mockDesignReviewUser,
+  isAuthenticated: true,
   login: (user) => set({ user, isAuthenticated: true }),
   logout: () => set({ user: null, isAuthenticated: false }),
 }));

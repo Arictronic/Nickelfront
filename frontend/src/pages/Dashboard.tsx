@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { LineChart, Line, XAxis, YAxis, Tooltip, PieChart, Pie, Cell } from "recharts";
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, PieChart, Pie, Cell, CartesianGrid } from "recharts";
 import { getPapersCount, getPapersList, parseAll, parsePapers } from "../api/papers";
 import { Paper } from "../types/paper";
 import { Link } from "react-router-dom";
 
-const COLORS = ["#0088FE", "#00C49F", "#FFBB28"];
+const COLORS = ["#ffffff", "#cfcfd6", "#8e8e98"];
 
 type ParseJob = {
   jobId: string;
@@ -240,30 +240,78 @@ export default function Dashboard() {
       </div>
 
       <div className="chart-grid">
-        <article className="panel">
-          <h3>Метрика (пример): последние даты</h3>
-          <LineChart width={520} height={230} data={lineData.length ? lineData : [{ date: "—", count: 0 }]}>
-            <XAxis dataKey="date" />
-            <YAxis />
-            <Tooltip />
-            <Line type="monotone" dataKey="count" stroke="#4a6cf7" />
-          </LineChart>
+        <article className="panel chart-panel">
+          <div className="chart-panel-head">
+            <div>
+              <p className="chart-overline">Live signal</p>
+              <h3>Поток последних публикаций</h3>
+            </div>
+            <span className="counter-badge">{lineData.length || 1} точек</span>
+          </div>
+          <div className="chart-shell">
+            <ResponsiveContainer width="100%" height={260}>
+              <LineChart data={lineData.length ? lineData : [{ date: "—", count: 0 }]} margin={{ top: 10, right: 10, left: -18, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="lineGlow" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0%" stopColor="#7a7a85" />
+                    <stop offset="55%" stopColor="#ffffff" />
+                    <stop offset="100%" stopColor="#b8b8c2" />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                <XAxis dataKey="date" tick={{ fill: "#8e8e98", fontSize: 12 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill: "#8e8e98", fontSize: 12 }} axisLine={false} tickLine={false} />
+                <Tooltip
+                  contentStyle={{
+                    borderRadius: 18,
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    background: "rgba(10,10,12,0.88)",
+                    backdropFilter: "blur(18px)",
+                    color: "#ffffff",
+                  }}
+                />
+                <Line type="monotone" dataKey="count" stroke="url(#lineGlow)" strokeWidth={3.5} dot={{ r: 0 }} activeDot={{ r: 6, fill: "#ffffff", stroke: "rgba(255,255,255,0.2)", strokeWidth: 6 }} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
         </article>
-        <article className="panel">
-          <h3>Метрика (пример): источники (по последним)</h3>
-          <PieChart width={350} height={230}>
-            <Pie
-              data={pieData.length ? pieData : [{ name: "нет данных", value: 1 }]}
-              dataKey="value"
-              nameKey="name"
-              outerRadius={80}
-            >
-              {(pieData.length ? pieData : [{ name: "нет данных", value: 1 }]).map((_, index) => (
-                <Cell key={index} fill={COLORS[index % COLORS.length]} />
-              ))}
-            </Pie>
-            <Tooltip />
-          </PieChart>
+        <article className="panel chart-panel">
+          <div className="chart-panel-head">
+            <div>
+              <p className="chart-overline">Distribution</p>
+              <h3>Источники данных</h3>
+            </div>
+            <span className="counter-badge">{pieData.length || 1} сегмента</span>
+          </div>
+          <div className="chart-shell chart-shell-pie">
+            <ResponsiveContainer width="100%" height={260}>
+              <PieChart>
+                <Tooltip
+                  contentStyle={{
+                    borderRadius: 18,
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    background: "rgba(10,10,12,0.88)",
+                    backdropFilter: "blur(18px)",
+                    color: "#ffffff",
+                  }}
+                />
+                <Pie
+                  data={pieData.length ? pieData : [{ name: "нет данных", value: 1 }]}
+                  dataKey="value"
+                  nameKey="name"
+                  innerRadius={48}
+                  outerRadius={86}
+                  paddingAngle={6}
+                  stroke="rgba(255,255,255,0.08)"
+                  strokeWidth={1}
+                >
+                  {(pieData.length ? pieData : [{ name: "нет данных", value: 1 }]).map((_, index) => (
+                    <Cell key={index} fill={COLORS[index % COLORS.length]} />
+                  ))}
+                </Pie>
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
         </article>
       </div>
 

@@ -49,7 +49,7 @@ export default function Analytics() {
   return (
     <div className="page">
       <div className="page-head">
-        <h2>Векторный поиск (UI) - пока fallback</h2>
+        <h2>Поиск по базе статей</h2>
         <div className="actions">
           <button className="btn btn-primary" onClick={() => run()}>
             Искать
@@ -71,7 +71,7 @@ export default function Analytics() {
             Только с full text
           </label>
           <input className="input" type="number" min={1} max={100} value={limit} onChange={(e) => setLimit(Number(e.target.value))} style={{ width: 120 }} />
-          <span className="muted">В бэке сейчас нет endpoint для эмбеддингов, поэтому используем `/papers/search`.</span>
+          <span className="muted">Показываются только результаты, которые реально вернул backend через `/api/v1/papers/search`.</span>
         </div>
       </div>
 

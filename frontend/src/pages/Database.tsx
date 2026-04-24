@@ -50,7 +50,7 @@ export default function Database() {
             <strong>arXiv</strong> — {arxivCount}
           </p>
           <p>
-            <strong>patent_tasks</strong> — есть endpoint для задач, но они относятся к “patent_number” (в текущем бэке нет papers-status)
+            <strong>patent_tasks</strong> — техническая очередь задач бэка; интерфейс статей опирается только на реальные данные `papers` и `papers/search`
           </p>
         </div>
       </div>

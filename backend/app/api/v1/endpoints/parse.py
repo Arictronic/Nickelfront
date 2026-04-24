@@ -35,7 +35,7 @@ async def search_papers(
         papers=papers,
         total=len(papers),
         query=request.query,
-        sources=request.sources or ["CORE"],
+        sources=request.sources,
     )
 
 

@@ -6,7 +6,6 @@ import PatentDetail from "./pages/PatentDetail";
 import Analytics from "./pages/Analytics";
 import WorkerStatus from "./pages/WorkerStatus";
 import Database from "./pages/Database";
-import Landing from "./pages/Landing";
 import PaperReport from "./pages/PaperReport";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
@@ -17,13 +16,18 @@ function ProtectedRoute({ children }: { children: JSX.Element }) {
   return isAuthenticated ? children : <Navigate to="/login" replace />;
 }
 
+function RootRedirect() {
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  return <Navigate to={isAuthenticated ? "/dashboard" : "/login"} replace />;
+}
+
 export default function App() {
   return (
     <Routes>
+      <Route path="/" element={<RootRedirect />} />
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
       <Route path="/" element={<Layout />}>
-        <Route index element={<Landing />} />
         <Route
           path="dashboard"
           element={

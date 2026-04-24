@@ -103,7 +103,6 @@ class PaperService:
         Returns:
             Список статей
         """
-        # Простой поиск по подстроке (для PostgreSQL можно использовать full-text search)
         search_pattern = f"%{query}%"
         result = await self.db.execute(
             select(PaperModel)

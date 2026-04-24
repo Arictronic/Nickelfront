@@ -22,6 +22,7 @@ export interface PaperSearchFilters {
   sources: PaperSource[];
   fullTextOnly: boolean;
   limit: number;
+  offset?: number;
 }
 
 export interface PaperListFilters {

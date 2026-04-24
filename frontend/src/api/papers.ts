@@ -70,6 +70,7 @@ export async function searchPapers(filters: PaperSearchFilters) {
   }>("/papers/search", {
     query: filters.query,
     limit: filters.limit,
+    offset: filters.offset ?? 0,
     sources: filters.sources,
     full_text_only: filters.fullTextOnly,
   });
