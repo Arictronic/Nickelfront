@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { deletePaper, getPaperById, getPaperPdfUrl, reprocessPaperContent } from "../api/papers";
 import type { Paper } from "../types/paper";
+import { getProcessingStatusLabel } from "../types/paper";
 
 type Tab = "description" | "textParts" | "report";
 
@@ -92,6 +93,7 @@ export default function PatentDetail() {
   }, [paper?.id, paper?.processingStatus]);
 
   const fullText = paper?.fullText ?? paper?.abstract ?? "";
+  const hasFullTextOrPdf = Boolean((paper?.fullText && paper.fullText.trim().length > 0) || paper?.pdfUrl || paper?.pdfLocalPath);
 
   const parts = useMemo(() => {
     if (!paper) return [];
@@ -178,10 +180,10 @@ export default function PatentDetail() {
             <strong>Ключевые слова:</strong> {paper.keywords.length ? paper.keywords.slice(0, 10).join(", ") : "—"}
           </p>
           <p>
-            <strong>Статус обработки:</strong> {paper.processingStatus}
+            <strong>Статус обработки:</strong> {getProcessingStatusLabel(paper.processingStatus)}
           </p>
           <p>
-            <strong>full_text:</strong> {paper.fullText ? "Есть" : "Нет"}
+            <strong>full_text:</strong> {hasFullTextOrPdf ? "Есть" : "Нет"}
           </p>
           <p>
             <strong>URL:</strong>{" "}
@@ -211,7 +213,7 @@ export default function PatentDetail() {
 
       <div className="tabs">
         <button className={`btn ${tab === "description" ? "btn-primary" : ""}`} onClick={() => setTab("description")}>
-          Описание
+          Главная
         </button>
         <button className={`btn ${tab === "textParts" ? "btn-primary" : ""}`} onClick={() => setTab("textParts")}>
           Части текста (токены)
@@ -223,32 +225,27 @@ export default function PatentDetail() {
 
       {tab === "description" && (
         <article className="panel">
-          <h3>Abstract</h3>
-          {paper.abstract ? <p>{paper.abstract}</p> : <p className="muted">Abstract отсутствует.</p>}
-          {paper.fullText && (
-            <>
-              <h3 style={{ marginTop: 18 }}>Текст статьи</h3>
-              <p className="muted">Символов: {paper.fullText.length}</p>
-              <p style={{ whiteSpace: "pre-wrap" }}>
-                {paper.fullText.slice(0, 3000)}
-                {paper.fullText.length > 3000 ? "…" : ""}
-              </p>
-            </>
-          )}
           {paper.summaryRu && (
             <>
-              <h3 style={{ marginTop: 18 }}>Суть статьи (RU)</h3>
+              <h3 style={{ marginTop: 0 }}>Суть статьи</h3>
               <p style={{ whiteSpace: "pre-wrap" }}>{paper.summaryRu}</p>
             </>
           )}
+          {!paper.summaryRu && <p className="muted">Суть статьи пока не готова.</p>}
           {(paper.pdfUrl || paper.pdfLocalPath) && (
             <>
-              <h3 style={{ marginTop: 18 }}>PDF</h3>
+              <h3 style={{ marginTop: 18 }}>PDF (кол. символов: {paper.fullText?.length ?? 0})</h3>
               <iframe
                 title="paper-pdf"
                 src={getPaperPdfUrl(paper.id)}
                 style={{ width: "100%", height: 640, border: "1px solid #e5e7eb", borderRadius: 8 }}
               />
+              {paper.fullText && (
+                <>
+                  <h3 style={{ marginTop: 18 }}>Текст статьи</h3>
+                  <p style={{ whiteSpace: "pre-wrap" }}>{paper.fullText}</p>
+                </>
+              )}
             </>
           )}
           <div style={{ marginTop: 12 }}>
@@ -390,8 +387,8 @@ export default function PatentDetail() {
         <button className="btn" onClick={onDelete}>
           Удалить статью
         </button>
-        <button className="btn" onClick={() => navigator.clipboard.writeText(paper.abstract ?? "")}>
-          Копировать abstract
+        <button className="btn" onClick={() => navigator.clipboard.writeText(paper.summaryRu ?? "")}>
+          Копировать суть
         </button>
         <button className="btn" onClick={() => navigate("/papers")}>
           Назад к списку

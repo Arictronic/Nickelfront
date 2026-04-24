@@ -15,10 +15,12 @@ type ParseJob = {
   lastPolledAt?: number;
 };
 
-const LS_KEY = "parseJobs.v1";
+const LS_KEY = "parseJobs.v2";
+const LEGACY_LS_KEYS = ["parseJobs.v1"];
 
 function loadJobs(): ParseJob[] {
   try {
+    for (const key of LEGACY_LS_KEYS) localStorage.removeItem(key);
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return [];
     return JSON.parse(raw) as ParseJob[];
@@ -68,6 +70,24 @@ export default function WorkerStatus() {
           const isCompleted = celeryStatus.status === "SUCCESS" || celeryStatus.status === "FAILURE";
           const isRevoked = celeryStatus.status === "REVOKED";
           const savedCount = celeryStatus.saved_count || celeryStatus.result?.saved_count || 0;
+
+          if (celeryStatus.status === "PENDING") {
+            const source = job.source === "all" ? "all" : job.source;
+            const current = await getPapersCount(source as any);
+            const changed = current !== job.lastObservedCount;
+            const lastCountChangeAt = changed ? now : job.lastCountChangeAt;
+            const stableMs = 60_000;
+            const shouldComplete = now - lastCountChangeAt > stableMs && current > job.initialCount;
+
+            return {
+              ...job,
+              celeryStatus,
+              lastObservedCount: current,
+              lastCountChangeAt,
+              lastPolledAt: now,
+              status: shouldComplete ? "completed" : "in_progress",
+            } as ParseJob;
+          }
 
           return {
             ...job,
@@ -193,6 +213,7 @@ export default function WorkerStatus() {
   };
 
   const getProgressPercent = (job: ParseJob): number => {
+    if (job.status === "completed") return 100;
     if (job.celeryStatus) {
       const current = job.celeryStatus.current || job.celeryStatus.result?.current || 0;
       const total = job.celeryStatus.total || job.celeryStatus.result?.total || 0;
@@ -204,6 +225,9 @@ export default function WorkerStatus() {
   };
 
   const getStatusText = (job: ParseJob): string => {
+    if (job.status === "completed") return "✓ Завершено";
+    if (job.status === "cancelled") return "Отменено";
+
     if (job.celeryStatus) {
       const status = job.celeryStatus.status;
       const stateText = job.celeryStatus.result?.status || job.celeryStatus.state || "";
@@ -215,8 +239,7 @@ export default function WorkerStatus() {
       if (status === "STARTED") return stateText || "В процессе...";
       if (status === "RETRY") return "Повтор...";
     }
-    if (job.status === "cancelled") return "Отменено";
-    return job.status === "completed" ? "Готово" : "В обработке";
+    return "В обработке";
   };
 
   return (

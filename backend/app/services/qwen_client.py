@@ -127,7 +127,8 @@ class QwenServiceClient:
         Returns:
             Статус сервиса.
         """
-        result = self._request("GET", "/health")
+        # Keep this check short to avoid blocking task workers when Qwen is busy.
+        result = self._request("GET", "/health", timeout=3.0)
         return result or {"status": "error", "available": False}
 
     def get_config(self) -> dict[str, Any]:

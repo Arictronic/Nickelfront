@@ -17,13 +17,13 @@ from app.services.paper_content_service import save_pdf_locally
 from app.services.paper_service import PaperService
 from app.tasks.content_tasks import process_paper_content_task
 from app.tasks.parse_tasks import (
+    ARXIV_SEARCH_QUERIES,
     AVAILABLE_SOURCES,
     DEFAULT_SEARCH_QUERIES,
     parse_all_sources_task,
     parse_multiple_queries_task,
     parse_papers_task,
 )
-from parsers_pkg.arxiv import ARXIV_SEARCH_QUERIES
 from shared.schemas.auth import UserResponse
 from shared.schemas.paper import Paper, PaperSearchRequest, PaperSearchResponse
 
@@ -64,7 +64,11 @@ async def search_papers(
     if request.sources:
         papers = [p for p in papers if p.source in request.sources]
     if request.full_text_only:
-        papers = [p for p in papers if p.full_text and p.full_text.strip()]
+        papers = [
+            p
+            for p in papers
+            if (p.full_text and p.full_text.strip()) or p.pdf_url or p.pdf_local_path
+        ]
 
     return PaperSearchResponse(
         papers=papers,
@@ -134,19 +138,23 @@ async def start_parsing(
     """
     Запустить парсинг статей.
 
-    Доступные источники: CORE, arXiv, OpenAlex, Crossref, SemanticScholar, EuropePMC
+    Доступные источники берутся из parser_alpha реестра.
     """
+    normalized_query = query.strip()
+    if not normalized_query:
+        raise HTTPException(status_code=400, detail="Поле query обязательно и не может быть пустым")
+
     if source not in AVAILABLE_SOURCES:
         raise HTTPException(status_code=400, detail=f"Неподдерживаемый источник. Доступны: {', '.join(AVAILABLE_SOURCES)}")
 
-    task = parse_papers_task.delay(query=query, limit=limit, source=source)
-    logger.info(f"Запущен парсинг: source={source}, query={query}, task_id={task.id}")
+    task = parse_papers_task.delay(query=normalized_query, limit=limit, source=source)
+    logger.info(f"Запущен парсинг: source={source}, query={normalized_query}, task_id={task.id}")
 
     return {
         "message": "Парсинг запущен",
         "task_id": task.id,
         "source": source,
-        "query": query,
+        "query": normalized_query,
         "limit": limit,
     }
 
@@ -155,56 +163,66 @@ async def start_parsing(
 async def start_parsing_all(
     limit_per_query: int = Query(default=50, ge=1, le=100),
     source: str = Query(default="all", description="Источник (или all)"),
+    query: str = Query(..., description="Пользовательский запрос для всех источников"),
     _current_user: UserResponse = Depends(get_current_user),
 ):
     """
     Запустить парсинг по всем стандартным запросам.
 
-    Источники:
-    - **CORE**
-    - **arXiv**
-    - **OpenAlex**
-    - **Crossref**
-    - **SemanticScholar**
-    - **EuropePMC**
-    - **all**: все источники
+    Источники: `AVAILABLE_SOURCES` и `all`.
     """
     allowed_with_all = [*AVAILABLE_SOURCES, "all"]
     if source not in allowed_with_all:
         raise HTTPException(status_code=400, detail=f"Неподдерживаемый источник. Доступны: {', '.join(allowed_with_all)}")
 
+    normalized_query = query.strip()
+    if not normalized_query:
+        raise HTTPException(status_code=400, detail="Поле query обязательно и не может быть пустым")
+    user_queries = [normalized_query]
+
     if source == "all":
-        task = parse_all_sources_task.delay(limit_per_query=limit_per_query)
+        task = parse_all_sources_task.delay(
+            limit_per_query=limit_per_query,
+            queries=user_queries,
+            query=normalized_query or None,
+        )
         source_list = AVAILABLE_SOURCES
     elif source == "arXiv":
         task = parse_multiple_queries_task.delay(
-            queries=ARXIV_SEARCH_QUERIES,
+            queries=user_queries or ARXIV_SEARCH_QUERIES,
             limit_per_query=limit_per_query,
             source="arXiv",
         )
         source_list = ["arXiv"]
     elif source == "CORE":
         task = parse_multiple_queries_task.delay(
-            queries=DEFAULT_SEARCH_QUERIES,
+            queries=user_queries or DEFAULT_SEARCH_QUERIES,
             limit_per_query=limit_per_query,
             source="CORE",
         )
         source_list = ["CORE"]
     else:
         task = parse_multiple_queries_task.delay(
-            queries=DEFAULT_SEARCH_QUERIES,
+            queries=user_queries or DEFAULT_SEARCH_QUERIES,
             limit_per_query=limit_per_query,
             source=source,
         )
         source_list = [source]
 
-    logger.info(f"Запущен массовый парсинг: sources={source_list}, task_id={task.id}")
+    logger.info(
+        "Запущен массовый парсинг: sources={}, query='{}', limit_per_query={}, task_id={}",
+        source_list,
+        normalized_query or "<default_templates>",
+        limit_per_query,
+        task.id,
+    )
 
     return {
         "message": "Массовый парсинг запущен",
         "task_id": task.id,
         "sources": source_list,
         "limit_per_query": limit_per_query,
+        "query": normalized_query,
     }
 
 

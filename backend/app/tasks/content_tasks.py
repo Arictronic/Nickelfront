@@ -10,10 +10,12 @@ from loguru import logger
 from app.db.session import async_session_maker
 from app.services.embedding_service import get_embedding_service
 from app.services.paper_content_service import (
+    create_qwen_session_for_paper,
     download_pdf_bytes,
     extract_pdf_text,
     fetch_additional_full_text,
     generate_ai_enrichment_ru,
+    normalize_pdf_text_markdown,
     resolve_pdf_url,
     save_pdf_locally,
 )
@@ -95,6 +97,24 @@ async def _process_paper_content_async(self, paper_id: int) -> dict[str, Any]:
             # Reload updated paper to use freshest content.
             paper = await paper_service.get_by_id(paper_id)
             content_text = (paper.full_text or paper.abstract or "").strip()
+            session_id = await asyncio.to_thread(
+                create_qwen_session_for_paper,
+                paper_id,
+                paper.title,
+            )
+
+            if pdf_bytes and content_text:
+                await _set_stage(paper_service, paper_id, "formatting_markdown", task_id=task_id)
+                markdown_text = await asyncio.to_thread(
+                    normalize_pdf_text_markdown,
+                    paper_id,
+                    paper.title,
+                    content_text,
+                    session_id,
+                )
+                if markdown_text:
+                    await paper_service.update_paper(paper_id, full_text=markdown_text)
+                    content_text = markdown_text
 
             await _set_stage(paper_service, paper_id, "analyzing_ru", task_id=task_id)
             enrichment = await asyncio.to_thread(
@@ -102,6 +122,7 @@ async def _process_paper_content_async(self, paper_id: int) -> dict[str, Any]:
                 paper.title,
                 paper.abstract or "",
                 content_text,
+                session_id,
             )
 
             fallback_reason = enrichment.fallback_reason if enrichment.used_fallback else None

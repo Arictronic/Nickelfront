@@ -26,6 +26,9 @@ class AIEnrichmentResult:
     fallback_reason: str | None = None
 
 
+_PAGE_MARKER_SPLIT_RE = re.compile(r"(?=\[Страница\s+\d+\])")
+
+
 def _clean_arxiv_id(raw: str) -> str:
     value = (raw or "").strip()
     if not value:
@@ -218,7 +221,79 @@ def _fallback_enrichment(
     )
 
 
-def generate_ai_enrichment_ru(title: str, abstract: str, text: str) -> AIEnrichmentResult:
+def create_qwen_session_for_paper(paper_id: int, title: str) -> str | None:
+    qwen_client = get_qwen_client()
+    session_title = f"paper-{paper_id}: {title[:80]}".strip()
+    try:
+        return qwen_client.create_session(title=session_title)
+    except Exception as exc:
+        logger.warning("Failed to create Qwen session for paper {}: {}", paper_id, exc)
+        return None
+
+
+def _split_pdf_text_into_pages(raw_text: str) -> list[str]:
+    text = (raw_text or "").strip()
+    if not text:
+        return []
+
+    parts = [p.strip() for p in _PAGE_MARKER_SPLIT_RE.split(text) if p and p.strip()]
+    if parts:
+        return parts
+
+    # Fallback split for PDFs without explicit page markers.
+    chunk_size = 9000
+    return [text[i : i + chunk_size].strip() for i in range(0, len(text), chunk_size) if text[i : i + chunk_size].strip()]
+
+
+def normalize_pdf_text_markdown(
+    paper_id: int,
+    title: str,
+    raw_text: str,
+    session_id: str | None = None,
+) -> str:
+    pages = _split_pdf_text_into_pages(raw_text)
+    if not pages:
+        return ""
+
+    qwen_client = get_qwen_client()
+    prompt_prefix = (
+        "Ты специалист по статьям, ничего не теряй из информации, "
+        "тебе даются сырые данные из PDF файла, ты должен выдать обработанную страницу. "
+        "Ничего лишнего не добавляй. Ни какого доп текста, только то что есть. "
+        "Формат ответа: Markdown."
+    )
+
+    normalized_parts: list[str] = []
+    for idx, page_text in enumerate(pages, start=1):
+        prompt = (
+            f"{prompt_prefix}\n\n"
+            f"Статья: {title}\n"
+            f"Номер страницы: {idx}\n\n"
+            f"Сырые данные страницы:\n{page_text[:18000]}"
+        )
+
+        result = qwen_client.send_message(
+            message=prompt,
+            session_id=session_id,
+            thinking_enabled=True,
+            search_enabled=False,
+            auto_continue=True,
+            timeout=240.0,
+        )
+        response_text = (result.get("response") or "").strip()
+        normalized_parts.append(response_text or page_text)
+
+    merged = "\n\n".join(part for part in normalized_parts if part and part.strip()).strip()
+    logger.info("Normalized PDF text for paper {}: pages={}, chars={}", paper_id, len(pages), len(merged))
+    return merged
+
+
+def generate_ai_enrichment_ru(
+    title: str,
+    abstract: str,
+    text: str,
+    session_id: str | None = None,
+) -> AIEnrichmentResult:
     text_for_model = (text or abstract or "").strip()
     if not text_for_model:
         return _fallback_enrichment(
@@ -229,13 +304,6 @@ def generate_ai_enrichment_ru(title: str, abstract: str, text: str) -> AIEnrichm
         )
 
     qwen_client = get_qwen_client()
-    if not qwen_client.is_available():
-        return _fallback_enrichment(
-            title=title,
-            abstract=abstract,
-            text=text,
-            reason="qwen_service_unavailable",
-        )
 
     payload_text = text_for_model[:22000]
     prompt = (
@@ -254,6 +322,7 @@ def generate_ai_enrichment_ru(title: str, abstract: str, text: str) -> AIEnrichm
 
     result = qwen_client.send_message(
         message=prompt,
+        session_id=session_id,
         thinking_enabled=True,
         search_enabled=False,
         auto_continue=True,

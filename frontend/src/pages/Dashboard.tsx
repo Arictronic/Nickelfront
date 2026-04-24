@@ -26,10 +26,12 @@ type ParseJob = {
   celeryStatus?: any;
 };
 
-const LS_KEY = "parseJobs.v1";
+const LS_KEY = "parseJobs.v2";
+const LEGACY_LS_KEYS = ["parseJobs.v1"];
 
 function loadJobs(): ParseJob[] {
   try {
+    for (const key of LEGACY_LS_KEYS) localStorage.removeItem(key);
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return [];
     return JSON.parse(raw) as ParseJob[];
@@ -108,6 +110,24 @@ export default function Dashboard() {
               const isRevoked = celeryStatus.status === "REVOKED";
               const savedCount = celeryStatus.saved_count || celeryStatus.result?.saved_count || 0;
 
+              if (celeryStatus.status === "PENDING") {
+                const current = await getPapersCount(job.source === "all" ? "all" : job.source);
+                const changed = current !== job.lastObservedCount;
+                const lastCountChangeAt = changed ? now : job.lastCountChangeAt;
+                const stableMs = 60_000;
+                const shouldComplete = now - lastCountChangeAt > stableMs && current > job.initialCount;
+
+                const next: ParseJob = {
+                  ...job,
+                  celeryStatus,
+                  lastObservedCount: current,
+                  lastCountChangeAt,
+                  status: shouldComplete ? "completed" : "in_progress",
+                };
+
+                return next;
+              }
+
               const next: ParseJob = {
                 ...job,
                 celeryStatus,
@@ -167,9 +187,14 @@ export default function Dashboard() {
 
   const startParsing = async () => {
     setParsingError(null);
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) {
+      setParsingError("Поле поискового запроса обязательно");
+      return;
+    }
     try {
       const currentCount = await getPapersCount(source);
-      const res = await parsePapers({ query, limit, source });
+      const res = await parsePapers({ query: normalizedQuery, limit, source });
 
       const job: ParseJob = {
         jobId: String(res.task_id),
@@ -194,14 +219,23 @@ export default function Dashboard() {
 
   const startParsingAll = async () => {
     setParsingError(null);
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) {
+      setParsingError("Поле поискового запроса обязательно");
+      return;
+    }
     try {
       const currentCount = await getPapersCount("all");
-      const res = await parseAll({ limitPerQuery: limit, source: "all" });
+      const res = await parseAll({
+        limitPerQuery: limit,
+        source: "all",
+        query: normalizedQuery,
+      });
 
       const job: ParseJob = {
         jobId: String(res.task_id),
         startedAt: Date.now(),
-        query: "ALL_SOURCES",
+        query: normalizedQuery,
         source: "all",
         initialCount: currentCount,
         lastObservedCount: currentCount,
@@ -270,9 +304,6 @@ export default function Dashboard() {
       <div className="page-head">
         <h2>Dashboard</h2>
         <div className="actions">
-          <button className="btn" onClick={() => fetchPage()}>
-            Обновить данные
-          </button>
           <button className="btn btn-primary" onClick={startParsing}>
             Запустить парсинг статей
           </button>
@@ -413,6 +444,7 @@ export default function Dashboard() {
             <tbody>
               {jobs.slice(0, 10).map((j) => {
                 const progress = (() => {
+                  if (j.status === "completed") return 100;
                   if (j.celeryStatus) {
                     const current = j.celeryStatus.current || j.celeryStatus.result?.current || 0;
                     const total = j.celeryStatus.total || j.celeryStatus.result?.total || 0;
@@ -424,6 +456,9 @@ export default function Dashboard() {
                 })();
 
                 const statusText = (() => {
+                  if (j.status === "completed") return "✓ Завершено";
+                  if (j.status === "cancelled") return "Отменено";
+
                   if (j.celeryStatus) {
                     const status = j.celeryStatus.status;
                     if (status === "SUCCESS") return "✓ Завершено";
@@ -433,8 +468,7 @@ export default function Dashboard() {
                     if (status === "STARTED") return j.celeryStatus.result?.status || "В процессе...";
                     if (status === "RETRY") return "Повтор...";
                   }
-                  if (j.status === "cancelled") return "Отменено";
-                  return j.status === "completed" ? "Готово" : "В обработке";
+                  return "В обработке";
                 })();
 
                 const savedCount =

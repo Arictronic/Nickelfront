@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import Pagination from "../components/ui/Pagination";
 import ExportButton from "../components/ui/ExportButton";
 import { useToast } from "../components/ui/Toast";
-import { PAPER_SOURCES } from "../types/paper";
+import { getProcessingStatusLabel, PAPER_SOURCES } from "../types/paper";
 import type { Paper, PaperListFilters, PaperSource } from "../types/paper";
 import { deletePaper, getPapersCount, getPapersList, searchPapers } from "../api/papers";
 
@@ -32,6 +32,8 @@ function saveSelected(ids: number[]) {
 export default function Patents() {
   const pageSize = 10;
   const toast = useToast();
+  const hasFullTextOrPdf = (p: Paper) =>
+    Boolean((p.fullText && p.fullText.trim().length > 0) || p.pdfUrl || p.pdfLocalPath);
 
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<SortState>({ sortKey: "createdAt", sortDir: "desc" });
@@ -93,7 +95,7 @@ export default function Patents() {
         const src = (filters.source ?? "all") as PaperListFilters["source"];
         items = await getPapersList({ limit: clientLimit, offset: 0, source: src });
         if (filters.fullTextOnly) {
-          items = items.filter((p) => Boolean(p.fullText && p.fullText.trim().length > 0));
+          items = items.filter(hasFullTextOrPdf);
         }
       }
 
@@ -188,7 +190,7 @@ export default function Patents() {
           p.journal ?? "",
           (p.authors ?? []).join("; "),
           (p.keywords ?? []).join("; "),
-          p.fullText ? "yes" : "no",
+          hasFullTextOrPdf(p) ? "yes" : "no",
         ];
         return row.map((x) => `"${String(x).replaceAll('"', '""')}"`).join(",");
       }),
@@ -317,8 +319,8 @@ export default function Patents() {
                   <td>{p.source}</td>
                   <td>{p.publicationDate ? p.publicationDate.slice(0, 10) : "—"}</td>
                   <td>{p.doi ?? "—"}</td>
-                  <td>{p.fullText ? "Да" : "Нет"}</td>
-                  <td>{p.processingStatus}</td>
+                  <td>{hasFullTextOrPdf(p) ? "Да" : "Нет"}</td>
+                  <td>{getProcessingStatusLabel(p.processingStatus)}</td>
                   <td>
                     <div className="actions-inline">
                       <Link className="action-link" to={`/papers/${p.id}`}>

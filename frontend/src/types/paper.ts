@@ -3,8 +3,12 @@ export const PAPER_SOURCES = [
   "arXiv",
   "OpenAlex",
   "Crossref",
-  "SemanticScholar",
   "EuropePMC",
+  "CyberLeninka",
+  "eLibrary",
+  "Rospatent",
+  "FreePatent",
+  "PATENTSCOPE",
 ] as const;
 
 export type PaperSource = (typeof PAPER_SOURCES)[number];
@@ -32,6 +36,23 @@ export interface Paper {
   translationRu: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+}
+
+const PROCESSING_STATUS_LABELS: Record<string, string> = {
+  pending: "Ожидает обработки",
+  queued_for_content_processing: "В очереди на обработку",
+  processing_content: "Обрабатывается",
+  analyzing_ru: "Анализ на русском",
+  ready: "Готово",
+  ready_with_fallback: "Готово (резервный режим)",
+  completed: "Готово",
+  failed: "Ошибка обработки",
+};
+
+export function getProcessingStatusLabel(status: string | null | undefined): string {
+  const key = (status ?? "").trim();
+  if (!key) return "Неизвестно";
+  return PROCESSING_STATUS_LABELS[key] ?? key;
 }
 
 export interface PaperSearchFilters {

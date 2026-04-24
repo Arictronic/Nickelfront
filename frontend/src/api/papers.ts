@@ -2,6 +2,13 @@ import { apiClient } from "./client";
 import type { Paper, PaperListFilters, PaperSearchFilters, PaperSource } from "../types/paper";
 import type { VectorSearchFilters, VectorSearchResponse } from "../types/paper";
 
+const HTML_TAG_RE = /<[^>]+>/g;
+function stripHtml(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const cleaned = value.replace(HTML_TAG_RE, " ").replace(/\s+/g, " ").trim();
+  return cleaned || null;
+}
+
 type PaperApiModel = {
   id: number;
   title: string;
@@ -30,14 +37,14 @@ type PaperApiModel = {
 function mapPaper(apiPaper: PaperApiModel): Paper {
   return {
     id: apiPaper.id,
-    title: apiPaper.title,
-    authors: apiPaper.authors ?? [],
+    title: stripHtml(apiPaper.title) ?? "Untitled",
+    authors: (apiPaper.authors ?? []).map((a) => stripHtml(a) ?? "").filter(Boolean),
     publicationDate: apiPaper.publication_date ?? null,
-    journal: apiPaper.journal ?? null,
+    journal: stripHtml(apiPaper.journal),
     doi: apiPaper.doi ?? null,
-    abstract: apiPaper.abstract ?? null,
-    fullText: apiPaper.full_text ?? null,
-    keywords: apiPaper.keywords ?? [],
+    abstract: stripHtml(apiPaper.abstract),
+    fullText: stripHtml(apiPaper.full_text),
+    keywords: (apiPaper.keywords ?? []).map((k) => stripHtml(k) ?? "").filter(Boolean),
     source: apiPaper.source,
     sourceId: apiPaper.source_id ?? null,
     url: apiPaper.url ?? null,
@@ -137,16 +144,18 @@ export async function parsePapers(args: { query: string; limit: number; source: 
   return data;
 }
 
-export async function parseAll(args: { limitPerQuery: number; source: PaperSource | "all" }) {
+export async function parseAll(args: { limitPerQuery: number; source: PaperSource | "all"; query: string }) {
   const { data } = await apiClient.post<{
     message: string;
     task_id: string;
     sources: string[];
     limit_per_query: number;
+    query?: string | null;
   }>(`/papers/parse-all`, undefined, {
     params: {
       limit_per_query: args.limitPerQuery,
       source: args.source,
+      query: args.query.trim(),
     },
   });
 

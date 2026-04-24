@@ -55,6 +55,7 @@ class PaperService:
             source=paper_data.source,
             source_id=paper_data.source_id,
             url=paper_data.url,
+            pdf_url=paper_data.pdf_url,
             processing_status="pending",
         )
 

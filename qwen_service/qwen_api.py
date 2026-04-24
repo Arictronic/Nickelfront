@@ -6,6 +6,7 @@ Fully self-contained implementation for qwen_service
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -182,11 +183,15 @@ class QwenTransport:
         logger: Callable[[str], None] | None = None,
         proxy_config: dict[str, Any] | None = None,
         user_agent: str | None = None,
+        connect_timeout: float = 30.0,
+        stream_read_timeout: float = 300.0,
     ):
         self.token = token.strip()
         self.logger = logger
         self.proxy_config = proxy_config
         self.user_agent = user_agent or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        self.connect_timeout = float(connect_timeout)
+        self.stream_read_timeout = float(stream_read_timeout)
         self.session = requests.Session()
         self.session.headers.update(self._get_headers())
 
@@ -331,7 +336,7 @@ class QwenTransport:
             params={"chat_id": payload.get("chat_id", "")},
             json=payload,
             stream=True,
-            timeout=120,
+            timeout=(self.connect_timeout, self.stream_read_timeout),
         )
         return resp
 
@@ -355,7 +360,7 @@ class QwenTransport:
             params={"chat_id": payload.get("chat_id", session_id)},
             json=payload,
             stream=True,
-            timeout=120,
+            timeout=(self.connect_timeout, self.stream_read_timeout),
         )
         return resp
 
@@ -385,11 +390,16 @@ class QwenAPI:
         self.last_message_id: int | None = None
         self.last_response_meta: dict[str, Any] = {}
 
+        connect_timeout = float(os.getenv("QWEN_CONNECT_TIMEOUT", "30"))
+        stream_read_timeout = float(os.getenv("QWEN_STREAM_READ_TIMEOUT", "300"))
+
         self.transport = QwenTransport(
             token=token,
             logger=logger,
             proxy_config=proxy_config,
             user_agent=user_agent,
+            connect_timeout=connect_timeout,
+            stream_read_timeout=stream_read_timeout,
         )
         self.parser = QwenSseParser()
 

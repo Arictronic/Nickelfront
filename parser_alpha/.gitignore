@@ -1,0 +1,6 @@
+%USERPROFILE%
+session/elibrary/cookie_header.txt
+session/elibrary/cookies.json
+session/elibrary/source.har.path.txt
+session/elibrary/latest.har
+session/elibrary/*.har

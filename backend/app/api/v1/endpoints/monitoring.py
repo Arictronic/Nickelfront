@@ -566,8 +566,8 @@ async def get_scheduled_tasks_info():
         # Получаем конфигурацию из celery_app
         beat_schedule = celery_app.conf.beat_schedule or {}
         descriptions = {
-            "daily-parse-all-sources": "Ежедневный полный парсинг всех источников (CORE, arXiv, OpenAlex, Crossref, SemanticScholar, EuropePMC)",
-            "weekly-parse-all-sources": "Еженедельный полный парсинг всех источников (CORE, arXiv, OpenAlex, Crossref, SemanticScholar, EuropePMC)",
+            "daily-parse-all-sources": "Ежедневный полный парсинг всех источников из parser_alpha",
+            "weekly-parse-all-sources": "Еженедельный полный парсинг всех источников из parser_alpha",
             "hourly-parse-core": "Ежечасный парсинг CORE по базовым запросам",
         }
 

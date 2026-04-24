@@ -18,6 +18,7 @@ Qwen Service - Мини-сервис для работы с Qwen API
 import logging
 import os
 import sys
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,13 @@ try:
 except ImportError:
     from qwen_api import QwenAPI, SendRequest, StreamCallbacks
 
+try:
+    from requests.exceptions import ChunkedEncodingError, ConnectionError as RequestsConnectionError, ReadTimeout
+except Exception:
+    ChunkedEncodingError = Exception  # type: ignore[assignment]
+    RequestsConnectionError = Exception  # type: ignore[assignment]
+    ReadTimeout = Exception  # type: ignore[assignment]
+
 # Настройки из переменных окружения
 DEFAULT_HOST = os.getenv("QWEN_SERVICE_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.getenv("QWEN_SERVICE_PORT", "8767"))
@@ -49,6 +57,9 @@ DEFAULT_THINKING_ENABLED = os.getenv("QWEN_THINKING_ENABLED", "true").lower() in
 DEFAULT_SEARCH_ENABLED = os.getenv("QWEN_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes", "вкл")
 DEFAULT_AUTO_CONTINUE_ENABLED = os.getenv("QWEN_AUTO_CONTINUE_ENABLED", "true").lower() in ("true", "1", "yes", "вкл")
 DEFAULT_MAX_CONTINUES = int(os.getenv("QWEN_MAX_CONTINUES", "5"))
+DEFAULT_STREAM_RETRIES = int(os.getenv("QWEN_STREAM_RETRIES", "2"))
+DEFAULT_HISTORY_RECOVERY_ATTEMPTS = int(os.getenv("QWEN_HISTORY_RECOVERY_ATTEMPTS", "15"))
+DEFAULT_HISTORY_RECOVERY_INTERVAL_SEC = float(os.getenv("QWEN_HISTORY_RECOVERY_INTERVAL_SEC", "2"))
 
 # Конфигурация в памяти
 config = {
@@ -61,6 +72,9 @@ config = {
     "search_enabled": DEFAULT_SEARCH_ENABLED,
     "auto_continue_enabled": DEFAULT_AUTO_CONTINUE_ENABLED,
     "max_continues": DEFAULT_MAX_CONTINUES,
+    "stream_retries": DEFAULT_STREAM_RETRIES,
+    "history_recovery_attempts": DEFAULT_HISTORY_RECOVERY_ATTEMPTS,
+    "history_recovery_interval_sec": DEFAULT_HISTORY_RECOVERY_INTERVAL_SEC,
 }
 
 
@@ -218,10 +232,11 @@ def _track_continuation(session_id: str, message_id: int):
         }
 
     tracker = auto_continue_tracker[session_id]
-    if message_id not in tracker["message_ids"]:
-        tracker["message_ids"].add(message_id)
-        tracker["count"] += 1
-        tracker["last_message_id"] = message_id
+    # Count every continuation attempt, not only unique message IDs.
+    # Otherwise repeated same message_id can bypass max_continues.
+    tracker["count"] += 1
+    tracker["message_ids"].add(message_id)
+    tracker["last_message_id"] = message_id
 
 
 def _reset_continuation_tracker(session_id: str):
@@ -297,6 +312,81 @@ def _should_auto_continue(response_text: str, can_continue_flag: bool) -> bool:
     return False
 
 
+def _extract_latest_assistant_parts(
+    session_id: str,
+    min_message_id: int = 0,
+) -> tuple[str, str, int]:
+    """
+    Read the latest assistant message from chat history.
+    Returns: (thinking, response, message_id). Empty response means not found.
+    """
+    if not qwen_api:
+        return "", "", 0
+
+    _, messages = qwen_api.fetch_history(session_id)
+    if not messages:
+        return "", "", 0
+
+    for msg in reversed(messages):
+        if msg.get("role") != "ASSISTANT":
+            continue
+
+        msg_id = int(msg.get("message_id") or 0)
+        if min_message_id > 0 and msg_id < min_message_id:
+            continue
+
+        think_parts: list[str] = []
+        response_parts: list[str] = []
+        for fragment in msg.get("fragments") or []:
+            if not isinstance(fragment, dict):
+                continue
+            fragment_type = str(fragment.get("type") or "")
+            fragment_content = str(fragment.get("content") or "").strip()
+            if not fragment_content:
+                continue
+            if fragment_type == "THINK":
+                think_parts.append(fragment_content)
+            if fragment_type == "RESPONSE":
+                response_parts.append(fragment_content)
+
+        return "\n\n".join(think_parts), "\n\n".join(response_parts), msg_id
+
+    return "", "", 0
+
+
+def _recover_response_from_history(
+    session_id: str,
+    min_message_id: int = 0,
+) -> tuple[str, str, int]:
+    """
+    Fallback recovery when SSE stream is interrupted.
+    Polls chat history for a saved assistant message.
+    """
+    attempts = max(1, int(config.get("history_recovery_attempts", DEFAULT_HISTORY_RECOVERY_ATTEMPTS)))
+    interval = max(0.5, float(config.get("history_recovery_interval_sec", DEFAULT_HISTORY_RECOVERY_INTERVAL_SEC)))
+
+    for attempt in range(1, attempts + 1):
+        thinking, response, recovered_message_id = _extract_latest_assistant_parts(
+            session_id=session_id,
+            min_message_id=min_message_id,
+        )
+        if response.strip():
+            logging.info(
+                "Recovered response from history: session=%s, len=%s, message_id=%s, attempt=%s/%s",
+                session_id[-6:],
+                len(response),
+                recovered_message_id,
+                attempt,
+                attempts,
+            )
+            return thinking, response, recovered_message_id
+
+        if attempt < attempts:
+            time.sleep(interval)
+
+    return "", "", 0
+
+
 def _send_message_sync(
     session_id: str,
     message: str,
@@ -305,14 +395,7 @@ def _send_message_sync(
     ref_file_ids: list[str] | None = None,
     timeout: int = 120,
 ) -> tuple[str, str, int, bool]:
-    """
-    Синхронная отправка сообщения с возвратом thinking, response, message_id, can_continue.
-
-    Args:
-        timeout: Таймаут в секундах (по умолчанию 120 сек для долгих ответов)
-    """
-    import time
-
+    """Synchronous send with retry/partial-result resilience for unstable SSE streams."""
     qwen_api.session_id = session_id
 
     start_time = time.time()
@@ -330,10 +413,9 @@ def _send_message_sync(
         last_activity = time.time()
         chunks_count += 1
 
-        # Keep-alive логирование каждые 15 секунд
         elapsed = last_activity - start_time
         if int(elapsed) % 15 == 0 and elapsed > 0:
-            logging.info(f"  → Получение ответа... {int(elapsed)} сек, {chunks_count} чанков")
+            logging.info(f"  -> Receiving stream... {int(elapsed)}s, {chunks_count} chunks")
 
     def on_complete_parts(thinking: str, response: str):
         nonlocal thinking_text, response_text, last_activity
@@ -346,11 +428,9 @@ def _send_message_sync(
         message_id = int(meta.get("response_message_id", 0))
         can_continue = bool(meta.get("can_continue", False))
 
-        # Если can_continue не в meta, проверяем last_response_meta
         if not can_continue and qwen_api.last_response_meta:
             can_continue = bool(qwen_api.last_response_meta.get("can_continue", False))
 
-        # Если message_id не в meta, берем из last_message_id
         if message_id <= 0:
             message_id = int(qwen_api.last_message_id or 0)
 
@@ -368,13 +448,69 @@ def _send_message_sync(
         on_complete_parts=on_complete_parts,
     )
 
-    try:
-        qwen_api.send(send_request, callbacks)
-        elapsed = time.time() - start_time
-        logging.info(f"Message received: session={session_id[-6:]}, len={len(response_text)}, time={elapsed:.1f}сек")
-    except Exception as e:
-        logging.error(f"Error during message send: {e}")
-        raise
+    max_retries = max(0, int(config.get("stream_retries", DEFAULT_STREAM_RETRIES)))
+    attempt = 0
+
+    while True:
+        attempt += 1
+        try:
+            qwen_api.send(send_request, callbacks)
+            elapsed = time.time() - start_time
+            logging.info(
+                f"Message received: session={session_id[-6:]}, len={len(response_text)}, time={elapsed:.1f}s, attempt={attempt}"
+            )
+            break
+        except (ChunkedEncodingError, ReadTimeout, RequestsConnectionError) as e:
+            if response_text.strip():
+                logging.warning(
+                    "Stream interrupted after partial response (session=%s, attempt=%s, len=%s): %s",
+                    session_id[-6:],
+                    attempt,
+                    len(response_text),
+                    e,
+                )
+                can_continue = True
+                if message_id <= 0:
+                    message_id = int(qwen_api.last_message_id or 0)
+                break
+
+            if attempt <= max_retries:
+                backoff = min(5.0, 1.0 * attempt)
+                logging.warning(
+                    "Transient stream error, retrying (session=%s, attempt=%s/%s, backoff=%.1fs): %s",
+                    session_id[-6:],
+                    attempt,
+                    max_retries + 1,
+                    backoff,
+                    e,
+                )
+                time.sleep(backoff)
+                continue
+
+            recovered_thinking, recovered_response, recovered_message_id = _recover_response_from_history(
+                session_id=session_id,
+                min_message_id=max(0, message_id),
+            )
+            if recovered_response.strip():
+                thinking_text = recovered_thinking or thinking_text
+                response_text = recovered_response
+                if recovered_message_id > 0:
+                    message_id = recovered_message_id
+                    qwen_api.last_message_id = recovered_message_id
+                can_continue = False
+                logging.warning(
+                    "Recovered after stream failure: session=%s, attempt=%s, recovered_len=%s",
+                    session_id[-6:],
+                    attempt,
+                    len(response_text),
+                )
+                break
+
+            logging.error(f"Error during message send: {e}")
+            raise
+        except Exception as e:
+            logging.error(f"Error during message send: {e}")
+            raise
 
     return thinking_text, response_text, message_id, can_continue
 
@@ -385,14 +521,7 @@ def _continue_message_sync(
     thinking_enabled: bool,
     timeout: int = 120,
 ) -> tuple[str, str, int, bool]:
-    """
-    Синхронное продолжение ответа.
-
-    Args:
-        timeout: Таймаут в секундах (по умолчанию 120 сек)
-    """
-    import time
-
+    """Synchronous continue with retry/partial-result resilience."""
     qwen_api.session_id = session_id
     qwen_api.last_message_id = message_id
 
@@ -411,10 +540,9 @@ def _continue_message_sync(
         last_activity = time.time()
         chunks_count += 1
 
-        # Keep-alive логирование каждые 15 секунд
         elapsed = last_activity - start_time
         if int(elapsed) % 15 == 0 and elapsed > 0:
-            logging.info(f"  → Продолжение... {int(elapsed)} сек, {chunks_count} чанков")
+            logging.info(f"  -> Continuing stream... {int(elapsed)}s, {chunks_count} chunks")
 
     def on_meta(meta: dict[str, Any]):
         nonlocal new_message_id, can_continue
@@ -427,17 +555,75 @@ def _continue_message_sync(
         if new_message_id <= 0:
             new_message_id = int(qwen_api.last_message_id or 0)
 
-    try:
-        qwen_api.continue_message(
-            message_id=message_id,
-            on_complete_parts=on_complete_parts,
-            on_meta=on_meta,
-        )
-        elapsed = time.time() - start_time
-        logging.info(f"Continue received: session={session_id[-6:]}, len={len(response_text)}, time={elapsed:.1f}сек")
-    except Exception as e:
-        logging.error(f"Error during continue: {e}")
-        raise
+    max_retries = max(0, int(config.get("stream_retries", DEFAULT_STREAM_RETRIES)))
+    attempt = 0
+
+    while True:
+        attempt += 1
+        try:
+            qwen_api.continue_message(
+                message_id=message_id,
+                on_complete_parts=on_complete_parts,
+                on_meta=on_meta,
+            )
+            elapsed = time.time() - start_time
+            logging.info(
+                f"Continue received: session={session_id[-6:]}, len={len(response_text)}, time={elapsed:.1f}s, attempt={attempt}"
+            )
+            break
+        except (ChunkedEncodingError, ReadTimeout, RequestsConnectionError) as e:
+            if response_text.strip():
+                logging.warning(
+                    "Continue stream interrupted after partial response (session=%s, attempt=%s, len=%s): %s",
+                    session_id[-6:],
+                    attempt,
+                    len(response_text),
+                    e,
+                )
+                can_continue = True
+                if new_message_id <= 0:
+                    new_message_id = int(qwen_api.last_message_id or message_id or 0)
+                break
+
+            if attempt <= max_retries:
+                backoff = min(5.0, 1.0 * attempt)
+                logging.warning(
+                    "Transient continue error, retrying (session=%s, attempt=%s/%s, backoff=%.1fs): %s",
+                    session_id[-6:],
+                    attempt,
+                    max_retries + 1,
+                    backoff,
+                    e,
+                )
+                time.sleep(backoff)
+                continue
+
+            recovered_thinking, recovered_response, recovered_message_id = _recover_response_from_history(
+                session_id=session_id,
+                min_message_id=max(0, message_id),
+            )
+            if recovered_response.strip():
+                thinking_text = recovered_thinking or thinking_text
+                response_text = recovered_response
+                if recovered_message_id > 0:
+                    new_message_id = recovered_message_id
+                    qwen_api.last_message_id = recovered_message_id
+                else:
+                    new_message_id = int(qwen_api.last_message_id or message_id or 0)
+                can_continue = False
+                logging.warning(
+                    "Recovered continue from history after stream failure: session=%s, attempt=%s, recovered_len=%s",
+                    session_id[-6:],
+                    attempt,
+                    len(response_text),
+                )
+                break
+
+            logging.error(f"Error during continue: {e}")
+            raise
+        except Exception as e:
+            logging.error(f"Error during continue: {e}")
+            raise
 
     return thinking_text, response_text, new_message_id, can_continue
 
@@ -457,6 +643,9 @@ async def get_config():
         "search_enabled": config.get("search_enabled", DEFAULT_SEARCH_ENABLED),
         "auto_continue_enabled": config.get("auto_continue_enabled", DEFAULT_AUTO_CONTINUE_ENABLED),
         "max_continues": config.get("max_continues", DEFAULT_MAX_CONTINUES),
+        "stream_retries": config.get("stream_retries", DEFAULT_STREAM_RETRIES),
+        "history_recovery_attempts": config.get("history_recovery_attempts", DEFAULT_HISTORY_RECOVERY_ATTEMPTS),
+        "history_recovery_interval_sec": config.get("history_recovery_interval_sec", DEFAULT_HISTORY_RECOVERY_INTERVAL_SEC),
         "has_token": bool(config.get("token")),
         "has_api_key": bool(config.get("api_key")),
     }
@@ -688,6 +877,25 @@ async def send_message(
 
         logging.info(f"Message sent: session={request.session_id[-6:]}, message_id={message_id}, can_continue={can_continue}")
 
+        if not response_text.strip() and message_id > 0:
+            logging.warning(
+                "Initial response is empty, forcing one continue attempt: session=%s, message_id=%s",
+                request.session_id[-6:],
+                message_id,
+            )
+            forced_thinking, forced_response, forced_message_id, forced_can_continue = _continue_message_sync(
+                session_id=request.session_id,
+                message_id=message_id,
+                thinking_enabled=request.thinking_enabled,
+            )
+            if forced_thinking:
+                thinking_text = forced_thinking
+            if forced_response:
+                response_text = forced_response
+            if forced_message_id > 0:
+                message_id = forced_message_id
+            can_continue = forced_can_continue
+
         # Авто-продолнение с использованием автоматического определения
         continue_count = 0
         all_thinking_parts = [thinking_text] if thinking_text else []
@@ -716,6 +924,17 @@ async def send_message(
                 all_thinking_parts.append(cont_thinking)
             if cont_response:
                 all_response_parts.append(cont_response)
+
+            # Stop infinite loop: no content and no message id progress.
+            if not (cont_response or "").strip() and new_message_id == last_message_id:
+                logging.warning(
+                    "Auto-continue stopped due to no progress: session=%s, message_id=%s, continue_count=%s",
+                    request.session_id[-6:],
+                    last_message_id,
+                    continue_count,
+                )
+                can_continue = False
+                break
 
             last_message_id = new_message_id
             last_response_text = cont_response or last_response_text
@@ -818,6 +1037,17 @@ async def continue_message(
                 all_thinking_parts.append(cont_thinking)
             if cont_response:
                 all_response_parts.append(cont_response)
+
+            # Stop infinite loop: no content and no message id progress.
+            if not (cont_response or "").strip() and new_message_id == last_message_id:
+                logging.warning(
+                    "Auto-continue stopped due to no progress: session=%s, message_id=%s, continue_count=%s",
+                    request.session_id[-6:],
+                    last_message_id,
+                    continue_count,
+                )
+                can_continue = False
+                break
 
             last_message_id = new_message_id
             last_response_text = cont_response or last_response_text
