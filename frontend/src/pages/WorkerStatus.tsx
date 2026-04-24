@@ -15,11 +15,27 @@ type ParseJob = {
   lastPolledAt?: number;
 };
 
-const LS_KEY = "parseJobs.v2";
-const LEGACY_LS_KEYS = ["parseJobs.v1"];
+const LS_KEY = "parseJobs.v4";
+const LEGACY_LS_KEYS = ["parseJobs.v3", "parseJobs.v2", "parseJobs.v1"];
+const LS_RESET_MARK = "parseJobs.reset.v1";
+
+function clearAllParseJobKeys() {
+  const toDelete: string[] = [];
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith("parseJobs.")) {
+      toDelete.push(key);
+    }
+  }
+  toDelete.forEach((key) => localStorage.removeItem(key));
+}
 
 function loadJobs(): ParseJob[] {
   try {
+    if (!localStorage.getItem(LS_RESET_MARK)) {
+      clearAllParseJobKeys();
+      localStorage.setItem(LS_RESET_MARK, "1");
+    }
     for (const key of LEGACY_LS_KEYS) localStorage.removeItem(key);
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return [];

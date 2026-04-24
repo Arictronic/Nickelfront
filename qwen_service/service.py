@@ -38,9 +38,25 @@ if env_path.exists():
 
 # Автономный Qwen API клиент (без внешних зависимостей)
 try:
-    from .qwen_api import QwenAPI, SendRequest, StreamCallbacks
+    from .qwen_api import (
+        QwenAPI,
+        QwenChatInProgressError,
+        QwenInternalStreamError,
+        QwenProviderError,
+        QwenRequestEndedError,
+        SendRequest,
+        StreamCallbacks,
+    )
 except ImportError:
-    from qwen_api import QwenAPI, SendRequest, StreamCallbacks
+    from qwen_api import (
+        QwenAPI,
+        QwenChatInProgressError,
+        QwenInternalStreamError,
+        QwenProviderError,
+        QwenRequestEndedError,
+        SendRequest,
+        StreamCallbacks,
+    )
 
 try:
     from requests.exceptions import ChunkedEncodingError, ConnectionError as RequestsConnectionError, ReadTimeout
@@ -52,7 +68,7 @@ except Exception:
 # Настройки из переменных окружения
 DEFAULT_HOST = os.getenv("QWEN_SERVICE_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.getenv("QWEN_SERVICE_PORT", "8767"))
-DEFAULT_MODEL = os.getenv("QWEN_MODEL", "qwen-coder")
+DEFAULT_MODEL = os.getenv("QWEN_MODEL", "qwen3.6-plus")
 DEFAULT_THINKING_ENABLED = os.getenv("QWEN_THINKING_ENABLED", "true").lower() in ("true", "1", "yes", "вкл")
 DEFAULT_SEARCH_ENABLED = os.getenv("QWEN_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes", "вкл")
 DEFAULT_AUTO_CONTINUE_ENABLED = os.getenv("QWEN_AUTO_CONTINUE_ENABLED", "true").lower() in ("true", "1", "yes", "вкл")
@@ -135,10 +151,14 @@ qwen_token = config.get("token", "")
 qwen_api: QwenAPI | None = None
 
 if qwen_token:
-    qwen_api = QwenAPI(token=qwen_token, logger=lambda msg: logging.info(msg))
-    logging.info(f"Qwen API инициализирован с токеном: {qwen_token[:20]}...")
+    qwen_api = QwenAPI(
+        token=qwen_token,
+        logger=lambda msg: logging.info(msg),
+        default_model=str(config.get("model", DEFAULT_MODEL)),
+    )
+    logging.info(f"Qwen API ??????????????? ? ???????: {qwen_token[:20]}...")
 else:
-    logging.warning("Qwen токен не найден в .env!")
+    logging.warning("Qwen ????? ?? ?????? ? .env!")
 
 # Хранилище сессий в памяти
 active_sessions: dict[str, dict[str, Any]] = {}
@@ -177,6 +197,10 @@ def verify_token(credentials: HTTPAuthorizationCredentials | None = Security(sec
 class ChatSession(BaseModel):
     session_id: str
     title: str = "Новый чат"
+
+
+class CreateSessionRequest(BaseModel):
+    title: str | None = None
 
 
 class SendMessageRequest(BaseModel):
@@ -250,66 +274,11 @@ def _reset_continuation_tracker(session_id: str):
 
 def _should_auto_continue(response_text: str, can_continue_flag: bool) -> bool:
     """
-    Автоматическое определение необходимости продолжения ответа.
-
-    Признаки того, что ответ не завершён:
-    1. can_continue_flag = True (явный флаг от API)
-    2. Ответ обрывается на середине предложения
-    3. Ответ заканчивается на многоточие без завершения
-    4. Есть незакрытые скобки/кавычки
-    5. Ответ заканчивается на маркер списка без содержания
+    Continue strictly by provider signal.
+    This avoids false-positive continuation loops that trigger
+    "The chat is in progress!" for already-finished responses.
     """
-    # Явный флаг от API
-    if can_continue_flag:
-        return True
-
-    if not response_text:
-        return False
-
-    text = response_text.strip()
-    if len(text) < 50:  # Слишком короткий ответ
-        return False
-
-    # Проверка на обрыв предложения
-    incomplete_endings = [
-        '...', '—', '–', '-',  # Многоточие, тире
-        ' и ', ' или ', ' а ',  # Союзы в конце
-        'также', 'кроме того', 'далее',  # Вводные слова
-        'например', 'в частности',  # Примеры
-        'следующ', 'этот', 'эти ',  # Указательные местоимения
-        '1.', '2.', '3.', '4.', '5.',  # Номера списков
-        '•', '-', '*',  # Маркеры списков
-        '```',  # Незакрытый блок кода
-    ]
-
-    text_lower = text.lower()
-    for ending in incomplete_endings:
-        if text_lower.endswith(ending):
-            return True
-
-    # Проверка на незакрытые скобки
-    open_parens = text.count('(') - text.count(')')
-    open_brackets = text.count('[') - text.count(']')
-    open_braces = text.count('{') - text.count('}')
-    if open_parens > 0 or open_brackets > 0 or open_braces > 0:
-        return True
-
-    # Проверка на незакрытые кавычки
-    single_quotes = text.count("'") % 2
-    double_quotes = text.count('"') % 2
-    if single_quotes > 0 or double_quotes > 0:
-        return True
-
-    # Проверка на незакрытые блоки кода
-    code_block_count = text.count("```")
-    if code_block_count % 2 != 0:
-        return True
-
-    # Ответ выглядит завершённым (есть точка в конце)
-    if text.endswith('.') or text.endswith('!') or text.endswith('?') or text.endswith('。」'):
-        return False
-
-    return False
+    return bool(can_continue_flag)
 
 
 def _extract_latest_assistant_parts(
@@ -352,6 +321,46 @@ def _extract_latest_assistant_parts(
         return "\n\n".join(think_parts), "\n\n".join(response_parts), msg_id
 
     return "", "", 0
+
+
+def _pick_fallback_model(current_model: str) -> str | None:
+    """
+    Pick next model when provider returns `Model not found`.
+    Priority:
+    1) models from provider /models response
+    2) static safe fallback list
+    """
+    normalized_current = (current_model or "").strip().lower()
+
+    provider_candidates: list[str] = []
+    if qwen_api:
+        try:
+            for m in qwen_api.fetch_models() or []:
+                if not isinstance(m, dict):
+                    continue
+                mid = str(m.get("id") or m.get("name") or "").strip()
+                if mid:
+                    provider_candidates.append(mid)
+        except Exception:
+            provider_candidates = []
+
+    static_candidates = ["qwen3.6-plus", "qwen3.5-plus", "qwen-plus", "qwen-max"]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for candidate in provider_candidates + static_candidates:
+        c = (candidate or "").strip()
+        if not c:
+            continue
+        low = c.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        ordered.append(c)
+
+    for candidate in ordered:
+        if candidate.lower() != normalized_current:
+            return candidate
+    return None
 
 
 def _recover_response_from_history(
@@ -508,6 +517,81 @@ def _send_message_sync(
 
             logging.error(f"Error during message send: {e}")
             raise
+        except (QwenRequestEndedError, QwenChatInProgressError, QwenInternalStreamError, QwenProviderError) as e:
+            err_text = str(e).lower()
+
+            if "model not found" in err_text:
+                current_model = str(config.get("model", DEFAULT_MODEL))
+                fallback_model = _pick_fallback_model(current_model=current_model)
+                if fallback_model and fallback_model != current_model:
+                    config["model"] = fallback_model
+                    save_config(config)
+                    if qwen_api:
+                        qwen_api.set_model(fallback_model)
+                    logging.warning(
+                        "Model '%s' is unavailable; switched to '%s' and retrying send (session=%s)",
+                        current_model,
+                        fallback_model,
+                        session_id[-6:],
+                    )
+                    time.sleep(0.5)
+                    continue
+
+            recovered_thinking, recovered_response, recovered_message_id = _recover_response_from_history(
+                session_id=session_id,
+                min_message_id=max(0, message_id),
+            )
+            if recovered_response.strip():
+                thinking_text = recovered_thinking or thinking_text
+                response_text = recovered_response
+                if recovered_message_id > 0:
+                    message_id = recovered_message_id
+                    qwen_api.last_message_id = recovered_message_id
+                can_continue = False
+                logging.warning(
+                    "Recovered after provider send error from history: session=%s, attempt=%s, recovered_len=%s",
+                    session_id[-6:],
+                    attempt,
+                    len(response_text),
+                )
+                break
+
+            if isinstance(e, QwenChatInProgressError):
+                if attempt <= (max_retries + 2):
+                    backoff = min(8.0, 1.5 * attempt)
+                    logging.warning(
+                        "Chat still in progress during send; waiting and retrying (session=%s, attempt=%s/%s, backoff=%.1fs)",
+                        session_id[-6:],
+                        attempt,
+                        max_retries + 3,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                    continue
+
+                logging.warning(
+                    "Stopping send due to in-progress state without recovery (session=%s, attempt=%s)",
+                    session_id[-6:],
+                    attempt,
+                )
+                can_continue = False
+                break
+
+            if attempt <= max_retries:
+                backoff = min(5.0, 1.0 * attempt)
+                logging.warning(
+                    "Provider stream error, retrying send (session=%s, attempt=%s/%s, backoff=%.1fs): %s",
+                    session_id[-6:],
+                    attempt,
+                    max_retries + 1,
+                    backoff,
+                    e,
+                )
+                time.sleep(backoff)
+                continue
+
+            logging.error(f"Provider error during message send: {e}")
+            raise
         except Exception as e:
             logging.error(f"Error during message send: {e}")
             raise
@@ -621,6 +705,51 @@ def _continue_message_sync(
 
             logging.error(f"Error during continue: {e}")
             raise
+        except (QwenRequestEndedError, QwenChatInProgressError, QwenInternalStreamError, QwenProviderError) as e:
+            recovered_thinking, recovered_response, recovered_message_id = _recover_response_from_history(
+                session_id=session_id,
+                min_message_id=max(0, message_id),
+            )
+            if recovered_response.strip():
+                thinking_text = recovered_thinking or thinking_text
+                response_text = recovered_response
+                if recovered_message_id > 0:
+                    new_message_id = recovered_message_id
+                    qwen_api.last_message_id = recovered_message_id
+                else:
+                    new_message_id = int(qwen_api.last_message_id or message_id or 0)
+                can_continue = False
+                logging.warning(
+                    "Recovered continue after provider error from history: session=%s, attempt=%s, recovered_len=%s",
+                    session_id[-6:],
+                    attempt,
+                    len(response_text),
+                )
+                break
+
+            if isinstance(e, QwenChatInProgressError) and attempt <= max_retries:
+                backoff = min(5.0, 1.0 * attempt)
+                logging.warning(
+                    "Chat still in progress, retrying continue (session=%s, attempt=%s/%s, backoff=%.1fs): %s",
+                    session_id[-6:],
+                    attempt,
+                    max_retries + 1,
+                    backoff,
+                    e,
+                )
+                time.sleep(backoff)
+                continue
+
+            logging.warning(
+                "Stopping continue due to provider terminal state (session=%s, attempt=%s): %s",
+                session_id[-6:],
+                attempt,
+                e,
+            )
+            can_continue = False
+            if new_message_id <= 0:
+                new_message_id = int(qwen_api.last_message_id or message_id or 0)
+            break
         except Exception as e:
             logging.error(f"Error during continue: {e}")
             raise
@@ -678,7 +807,11 @@ async def set_token(token_config: TokenConfig):
 
     # Переинициализация API
     global qwen_api
-    qwen_api = QwenAPI(token=token_config.token, logger=lambda msg: logging.info(msg))
+    qwen_api = QwenAPI(
+        token=token_config.token,
+        logger=lambda msg: logging.info(msg),
+        default_model=str(config.get("model", DEFAULT_MODEL)),
+    )
 
     return {"status": "ok", "message": "Токен установлен"}
 
@@ -733,6 +866,7 @@ async def list_models(credentials: HTTPAuthorizationCredentials | None = Securit
 
 @app.post("/sessions")
 async def create_session(
+    request: CreateSessionRequest | None = None,
     credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
     """Создание новой сессии чата"""
@@ -749,13 +883,20 @@ async def create_session(
             logging.error("create_session returned None")
             raise HTTPException(status_code=500, detail="Не удалось создать сессию")
 
+        title = (request.title.strip() if request and request.title else "") or "Новый чат"
+        if request and request.title:
+            try:
+                qwen_api.update_session_title(session_id, title)
+            except Exception as rename_exc:
+                logging.warning("Failed to set session title for %s: %s", session_id, rename_exc)
+
         active_sessions[session_id] = {
             "session_id": session_id,
-            "title": "Новый чат",
+            "title": title,
             "created_at": str(Path(__file__).stat().st_mtime),
         }
 
-        return {"session_id": session_id, "title": "Новый чат"}
+        return {"session_id": session_id, "title": title}
     except HTTPException:
         raise
     except Exception as e:
@@ -902,6 +1043,7 @@ async def send_message(
         all_response_parts = [response_text] if response_text else []
         last_message_id = message_id
         last_response_text = response_text
+        no_progress_streak = 0
 
         # Определяем необходимость продолжения автоматически
         need_continue = auto_continue and _should_auto_continue(last_response_text, can_continue)
@@ -927,14 +1069,18 @@ async def send_message(
 
             # Stop infinite loop: no content and no message id progress.
             if not (cont_response or "").strip() and new_message_id == last_message_id:
+                no_progress_streak += 1
                 logging.warning(
                     "Auto-continue stopped due to no progress: session=%s, message_id=%s, continue_count=%s",
                     request.session_id[-6:],
                     last_message_id,
                     continue_count,
                 )
-                can_continue = False
-                break
+                if no_progress_streak >= 1:
+                    can_continue = False
+                    break
+            else:
+                no_progress_streak = 0
 
             last_message_id = new_message_id
             last_response_text = cont_response or last_response_text
@@ -998,6 +1144,7 @@ async def continue_message(
         continue_count = 0
         can_continue = True
         last_response_text = ""
+        no_progress_streak = 0
 
         # Первое продолжение
         cont_thinking, cont_response, new_message_id, new_can_continue = _continue_message_sync(
@@ -1040,14 +1187,18 @@ async def continue_message(
 
             # Stop infinite loop: no content and no message id progress.
             if not (cont_response or "").strip() and new_message_id == last_message_id:
+                no_progress_streak += 1
                 logging.warning(
                     "Auto-continue stopped due to no progress: session=%s, message_id=%s, continue_count=%s",
                     request.session_id[-6:],
                     last_message_id,
                     continue_count,
                 )
-                can_continue = False
-                break
+                if no_progress_streak >= 1:
+                    can_continue = False
+                    break
+            else:
+                no_progress_streak = 0
 
             last_message_id = new_message_id
             last_response_text = cont_response or last_response_text

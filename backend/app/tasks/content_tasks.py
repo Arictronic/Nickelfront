@@ -105,12 +105,22 @@ async def _process_paper_content_async(self, paper_id: int) -> dict[str, Any]:
 
             if pdf_bytes and content_text:
                 await _set_stage(paper_service, paper_id, "formatting_markdown", task_id=task_id)
+                loop = asyncio.get_running_loop()
+
+                def _on_page_markdown(_page_idx: int, current_markdown: str) -> None:
+                    future = asyncio.run_coroutine_threadsafe(
+                        paper_service.update_paper(paper_id, full_text=current_markdown),
+                        loop,
+                    )
+                    future.result(timeout=30)
+
                 markdown_text = await asyncio.to_thread(
                     normalize_pdf_text_markdown,
                     paper_id,
                     paper.title,
                     content_text,
                     session_id,
+                    _on_page_markdown,
                 )
                 if markdown_text:
                     await paper_service.update_paper(paper_id, full_text=markdown_text)

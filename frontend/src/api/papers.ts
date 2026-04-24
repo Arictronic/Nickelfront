@@ -43,7 +43,8 @@ function mapPaper(apiPaper: PaperApiModel): Paper {
     journal: stripHtml(apiPaper.journal),
     doi: apiPaper.doi ?? null,
     abstract: stripHtml(apiPaper.abstract),
-    fullText: stripHtml(apiPaper.full_text),
+    // Keep raw markdown/latex content for detailed paper view rendering.
+    fullText: apiPaper.full_text ?? null,
     keywords: (apiPaper.keywords ?? []).map((k) => stripHtml(k) ?? "").filter(Boolean),
     source: apiPaper.source,
     sourceId: apiPaper.source_id ?? null,

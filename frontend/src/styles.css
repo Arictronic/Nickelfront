@@ -253,6 +253,27 @@ select {
   color: var(--muted);
   font-size: 13px;
 }
+
+.markdown-body {
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.markdown-body p {
+  margin: 0 0 10px;
+}
+
+.markdown-body pre {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  overflow: auto;
+}
+
+.markdown-body code {
+  font-family: Consolas, "Courier New", monospace;
+}
 .user-chip {
   border: 1px solid var(--border);
   border-radius: 999px;

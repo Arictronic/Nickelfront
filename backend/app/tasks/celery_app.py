@@ -2,7 +2,6 @@ import sys
 from pathlib import Path
 
 from celery import Celery
-from celery.schedules import crontab
 from celery.signals import task_postrun, task_prerun
 from loguru import logger
 
@@ -48,34 +47,7 @@ celery_app.conf.update(
 
     # Celery Beat periodic tasks
     beat_schedule_filename=settings.resolve_path(settings.CELERY_BEAT_SCHEDULE_FILENAME),
-    beat_schedule={
-        # Daily all-sources parse (00:00)
-        "daily-parse-all-sources": {
-            "task": "app.tasks.parse_tasks.parse_all_sources_task",
-            "schedule": crontab(hour=0, minute=0),
-            "kwargs": {
-                "limit_per_query": settings.PARSE_LIMIT_PER_RUN,
-            },
-        },
-        # Weekly full parse (Sunday 00:00)
-        "weekly-parse-all-sources": {
-            "task": "app.tasks.parse_tasks.parse_all_sources_task",
-            "schedule": crontab(hour=0, minute=0, day_of_week=0),
-            "kwargs": {
-                "limit_per_query": settings.PARSE_LIMIT_PER_RUN * 2,
-            },
-        },
-        # Hourly CORE parse
-        "hourly-parse-core": {
-            "task": "app.tasks.parse_tasks.parse_multiple_queries_task",
-            "schedule": crontab(minute=0),
-            "kwargs": {
-                "queries": settings.get_parse_queries(),
-                "limit_per_query": settings.PARSE_LIMIT_PER_RUN // 2,
-                "source": "CORE",
-            },
-        },
-    },
+    beat_schedule={},
 )
 
 

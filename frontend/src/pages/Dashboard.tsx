@@ -26,11 +26,27 @@ type ParseJob = {
   celeryStatus?: any;
 };
 
-const LS_KEY = "parseJobs.v2";
-const LEGACY_LS_KEYS = ["parseJobs.v1"];
+const LS_KEY = "parseJobs.v4";
+const LEGACY_LS_KEYS = ["parseJobs.v3", "parseJobs.v2", "parseJobs.v1"];
+const LS_RESET_MARK = "parseJobs.reset.v1";
+
+function clearAllParseJobKeys() {
+  const toDelete: string[] = [];
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith("parseJobs.")) {
+      toDelete.push(key);
+    }
+  }
+  toDelete.forEach((key) => localStorage.removeItem(key));
+}
 
 function loadJobs(): ParseJob[] {
   try {
+    if (!localStorage.getItem(LS_RESET_MARK)) {
+      clearAllParseJobKeys();
+      localStorage.setItem(LS_RESET_MARK, "1");
+    }
     for (const key of LEGACY_LS_KEYS) localStorage.removeItem(key);
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return [];
@@ -47,10 +63,11 @@ function saveJobs(jobs: ParseJob[]) {
 export default function Dashboard() {
   const [totalPapers, setTotalPapers] = useState(0);
   const [latest, setLatest] = useState<Paper[]>([]);
+  const [sourceCounts, setSourceCounts] = useState<Record<string, number>>({});
   const [jobs, setJobs] = useState<ParseJob[]>(() => loadJobs());
 
   const [query, setQuery] = useState("nickel-based superalloys");
-  const [source, setSource] = useState<PaperSource>("arXiv");
+  const [source, setSource] = useState<PaperSource | "all">("arXiv");
   const [limit, setLimit] = useState(25);
   const [parsingError, setParsingError] = useState<string | null>(null);
 
@@ -76,10 +93,14 @@ export default function Dashboard() {
   );
 
   const fetchPage = async () => {
-    const count = await getPapersCount("all");
+    const [count, latestPapers, sourceEntries] = await Promise.all([
+      getPapersCount("all"),
+      getPapersList({ limit: 300, offset: 0, source: "all" }),
+      Promise.all(PAPER_SOURCES.map(async (src) => [src, await getPapersCount(src)] as const)),
+    ]);
     setTotalPapers(count);
-    const latestPapers = await getPapersList({ limit: 5, offset: 0, source: "all" });
     setLatest(latestPapers);
+    setSourceCounts(Object.fromEntries(sourceEntries));
   };
 
   useEffect(() => {
@@ -169,21 +190,22 @@ export default function Dashboard() {
   }, []);
 
   const lineData = useMemo(() => {
-    return latest
-      .map((p) => ({ date: (p.publicationDate ?? "").slice(0, 10), count: 1 }))
-      .filter((x) => x.date)
-      .slice(0, 10);
+    const byDate = latest.reduce<Record<string, number>>((acc, p) => {
+      const parsedDate = (p.createdAt ?? p.updatedAt ?? p.publicationDate ?? "").slice(0, 10);
+      if (!parsedDate) return acc;
+      acc[parsedDate] = (acc[parsedDate] ?? 0) + 1;
+      return acc;
+    }, {});
+    return Object.entries(byDate)
+      .map(([date, count]) => ({ date, count }))
+      .sort((a, b) => a.date.localeCompare(b.date));
   }, [latest]);
 
   const pieData = useMemo(() => {
-    const bySource = latest.reduce<Record<string, number>>((acc, p) => {
-      const key = p.source;
-      acc[key] = (acc[key] ?? 0) + 1;
-      return acc;
-    }, {});
-
-    return Object.entries(bySource).map(([name, value]) => ({ name, value }));
-  }, [latest]);
+    return Object.entries(sourceCounts)
+      .map(([name, value]) => ({ name, value }))
+      .filter((item) => item.value > 0);
+  }, [sourceCounts]);
 
   const startParsing = async () => {
     setParsingError(null);
@@ -194,54 +216,36 @@ export default function Dashboard() {
     }
     try {
       const currentCount = await getPapersCount(source);
-      const res = await parsePapers({ query: normalizedQuery, limit, source });
-
-      const job: ParseJob = {
-        jobId: String(res.task_id),
-        startedAt: Date.now(),
-        query: res.query,
-        source: res.source as PaperSource,
-        initialCount: currentCount,
-        lastObservedCount: currentCount,
-        lastCountChangeAt: Date.now(),
-        status: "in_progress",
-      };
-
-      setJobs((prev: ParseJob[]): ParseJob[] => {
-        const nextJobs: ParseJob[] = [job, ...prev].slice(0, 30);
-        saveJobs(nextJobs);
-        return nextJobs;
-      });
-    } catch (e) {
-      setParsingError((e as Error).message);
-    }
-  };
-
-  const startParsingAll = async () => {
-    setParsingError(null);
-    const normalizedQuery = query.trim();
-    if (!normalizedQuery) {
-      setParsingError("Поле поискового запроса обязательно");
-      return;
-    }
-    try {
-      const currentCount = await getPapersCount("all");
-      const res = await parseAll({
-        limitPerQuery: limit,
-        source: "all",
-        query: normalizedQuery,
-      });
-
-      const job: ParseJob = {
-        jobId: String(res.task_id),
-        startedAt: Date.now(),
-        query: normalizedQuery,
-        source: "all",
-        initialCount: currentCount,
-        lastObservedCount: currentCount,
-        lastCountChangeAt: Date.now(),
-        status: "in_progress",
-      };
+      let job: ParseJob;
+      if (source === "all") {
+        const res = await parseAll({
+          limitPerQuery: limit,
+          source: "all",
+          query: normalizedQuery,
+        });
+        job = {
+          jobId: String(res.task_id),
+          startedAt: Date.now(),
+          query: normalizedQuery,
+          source: "all",
+          initialCount: currentCount,
+          lastObservedCount: currentCount,
+          lastCountChangeAt: Date.now(),
+          status: "in_progress",
+        };
+      } else {
+        const res = await parsePapers({ query: normalizedQuery, limit, source });
+        job = {
+          jobId: String(res.task_id),
+          startedAt: Date.now(),
+          query: res.query,
+          source: res.source as PaperSource,
+          initialCount: currentCount,
+          lastObservedCount: currentCount,
+          lastCountChangeAt: Date.now(),
+          status: "in_progress",
+        };
+      }
 
       setJobs((prev: ParseJob[]): ParseJob[] => {
         const nextJobs: ParseJob[] = [job, ...prev].slice(0, 30);
@@ -307,9 +311,6 @@ export default function Dashboard() {
           <button className="btn btn-primary" onClick={startParsing}>
             Запустить парсинг статей
           </button>
-          <button className="btn" onClick={startParsingAll}>
-            Парсинг по всем шаблонам
-          </button>
         </div>
       </div>
 
@@ -317,7 +318,8 @@ export default function Dashboard() {
         <h3>Параметры парсинга</h3>
         <div className="filters">
           <input className="input" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Поисковый запрос" />
-          <select value={source} onChange={(e) => setSource(e.target.value as PaperSource)}>
+          <select value={source} onChange={(e) => setSource(e.target.value as PaperSource | "all")}>
+            <option value="all">Все шаблоны</option>
             {PAPER_SOURCES.map((src) => (
               <option key={src} value={src}>
                 {src}
@@ -333,7 +335,6 @@ export default function Dashboard() {
             onChange={(e) => setLimit(Number(e.target.value))}
             style={{ width: 120 }}
           />
-          <span className="muted">Статус берется из Celery API, при недоступности — по росту числа статей.</span>
         </div>
         {parsingError && <p className="error">{parsingError}</p>}
       </div>
@@ -425,7 +426,7 @@ export default function Dashboard() {
       </div>
 
       <div className="panel">
-        <h3>Ваши парсинг-задачи (статус)</h3>
+        <h3>Текущие парсинг-задачи</h3>
         {jobs.length === 0 ? (
           <p className="muted">Задачи появятся после запуска парсинга.</p>
         ) : (
@@ -525,7 +526,6 @@ export default function Dashboard() {
             </tbody>
           </table>
         )}
-        <p className="muted">Статус отображается через Celery API.</p>
       </div>
     </div>
   );

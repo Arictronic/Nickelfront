@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import ReactMarkdown from "react-markdown";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 import { deletePaper, getPaperById, getPaperPdfUrl, reprocessPaperContent } from "../api/papers";
 import type { Paper } from "../types/paper";
 import { getProcessingStatusLabel } from "../types/paper";
@@ -46,6 +50,16 @@ function localExtractMetrics(text: string) {
   };
 }
 
+function MarkdownText({ text }: { text: string }) {
+  return (
+    <div className="markdown-body">
+      <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]} skipHtml>
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 export default function PatentDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -81,16 +95,6 @@ export default function PatentDetail() {
     loadPaper();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
-
-  useEffect(() => {
-    if (!paper) return;
-    if (paper.processingStatus === "ready" || paper.processingStatus === "failed") return;
-    const timer = setInterval(() => {
-      loadPaper();
-    }, 8000);
-    return () => clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paper?.id, paper?.processingStatus]);
 
   const fullText = paper?.fullText ?? paper?.abstract ?? "";
   const hasFullTextOrPdf = Boolean((paper?.fullText && paper.fullText.trim().length > 0) || paper?.pdfUrl || paper?.pdfLocalPath);
@@ -243,7 +247,7 @@ export default function PatentDetail() {
               {paper.fullText && (
                 <>
                   <h3 style={{ marginTop: 18 }}>Текст статьи</h3>
-                  <p style={{ whiteSpace: "pre-wrap" }}>{paper.fullText}</p>
+                  <MarkdownText text={paper.fullText} />
                 </>
               )}
             </>

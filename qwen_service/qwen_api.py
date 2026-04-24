@@ -15,6 +15,22 @@ from uuid import uuid4
 
 import requests
 
+
+class QwenProviderError(RuntimeError):
+    """Base provider-level error for Qwen chat API."""
+
+
+class QwenRequestEndedError(QwenProviderError):
+    """Raised when provider reports that the stream/request is already ended."""
+
+
+class QwenChatInProgressError(QwenProviderError):
+    """Raised when provider reports the chat is still in progress."""
+
+
+class QwenInternalStreamError(QwenProviderError):
+    """Raised when provider reports internal stream error."""
+
 # ============================================================================
 # Data Classes (replacing Domain.chat.ports)
 # ============================================================================
@@ -78,6 +94,37 @@ class QwenSseParser:
         on_meta: Callable[[dict[str, Any]], None] | None = None,
         on_error: Callable[[str], None] | None = None,
     ) -> tuple[str, str, dict[str, Any]]:
+        def _raise_provider_error_payload(data: dict[str, Any]) -> None:
+            if not isinstance(data, dict):
+                return
+
+            # SSE-style provider error: {"error":"..."}
+            error_text = str(data.get("error") or "").strip()
+            if error_text:
+                lower = error_text.lower()
+                if "request is ended" in lower:
+                    raise QwenRequestEndedError(error_text)
+                if "in progress" in lower or "chat is in progress" in lower:
+                    raise QwenChatInProgressError(error_text)
+                if "internal error" in lower:
+                    raise QwenInternalStreamError(error_text)
+                raise QwenProviderError(error_text)
+
+            # JSON envelope style: {"success": false, "data": {"code":"Bad_Request","details":"..."}}
+            if data.get("success") is False:
+                details_obj = data.get("data") or {}
+                details = str(details_obj.get("details") or details_obj.get("message") or "").strip()
+                code = str(details_obj.get("code") or "").strip()
+                msg = details or code or "provider returned unsuccessful response"
+                lower = msg.lower()
+                if "request is ended" in lower:
+                    raise QwenRequestEndedError(msg)
+                if "in progress" in lower or "chat is in progress" in lower:
+                    raise QwenChatInProgressError(msg)
+                if "internal error" in lower:
+                    raise QwenInternalStreamError(msg)
+                raise QwenProviderError(msg)
+
         think_parts: list[str] = []
         response_parts: list[str] = []
         meta: dict[str, Any] = {}
@@ -89,10 +136,7 @@ class QwenSseParser:
                 if not line:
                     continue
                 line_str = line.decode("utf-8", errors="ignore").strip()
-                if not line_str.startswith("data:"):
-                    continue
-
-                data_str = line_str[5:].strip()
+                data_str = line_str[5:].strip() if line_str.startswith("data:") else line_str
                 if not data_str or data_str == "[DONE]":
                     continue
 
@@ -100,6 +144,8 @@ class QwenSseParser:
                     data = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
+
+                _raise_provider_error_payload(data)
 
                 # Extract response ID
                 if "id" in data and not response_id:
@@ -252,7 +298,7 @@ class QwenTransport:
         info = self.get_user_info()
         return bool(info.get("id"))
 
-    def create_session(self, model: str = "qwen3.5-plus") -> str | None:
+    def create_session(self, model: str = "qwen3.6-plus") -> str | None:
         """Create new chat session"""
         payload = {
             "title": "New Chat",
@@ -381,7 +427,7 @@ class QwenAPI:
         logger: Callable[[str], None] | None = None,
         proxy_config: dict[str, Any] | None = None,
         user_agent: str | None = None,
-        default_model: str = "qwen3.5-plus",
+        default_model: str = "qwen3.6-plus",
     ):
         self.token = token
         self.logger = logger
@@ -447,7 +493,7 @@ class QwenAPI:
         return self.default_model
 
     def set_model(self, model: str) -> str:
-        self.default_model = model or "qwen3.5-plus"
+        self.default_model = model or "qwen3.6-plus"
         return self.default_model
 
     def fetch_models(self) -> list[dict]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -26,7 +27,56 @@ class AIEnrichmentResult:
     fallback_reason: str | None = None
 
 
-_PAGE_MARKER_SPLIT_RE = re.compile(r"(?=\[Страница\s+\d+\])")
+_PAGE_MARKER_SPLIT_RE = re.compile("(?=\\[(?:\\u0421\\u0442\\u0440\\u0430\\u043d\\u0438\\u0446\\u0430|Page)\\s+\\d+\\])")
+
+def _decode_cp1251_utf8_mojibake(value: str) -> str:
+    try:
+        return value.encode("cp1251").decode("utf-8")
+    except Exception:
+        return value
+
+
+PDF_MARKDOWN_SYSTEM_PROMPT = _decode_cp1251_utf8_mojibake("""Ты — редактор научных PDF-статей. Тебе будут по порядку передаваться сырые OCR/извлечённые данные страниц PDF.
+
+Твоя задача: восстановить содержимое страницы в чистом Markdown, сохранив всю исходную информацию без смысловых потерь.
+
+Правила обработки:
+
+1. Не добавляй ничего от себя.
+2. Не объясняй свои действия.
+3. Не пиши вступления, комментарии, выводы или предупреждения.
+4. Выводи только обработанный Markdown.
+5. Сохраняй структуру статьи:
+   - заголовки;
+   - авторов;
+   - организации;
+   - abstract;
+   - keywords;
+   - разделы и подразделы;
+   - таблицы;
+   - подписи к рисункам;
+   - сноски;
+   - формулы;
+   - references.
+6. Исправляй очевидные OCR-ошибки форматирования:
+   - слитые слова;
+   - пропущенные пробелы;
+   - переносы строк внутри предложений;
+   - неправильные разрывы абзацев;
+   - мусорные символы от PDF-вёрстки.
+7. Не исправляй научный смысл, числа, единицы измерения, имена, даты, формулы и ссылки, если нет полной уверенности.
+8. Если таблица распознана плохо, восстанови её в Markdown-таблицу настолько точно, насколько возможно.
+9. Если рисунок представлен только подписью, сохрани подпись как **Figure X.** ....
+10. Если встречается текст вида [Страница N], используй его только как границу страницы и не выводи в результате.
+11. Не удаляй повторяющиеся или странно выглядящие данные, если они могут быть частью статьи.
+12. Не объединяй разные страницы в один раздел искусственно. Обрабатывай только полученную страницу.
+13. Сохраняй язык оригинала.
+14. Математические выражения оформляй в Markdown/LaTeX:
+    - inline: $...$
+    - отдельной строкой: $$...$$
+15. Если часть текста невозможно надёжно восстановить, оставь её максимально близко к оригиналу, не придумывая недостающее.
+
+Формат ответа: только Markdown. Без дополнительного текста.""")
 
 
 def _clean_arxiv_id(raw: str) -> str:
@@ -250,38 +300,92 @@ def normalize_pdf_text_markdown(
     title: str,
     raw_text: str,
     session_id: str | None = None,
+    on_page_markdown: Callable[[int, str], None] | None = None,
 ) -> str:
     pages = _split_pdf_text_into_pages(raw_text)
     if not pages:
         return ""
 
     qwen_client = get_qwen_client()
-    prompt_prefix = (
-        "Ты специалист по статьям, ничего не теряй из информации, "
-        "тебе даются сырые данные из PDF файла, ты должен выдать обработанную страницу. "
-        "Ничего лишнего не добавляй. Ни какого доп текста, только то что есть. "
-        "Формат ответа: Markdown."
-    )
-
     normalized_parts: list[str] = []
-    for idx, page_text in enumerate(pages, start=1):
-        prompt = (
-            f"{prompt_prefix}\n\n"
-            f"Статья: {title}\n"
-            f"Номер страницы: {idx}\n\n"
-            f"Сырые данные страницы:\n{page_text[:18000]}"
-        )
+    active_session_id = session_id
+    max_page_attempts = 3
+    session_needs_prompt = True
+    pages_per_request = 3
+    page_batches = [pages[i : i + pages_per_request] for i in range(0, len(pages), pages_per_request)]
+    current_page = 1
 
-        result = qwen_client.send_message(
-            message=prompt,
-            session_id=session_id,
-            thinking_enabled=True,
-            search_enabled=False,
-            auto_continue=True,
-            timeout=240.0,
-        )
-        response_text = (result.get("response") or "").strip()
-        normalized_parts.append(response_text or page_text)
+    for batch in page_batches:
+        response_text = ""
+        batch_text = "\n\n".join(f"[Page {current_page + offset}]\n{page[:18000]}" for offset, page in enumerate(batch))
+        batch_range_start = current_page
+        batch_range_end = current_page + len(batch) - 1
+
+        for attempt in range(1, max_page_attempts + 1):
+            if session_needs_prompt:
+                prompt = (
+                    f"{PDF_MARKDOWN_SYSTEM_PROMPT}\n\n"
+                    f"Article title: {title}\n"
+                    f"{batch_text}"
+                )
+            else:
+                prompt = batch_text
+
+            result = qwen_client.send_message(
+                message=prompt,
+                session_id=active_session_id,
+                thinking_enabled=True,
+                search_enabled=False,
+                auto_continue=False,
+                timeout=240.0,
+            )
+            response_text = (result.get("response") or "").strip()
+            error_text = str(result.get("error") or "").strip()
+
+            if response_text:
+                session_needs_prompt = False
+                break
+
+            logger.warning(
+                "Empty page-normalization response for paper={} pages={}..{} attempt={} session={} error={}",
+                paper_id,
+                batch_range_start,
+                batch_range_end,
+                attempt,
+                (active_session_id or "none"),
+                (error_text or "none"),
+            )
+
+            if attempt < max_page_attempts:
+                lowered_error = (error_text or "").lower()
+                should_rotate_session = ("chat is in progress" in lowered_error) or ("model not found" in lowered_error)
+                if should_rotate_session:
+                    replacement_session = create_qwen_session_for_paper(paper_id=paper_id, title=title)
+                    if replacement_session:
+                        active_session_id = replacement_session
+                        session_needs_prompt = True
+                        logger.info(
+                            "Switched Qwen session for paper={} pages={}..{} to recover stream issues: {}",
+                            paper_id,
+                            batch_range_start,
+                            batch_range_end,
+                            active_session_id,
+                        )
+
+        page_payload = response_text or batch_text
+        normalized_parts.append(f"### Pages {batch_range_start}-{batch_range_end}\n\n{page_payload}".strip())
+        if on_page_markdown:
+            try:
+                on_page_markdown(batch_range_end, "\n\n".join(normalized_parts).strip())
+            except Exception as callback_exc:
+                logger.warning(
+                    "on_page_markdown callback failed for paper={} pages={}..{}: {}",
+                    paper_id,
+                    batch_range_start,
+                    batch_range_end,
+                    callback_exc,
+                )
+        current_page += len(batch)
 
     merged = "\n\n".join(part for part in normalized_parts if part and part.strip()).strip()
     logger.info("Normalized PDF text for paper {}: pages={}, chars={}", paper_id, len(pages), len(merged))
