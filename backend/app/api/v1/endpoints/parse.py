@@ -67,7 +67,7 @@ async def search_papers(
         papers = [
             p
             for p in papers
-            if (p.full_text and p.full_text.strip()) or p.pdf_url or p.pdf_local_path
+            if (p.full_text and p.full_text.strip()) or p.pdf_local_path
         ]
 
     return PaperSearchResponse(

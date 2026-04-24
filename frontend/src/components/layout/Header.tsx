@@ -36,7 +36,6 @@ export default function Header() {
       <div className="brand-block">
         <div className="brand-mark">N</div>
         <h1>Nickelfront</h1>
-        <p className="header-subtitle">Patent Intelligence Platform</p>
       </div>
       <div className="header-actions">
         <ThemeToggle />

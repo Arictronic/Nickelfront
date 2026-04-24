@@ -69,6 +69,15 @@ async def _process_paper_content_async(self, paper_id: int) -> dict[str, Any]:
             self.update_state(state="STARTED", meta={"paper_id": paper_id, "stage": "downloading_pdf"})
             pdf_bytes = await asyncio.to_thread(download_pdf_bytes, pdf_url) if pdf_url else None
 
+            # Cleanup stale/non-working external PDF links when download failed.
+            # For OpenAlex/Crossref/EuropePMC links are often metadata-derived and may be dead.
+            if not pdf_bytes and (paper.pdf_url or ""):
+                pdf_url_text = paper.pdf_url or ""
+                stale_epmc_pdf = "ebi.ac.uk/europepmc/webservices/rest/" in pdf_url_text and "fullTextPDF" in pdf_url_text
+                uncertain_external_pdf = paper.source in {"EuropePMC", "OpenAlex", "Crossref"}
+                if stale_epmc_pdf or uncertain_external_pdf:
+                    await paper_service.update_paper(paper_id, pdf_url=None)
+
             extracted_text = ""
             pdf_local_path = None
             if pdf_bytes:

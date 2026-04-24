@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { apiClient } from "../api/client";
 import { getPaperById } from "../api/papers";
 import type { Paper } from "../types/paper";
-import { apiClient } from "../api/client";
 
 type PaperReportData = {
   paper_id: number;
@@ -23,6 +23,41 @@ type PaperReportData = {
   generated_at: string;
 };
 
+const RU = {
+  invalidId: "\u041d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u044b\u0439 ID \u0441\u0442\u0430\u0442\u044c\u0438",
+  loading: "\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430 \u043e\u0442\u0447\u0451\u0442\u0430...",
+  notFound: "\u0421\u0442\u0430\u0442\u044c\u044f \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430.",
+  home: "\u0413\u043b\u0430\u0432\u043d\u0430\u044f",
+  papers: "\u0421\u0442\u0430\u0442\u044c\u0438",
+  card: "\u041a\u0430\u0440\u0442\u043e\u0447\u043a\u0430",
+  report: "\u041e\u0442\u0447\u0451\u0442",
+  reportTitle: "\u041e\u0442\u0447\u0451\u0442 \u043f\u043e \u0441\u0442\u0430\u0442\u044c\u0435",
+  exportPdf: "\u042d\u043a\u0441\u043f\u043e\u0440\u0442 PDF",
+  exportDocx: "\u042d\u043a\u0441\u043f\u043e\u0440\u0442 DOCX",
+  exporting: "\u042d\u043a\u0441\u043f\u043e\u0440\u0442...",
+  exportPdfError: "\u041e\u0448\u0438\u0431\u043a\u0430 \u044d\u043a\u0441\u043f\u043e\u0440\u0442\u0430 PDF",
+  exportDocxError: "\u041e\u0448\u0438\u0431\u043a\u0430 \u044d\u043a\u0441\u043f\u043e\u0440\u0442\u0430 DOCX",
+  basicInfo: "\u041e\u0441\u043d\u043e\u0432\u043d\u0430\u044f \u0438\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u044f",
+  source: "\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a",
+  authors: "\u0410\u0432\u0442\u043e\u0440\u044b",
+  journal: "\u0416\u0443\u0440\u043d\u0430\u043b",
+  pubDate: "\u0414\u0430\u0442\u0430 \u043f\u0443\u0431\u043b\u0438\u043a\u0430\u0446\u0438\u0438",
+  quality: "\u041a\u0430\u0447\u0435\u0441\u0442\u0432\u043e",
+  completeness: "\u041f\u043e\u043b\u043d\u043e\u0442\u0430",
+  abstract: "\u0410\u043d\u043d\u043e\u0442\u0430\u0446\u0438\u044f",
+  fullText: "\u041f\u043e\u043b\u043d\u044b\u0439 \u0442\u0435\u043a\u0441\u0442",
+  keywords: "\u041a\u043b\u044e\u0447\u0435\u0432\u044b\u0435 \u0441\u043b\u043e\u0432\u0430",
+  symbols: "\u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432",
+  noAbstract: "\u0410\u043d\u043d\u043e\u0442\u0430\u0446\u0438\u044f \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442",
+  noKeywords: "\u041a\u043b\u044e\u0447\u0435\u0432\u044b\u0435 \u0441\u043b\u043e\u0432\u0430 \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u044e\u0442",
+  recommendations: "\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438 \u043f\u043e \u0443\u043b\u0443\u0447\u0448\u0435\u043d\u0438\u044e",
+  noRecommendations: "\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0439 \u043d\u0435\u0442",
+  generatedAt: "\u0421\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u043d",
+  openCard: "\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u043a\u0430\u0440\u0442\u043e\u0447\u043a\u0443",
+  backToList: "\u041a \u0441\u043f\u0438\u0441\u043a\u0443 \u0441\u0442\u0430\u0442\u0435\u0439",
+  unknown: "\u2014",
+} as const;
+
 export default function PaperReport() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -36,18 +71,14 @@ export default function PaperReport() {
   useEffect(() => {
     const paperId = Number(id);
     if (!paperId || Number.isNaN(paperId)) {
-      setError("Некорректный ID статьи");
+      setError(RU.invalidId);
       setLoading(false);
       return;
     }
 
     setLoading(true);
     setError(null);
-    
-    Promise.all([
-      getPaperById(paperId),
-      apiClient.get<PaperReportData>(`/reports/paper/${paperId}`).catch(() => null),
-    ])
+    Promise.all([getPaperById(paperId), apiClient.get<PaperReportData>(`/reports/paper/${paperId}`).catch(() => null)])
       .then(([paperData, reportRes]) => {
         setPaper(paperData);
         setReport(reportRes?.data || null);
@@ -56,65 +87,35 @@ export default function PaperReport() {
       .finally(() => setLoading(false));
   }, [id]);
 
-  const handleExportPDF = async () => {
+  const exportReport = async (format: "pdf" | "docx") => {
     if (!paper) return;
-    
-    setExporting("pdf");
+    setExporting(format);
     setError(null);
-    
     try {
-      const response = await apiClient.get(`/reports/paper/${paper.id}/pdf`, {
-        responseType: "blob",
-      });
-      
-      const blob = new Blob([response.data], { type: "application/pdf" });
+      const response = await apiClient.get(`/reports/paper/${paper.id}/${format}`, { responseType: "blob" });
+      const type =
+        format === "pdf"
+          ? "application/pdf"
+          : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+      const blob = new Blob([response.data], { type });
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `paper_${paper.id}_report.pdf`;
+      link.download = `paper_${paper.id}_report.${format}`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       window.URL.revokeObjectURL(url);
     } catch (e: any) {
-      setError(`Ошибка экспорта PDF: ${e.message}`);
+      setError(`${format === "pdf" ? RU.exportPdfError : RU.exportDocxError}: ${e.message}`);
     } finally {
       setExporting(null);
     }
   };
 
-  const handleExportDOCX = async () => {
-    if (!paper) return;
-    
-    setExporting("docx");
-    setError(null);
-    
-    try {
-      const response = await apiClient.get(`/reports/paper/${paper.id}/docx`, {
-        responseType: "blob",
-      });
-      
-      const blob = new Blob([response.data], { 
-        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" 
-      });
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `paper_${paper.id}_report.docx`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(url);
-    } catch (e: any) {
-      setError(`Ошибка экспорта DOCX: ${e.message}`);
-    } finally {
-      setExporting(null);
-    }
-  };
-
-  if (loading) return <p className="muted">Загрузка отчёта...</p>;
+  if (loading) return <p className="muted">{RU.loading}</p>;
   if (error) return <p className="error">{error}</p>;
-  if (!paper) return <p className="muted">Статья не найдена.</p>;
+  if (!paper) return <p className="muted">{RU.notFound}</p>;
 
   const qualityScore = report?.scores?.quality_score || 0;
   const completenessScore = report?.scores?.completeness_score || 0;
@@ -123,166 +124,122 @@ export default function PaperReport() {
   return (
     <div className="page">
       <p className="muted">
-        <Link to="/dashboard">Главная</Link> → <Link to="/papers">Статьи</Link> → <Link to={`/papers/${paper.id}`}>Карточка</Link> → Отчёт
+        <Link to="/dashboard">{RU.home}</Link> → <Link to="/papers">{RU.papers}</Link> → <Link to={`/papers/${paper.id}`}>{RU.card}</Link> → {RU.report}
       </p>
 
       <div className="page-head">
-        <h2>Отчёт по статье</h2>
+        <h2>{RU.reportTitle}</h2>
         <div className="actions">
-          <button 
-            className="btn" 
-            onClick={handleExportPDF} 
-            disabled={exporting === "pdf"}
-          >
-            {exporting === "pdf" ? "Экспорт..." : "📄 Экспорт PDF"}
+          <button className="btn" onClick={() => exportReport("pdf")} disabled={exporting === "pdf"}>
+            {exporting === "pdf" ? RU.exporting : RU.exportPdf}
           </button>
-          <button 
-            className="btn" 
-            onClick={handleExportDOCX} 
-            disabled={exporting === "docx"}
-          >
-            {exporting === "docx" ? "Экспорт..." : "📝 Экспорт DOCX"}
+          <button className="btn" onClick={() => exportReport("docx")} disabled={exporting === "docx"}>
+            {exporting === "docx" ? RU.exporting : RU.exportDocx}
           </button>
         </div>
       </div>
 
-      {/* Основная информация */}
       <div className="panel">
-        <h3 style={{ marginTop: 0 }}>Основная информация</h3>
+        <h3 style={{ marginTop: 0 }}>{RU.basicInfo}</h3>
         <div className="detail-grid">
-          <p><strong>ID:</strong> {paper.id}</p>
-          <p><strong>Источник:</strong> {paper.source}</p>
+          <p>
+            <strong>ID:</strong> {paper.id}
+          </p>
+          <p>
+            <strong>{RU.source}:</strong> {paper.source}
+          </p>
         </div>
-        
         <h4 style={{ margin: "16px 0 8px" }}>{paper.title}</h4>
-        
-        {paper.authors && paper.authors.length > 0 && (
-          <p><strong>Авторы:</strong> {paper.authors.join(", ")}</p>
+        {!!paper.authors.length && (
+          <p>
+            <strong>{RU.authors}:</strong> {paper.authors.join(", ")}
+          </p>
         )}
-        
         <div className="detail-grid">
-          <p><strong>Журнал:</strong> {paper.journal || "—"}</p>
-          <p><strong>Дата публикации:</strong> {paper.publicationDate ? paper.publicationDate.slice(0, 10) : "—"}</p>
+          <p>
+            <strong>{RU.journal}:</strong> {paper.journal || RU.unknown}
+          </p>
+          <p>
+            <strong>{RU.pubDate}:</strong> {paper.publicationDate ? paper.publicationDate.slice(0, 10) : RU.unknown}
+          </p>
         </div>
-        
         {paper.doi && (
-          <p><strong>DOI:</strong> <code>{paper.doi}</code></p>
+          <p>
+            <strong>DOI:</strong> <code>{paper.doi}</code>
+          </p>
         )}
       </div>
 
-      {/* Метрики качества */}
       <div className="kpi-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
         <article className="panel kpi-card">
-          <h3>Качество</h3>
-          <p className={`kpi ${qualityScore >= 70 ? "ok" : qualityScore >= 40 ? "" : "idle"}`}>
-            {qualityScore}/100
-          </p>
+          <h3>{RU.quality}</h3>
+          <p className={`kpi ${qualityScore >= 70 ? "ok" : qualityScore >= 40 ? "" : "idle"}`}>{qualityScore}/100</p>
         </article>
-        
         <article className="panel kpi-card">
-          <h3>Полнота</h3>
-          <p className={`kpi ${completenessScore >= 70 ? "ok" : completenessScore >= 40 ? "" : "idle"}`}>
-            {completenessScore.toFixed(0)}%
-          </p>
+          <h3>{RU.completeness}</h3>
+          <p className={`kpi ${completenessScore >= 70 ? "ok" : completenessScore >= 40 ? "" : "idle"}`}>{completenessScore.toFixed(0)}%</p>
         </article>
-        
         <article className="panel kpi-card">
-          <h3>Аннотация</h3>
+          <h3>{RU.abstract}</h3>
           <p className="kpi">{report?.abstract_length || 0}</p>
-          <p className="muted" style={{ fontSize: 12 }}>символов</p>
+          <p className="muted" style={{ fontSize: 12 }}>
+            {RU.symbols}
+          </p>
         </article>
-        
         <article className="panel kpi-card">
-          <h3>Полный текст</h3>
+          <h3>{RU.fullText}</h3>
           <p className="kpi">{report?.full_text_length || 0}</p>
-          <p className="muted" style={{ fontSize: 12 }}>символов</p>
+          <p className="muted" style={{ fontSize: 12 }}>
+            {RU.symbols}
+          </p>
         </article>
-        
         <article className="panel kpi-card">
-          <h3>Ключевые слова</h3>
+          <h3>{RU.keywords}</h3>
           <p className="kpi">{report?.keywords_count || 0}</p>
         </article>
       </div>
 
-      {/* Аннотация */}
       <div className="panel">
-        <h3 style={{ marginTop: 0 }}>Аннотация</h3>
-        {paper.abstract ? (
-          <p style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{paper.abstract}</p>
+        <h3 style={{ marginTop: 0 }}>{RU.abstract}</h3>
+        {paper.abstract ? <p style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{paper.abstract}</p> : <p className="muted">{RU.noAbstract}</p>}
+      </div>
+
+      <div className="panel">
+        <h3 style={{ marginTop: 0 }}>{RU.keywords}</h3>
+        {paper.keywords.length ? (
+          <p style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{paper.keywords.join(", ")}</p>
         ) : (
-          <p className="muted">Аннотация отсутствует</p>
+          <p className="muted">{RU.noKeywords}</p>
         )}
       </div>
 
-      {/* Ключевые слова */}
       <div className="panel">
-        <h3 style={{ marginTop: 0 }}>Ключевые слова</h3>
-        {paper.keywords && paper.keywords.length > 0 ? (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {paper.keywords.map((kw, idx) => (
-              <span
-                key={idx}
-                style={{
-                  padding: "6px 12px",
-                  background: "#e0e7ff",
-                  borderRadius: 16,
-                  fontSize: 14,
-                  color: "#1e293b",
-                }}
-              >
-                {kw}
-              </span>
-            ))}
-          </div>
-        ) : (
-          <p className="muted">Ключевые слова не указаны</p>
-        )}
-      </div>
-
-      {/* Рекомендации */}
-      {recommendations.length > 0 && (
-        <div className="panel">
-          <h3 style={{ marginTop: 0 }}>📋 Рекомендации по улучшению</h3>
-          <ul style={{ margin: 0, paddingLeft: 20 }}>
-            {recommendations.map((rec, idx) => (
-              <li key={idx} style={{ marginBottom: 8 }}>{rec}</li>
+        <h3 style={{ marginTop: 0 }}>{RU.recommendations}</h3>
+        {recommendations.length ? (
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {recommendations.map((item, i) => (
+              <li key={`${i}-${item.slice(0, 20)}`}>{item}</li>
             ))}
           </ul>
-        </div>
-      )}
-
-      {/* Полный текст */}
-      {paper.fullText && (
-        <div className="panel">
-          <h3 style={{ marginTop: 0 }}>Полный текст</h3>
-          <div style={{ 
-            maxHeight: 400, 
-            overflowY: "auto", 
-            padding: 12, 
-            background: "#f8fafc", 
-            borderRadius: 8,
-            fontSize: 14,
-            lineHeight: 1.6,
-          }}>
-            <p style={{ whiteSpace: "pre-wrap" }}>{paper.fullText}</p>
-          </div>
-        </div>
-      )}
-
-      {/* Действия */}
-      <div className="actions">
-        <button className="btn" onClick={() => navigate(`/papers/${paper.id}`)}>
-          Назад к карточке
-        </button>
-        <button className="btn btn-primary" onClick={() => navigate("/papers")}>
-          К списку статей
-        </button>
+        ) : (
+          <p className="muted">{RU.noRecommendations}</p>
+        )}
+        {report?.generated_at && (
+          <p className="muted" style={{ marginTop: 12 }}>
+            {RU.generatedAt}: {new Date(report.generated_at).toLocaleString()}
+          </p>
+        )}
       </div>
 
-      <p className="muted" style={{ marginTop: 16, fontSize: 12 }}>
-        Отчёт сгенерирован автоматически на основе данных статьи. 
-        {report?.generated_at && ` Время генерации: ${new Date(report.generated_at).toLocaleString("ru-RU")}`}
-      </p>
+      <div className="actions">
+        <button className="btn" onClick={() => navigate(`/papers/${paper.id}`)}>
+          {RU.openCard}
+        </button>
+        <button className="btn btn-primary" onClick={() => navigate("/papers")}>
+          {RU.backToList}
+        </button>
+      </div>
     </div>
   );
 }
+

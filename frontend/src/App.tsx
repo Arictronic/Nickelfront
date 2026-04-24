@@ -8,7 +8,6 @@ import PatentDetail from "./pages/PatentDetail";
 import Analytics from "./pages/Analytics";
 import Metrics from "./pages/Metrics";
 import CeleryMonitoring from "./pages/CeleryMonitoring";
-import FullTextSearch from "./pages/FullTextSearch";
 import WorkerStatus from "./pages/WorkerStatus";
 import Database from "./pages/Database";
 import PaperReport from "./pages/PaperReport";
@@ -147,7 +146,7 @@ export default function App() {
             path="/vector-search"
             element={
               <ProtectedRoute>
-                <Analytics />
+                <Navigate to="/search" replace />
               </ProtectedRoute>
             }
           />
@@ -171,7 +170,7 @@ export default function App() {
             path="/search"
             element={
               <ProtectedRoute>
-                <FullTextSearch />
+                <Analytics />
               </ProtectedRoute>
             }
           />

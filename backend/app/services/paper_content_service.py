@@ -106,9 +106,9 @@ def _is_probably_pdf_url(raw_url: str) -> bool:
 def resolve_pdf_url(source: str, source_id: str | None, url: str | None) -> str | None:
     src = (source or "").strip().lower()
     raw_url = (url or "").strip()
-    sid = (source_id or "").strip()
 
     if src == "arxiv":
+        sid = (source_id or "").strip()
         arxiv_id = _clean_arxiv_id(sid or raw_url)
         if arxiv_id:
             return f"https://arxiv.org/pdf/{arxiv_id}.pdf"
@@ -116,13 +116,11 @@ def resolve_pdf_url(source: str, source_id: str | None, url: str | None) -> str 
     if _is_probably_pdf_url(raw_url):
         return raw_url
 
-    # EuropePMC source_id may come as SOURCE:ID (e.g., PPR:PPR1131117)
-    if src == "europepmc" and sid and ":" in sid:
-        source_db, article_id = sid.split(":", 1)
-        source_db = source_db.strip()
-        article_id = article_id.strip()
-        if source_db and article_id:
-            return f"https://www.ebi.ac.uk/europepmc/webservices/rest/{source_db}/{article_id}/fullTextPDF"
+    # EuropePMC: do not synthesize PDF links from source_id.
+    # Many records (MED/AGR/etc.) do not provide real PDF and generated links return 404.
+    # We keep only explicit PDF URLs received from the upstream source.
+    if src == "europepmc":
+        return None
 
     return None
 
@@ -185,10 +183,16 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
 
 
 def _clean_html_text(raw: str) -> str:
-    text = re.sub(r"<script[\\s\\S]*?</script>", " ", raw, flags=re.IGNORECASE)
-    text = re.sub(r"<style[\\s\\S]*?</style>", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", " ", text)
+    # Decode entities first so encoded tags (&lt;div&gt;) are also removed.
+    text = html.unescape(raw or "")
     text = html.unescape(text)
+    text = re.sub(r"<script[\\s\\S]*?</script>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<style[\\s\\S]*?</style>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<noscript[\\s\\S]*?</noscript>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    # Second pass to catch tags revealed by unescape cascades.
+    text = html.unescape(text)
+    text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 

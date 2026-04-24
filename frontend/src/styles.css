@@ -1,4 +1,4 @@
-* {
+﻿* {
   box-sizing: border-box;
 }
 :root {
@@ -22,7 +22,7 @@
   --table-row-hover: #f8fbff;
 }
 
-/* Темная тема */
+/* РўРµРјРЅР°СЏ С‚РµРјР° */
 [data-theme="dark"] {
   --bg: #0f172a;
   --surface: #1e293b;
@@ -758,3 +758,21 @@ select {
   background: #94a3b8;
   box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.25);
 }
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--table-border);
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.markdown-body thead th {
+  background: var(--table-head-bg);
+}
+

@@ -1,4 +1,4 @@
-export const PAPER_SOURCES = [
+﻿export const PAPER_SOURCES = [
   "CORE",
   "arXiv",
   "OpenAlex",
@@ -68,6 +68,7 @@ export interface PaperListFilters {
   dateFrom?: string; // yyyy-mm-dd
   dateTo?: string; // yyyy-mm-dd
   query?: string;
+  processingStatus?: string;
 }
 
 export type SearchType = "vector" | "semantic" | "hybrid" | "text";
@@ -125,3 +126,4 @@ export interface CeleryTaskStatus {
   args?: any[];
   kwargs?: Record<string, any>;
 }
+

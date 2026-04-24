@@ -21,6 +21,8 @@ class CyberLeninkaClient(BaseAPIClient):
     SOURCE_NAME = "CyberLeninka"
     MAX_RETRIES = 3
     RETRY_BASE_DELAY = 2.0
+    _SCRIPT_STYLE_RE = re.compile(r"<(?:script|style|noscript)[^>]*>[\s\S]*?</(?:script|style|noscript)>", re.IGNORECASE)
+    _TAG_RE = re.compile(r"<[^>]+>")
 
     def __init__(self, timeout: float = 30.0):
         super().__init__(base_url=self.BASE_URL, timeout=timeout)
@@ -104,8 +106,40 @@ class CyberLeninkaClient(BaseAPIClient):
     def _clean_markup(text: str | None) -> str | None:
         if not text:
             return None
-        no_tags = re.sub(r"<[^>]+>", "", text)
-        return html.unescape(" ".join(no_tags.split()))
+        # Important: decode entities before stripping tags, otherwise encoded tags
+        # like &lt;em&gt; survive the first cleanup pass.
+        normalized = html.unescape(str(text))
+        normalized = html.unescape(normalized)
+        normalized = re.sub(r"<[^>]+>", " ", normalized)
+        normalized = " ".join(normalized.split()).strip()
+        return normalized or None
+
+    @classmethod
+    def _extract_main_text(cls, raw_html: str) -> str | None:
+        if not raw_html:
+            return None
+
+        html_text = html.unescape(raw_html)
+        html_text = cls._SCRIPT_STYLE_RE.sub(" ", html_text)
+
+        candidates = re.findall(
+            r"<(?:article|section|div)[^>]*class=['\"][^'\"]*(?:article|content|text|ocr|full)[^'\"]*['\"][^>]*>([\s\S]*?)</(?:article|section|div)>",
+            html_text,
+            flags=re.IGNORECASE,
+        )
+        if not candidates:
+            candidates = [html_text]
+
+        best = ""
+        for candidate in candidates:
+            cleaned = cls._TAG_RE.sub(" ", html.unescape(candidate))
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            if len(cleaned) > len(best):
+                best = cleaned
+
+        if not best:
+            return None
+        return best if len(best) >= 200 else None
 
     def _parse_api_results(self, data: dict[str, Any], limit: int) -> list[dict[str, Any]]:
         """Parse /api/search JSON response into normalized records."""
@@ -167,6 +201,12 @@ class CyberLeninkaClient(BaseAPIClient):
     async def get_full_text(self, item_id: str) -> str | None:
         if not item_id:
             return None
-        if item_id.startswith("http://") or item_id.startswith("https://"):
-            return item_id
-        return f"{self.BASE_URL}/{item_id.lstrip('/')}"
+        article_url = item_id if (item_id.startswith("http://") or item_id.startswith("https://")) else f"{self.BASE_URL}/{item_id.lstrip('/')}"
+        try:
+            client = await self._get_client()
+            response = await client.get(article_url, headers={"Accept": "text/html,application/xhtml+xml,*/*"})
+            response.raise_for_status()
+            return self._extract_main_text(response.text or "")
+        except Exception as exc:
+            logger.warning("{}: failed to fetch full text for {}: {}", self.SOURCE_NAME, item_id, exc)
+            return None
