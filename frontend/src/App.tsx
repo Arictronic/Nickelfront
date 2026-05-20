@@ -16,6 +16,7 @@ import Register from "./pages/Register";
 import Landing from "./pages/Landing";
 import { useAuthStore } from "./store/authStore";
 import ErrorBoundary from "./components/ErrorBoundary";
+import AnimatedBackground from "./components/AnimatedBackground";
 
 function ProtectedRoute({ children }: { children: JSX.Element }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -90,9 +91,12 @@ function SessionBootstrap() {
 export default function App() {
   return (
     <>
+      <AnimatedBackground />
       <SessionBootstrap />
       <Routes>
         <Route path="/" element={<Landing />} />
+        <Route path="/preview/login" element={<Login />} />
+        <Route path="/preview/register" element={<Register />} />
         <Route
           path="/login"
           element={

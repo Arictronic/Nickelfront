@@ -1,5 +1,5 @@
 ﻿import { useEffect, useMemo, useRef, useState } from "react";
-import { LineChart, Line, XAxis, YAxis, Tooltip, PieChart, Pie, Cell } from "recharts";
+import { AreaChart, Area, XAxis, YAxis, Tooltip, PieChart, Pie, Cell, CartesianGrid, ResponsiveContainer } from "recharts";
 import {
   getPapersCount,
   getPapersList,
@@ -12,7 +12,8 @@ import {
 import { PAPER_SOURCES, Paper, PaperSource } from "../types/paper";
 import { Link } from "react-router-dom";
 
-const COLORS = ["#0088FE", "#00C49F", "#FFBB28"];
+// Дорогая кибер-палитра для круговой диаграммы (как на концепте)
+const COLORS = ["#1d4ed8", "#3b82f6", "#60a5fa", "#93c5fd", "#e2e8f0"];
 
 type ParseJob = {
   jobId: string;
@@ -107,10 +108,8 @@ export default function Dashboard() {
     fetchPage().catch(() => {
       // initial load errors - just keep empty UI
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Реальное время: берем статус из Celery API, иначе fallback на рост papers count.
   useEffect(() => {
     const interval = window.setInterval(async () => {
       const currentJobs = jobsRef.current;
@@ -119,9 +118,7 @@ export default function Dashboard() {
       try {
         const updatedJobs = await Promise.all(
           currentJobs.map(async (job) => {
-            // Не обновляем завершённые или отменённые задачи
             if (job.status !== "in_progress") return job;
-            // Если уже отменено в Celery, не обновляем статус из API
             if (job.celeryStatus?.status === "REVOKED") return job;
 
             try {
@@ -138,26 +135,22 @@ export default function Dashboard() {
                 const stableMs = 60_000;
                 const shouldComplete = now - lastCountChangeAt > stableMs && current > job.initialCount;
 
-                const next: ParseJob = {
+                return {
                   ...job,
                   celeryStatus,
                   lastObservedCount: current,
                   lastCountChangeAt,
                   status: shouldComplete ? "completed" : "in_progress",
-                };
-
-                return next;
+                } as ParseJob;
               }
 
-              const next: ParseJob = {
+              return {
                 ...job,
                 celeryStatus,
                 lastObservedCount: savedCount > 0 ? savedCount : job.lastObservedCount,
                 lastCountChangeAt: isCompleted ? now : job.lastCountChangeAt,
                 status: isRevoked ? "cancelled" : isCompleted ? "completed" : "in_progress",
-              };
-
-              return next;
+              } as ParseJob;
             } catch {
               const current = await getPapersCount(job.source === "all" ? "all" : job.source);
               const now = Date.now();
@@ -247,8 +240,8 @@ export default function Dashboard() {
         };
       }
 
-      setJobs((prev: ParseJob[]): ParseJob[] => {
-        const nextJobs: ParseJob[] = [job, ...prev].slice(0, 30);
+      setJobs((prev) => {
+        const nextJobs = [job, ...prev].slice(0, 30);
         saveJobs(nextJobs);
         return nextJobs;
       });
@@ -264,8 +257,8 @@ export default function Dashboard() {
 
     try {
       await revokeCeleryTask(jobId, false);
-      setJobs((prev: ParseJob[]): ParseJob[] => {
-        const nextJobs: ParseJob[] = prev.map((job): ParseJob => {
+      setJobs((prev) => {
+        const nextJobs = prev.map((job): ParseJob => {
           if (job.jobId !== jobId) return job;
           return {
             ...job,
@@ -291,10 +284,9 @@ export default function Dashboard() {
     }
 
     try {
-      // Вызываем API для удаления флага отмены (опционально)
       await deleteCeleryTask(jobId);
-      setJobs((prev: ParseJob[]): ParseJob[] => {
-        const nextJobs: ParseJob[] = prev.filter((job) => job.jobId !== jobId);
+      setJobs((prev) => {
+        const nextJobs = prev.filter((job) => job.jobId !== jobId);
         saveJobs(nextJobs);
         return nextJobs;
       });
@@ -306,7 +298,7 @@ export default function Dashboard() {
   return (
     <div className="page">
       <div className="page-head">
-        <h2>Dashboard</h2>
+        <h2>Панель</h2>
         <div className="actions">
           <button className="btn btn-primary" onClick={startParsing}>
             Запустить парсинг статей
@@ -316,9 +308,9 @@ export default function Dashboard() {
 
       <div className="panel">
         <h3>Параметры парсинга</h3>
-        <div className="filters">
-          <input className="input" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Поисковый запрос" />
-          <select value={source} onChange={(e) => setSource(e.target.value as PaperSource | "all")}>
+        <div className="filters" style={{ background: "transparent", border: "none", padding: 0 }}>
+          <input className="input" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Поисковый запрос" style={{ flex: 2 }} />
+          <select className="input" value={source} onChange={(e) => setSource(e.target.value as PaperSource | "all")} style={{ flex: 1 }}>
             <option value="all">Все шаблоны</option>
             {PAPER_SOURCES.map((src) => (
               <option key={src} value={src}>
@@ -336,195 +328,224 @@ export default function Dashboard() {
             style={{ width: 120 }}
           />
         </div>
-        {parsingError && <p className="error">{parsingError}</p>}
+        {parsingError && <p className="error" style={{ marginTop: 12 }}>{parsingError}</p>}
       </div>
 
+      {/* Сетка KPI-индикаторов */}
       <div className="kpi-grid">
         <article className="panel kpi-card">
           <h3>Всего статей</h3>
           <p className="kpi">{totalPapers}</p>
         </article>
         <article className="panel kpi-card">
-          <h3>За сегодня (по последним добавлениям)</h3>
+          <h3>За сегодня</h3>
           <p className="kpi">{todayPapers}</p>
         </article>
         <article className="panel kpi-card">
           <h3>В обработке</h3>
-          <p className={`kpi-status ${activeJobsCount > 0 ? "ok" : "idle"}`}>{activeJobsCount}</p>
+          <div style={{ marginTop: 12 }}>
+            <span className={`session-status ${activeJobsCount > 0 ? "checking" : "inactive"}`}>
+              <span className="session-dot"></span>
+              {activeJobsCount} активных
+            </span>
+          </div>
         </article>
         <article className="panel kpi-card">
-          <h3>Завершено (ваши)</h3>
+          <h3>Завершено задач</h3>
           <p className="kpi">{completedJobsCount}</p>
         </article>
       </div>
 
+      {/* Графики в стиле премиального UI с концепта */}
       <div className="chart-grid">
-        <article className="panel">
-          <h3>Метрика (пример): последние даты</h3>
-          <LineChart width={520} height={230} data={lineData.length ? lineData : [{ date: "—", count: 0 }]}>
-            <XAxis dataKey="date" />
-            <YAxis />
-            <Tooltip />
-            <Line type="monotone" dataKey="count" stroke="#4a6cf7" />
-          </LineChart>
+        <article className="panel" style={{ minHeight: 320 }}>
+          <h3>Динамика парсинга (добавление по датам)</h3>
+          <div style={{ width: "100%", height: 240, marginTop: 16 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={lineData.length ? lineData : [{ date: "—", count: 0 }]} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <defs>
+                  {/* Плавный неоновый градиент для волны */}
+                  <linearGradient id="chartGlow" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.4} />
+                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0.0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="date" stroke="var(--muted)" style={{ fontSize: 11, fontFamily: "monospace" }} />
+                <YAxis stroke="var(--muted)" style={{ fontSize: 11, fontFamily: "monospace" }} />
+                <Tooltip
+                  contentStyle={{ background: "var(--surface-2)", borderColor: "var(--border)", borderRadius: 8, color: "var(--text)" }}
+                  itemStyle={{ color: "var(--text)" }}
+                />
+                <Area type="monotone" dataKey="count" stroke="#3b82f6" strokeWidth={2} fillOpacity={1} fill="url(#chartGlow)" dot={{ r: 3, strokeWidth: 1, fill: "var(--bg)" }} activeDot={{ r: 6 }} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
         </article>
-        <article className="panel">
-          <h3>Метрика (пример): источники (по последним)</h3>
-          <PieChart width={350} height={230}>
-            <Pie
-              data={pieData.length ? pieData : [{ name: "нет данных", value: 1 }]}
-              dataKey="value"
-              nameKey="name"
-              outerRadius={80}
-            >
-              {(pieData.length ? pieData : [{ name: "нет данных", value: 1 }]).map((_, index) => (
-                <Cell key={index} fill={COLORS[index % COLORS.length]} />
-              ))}
-            </Pie>
-            <Tooltip />
-          </PieChart>
+
+        <article className="panel" style={{ minHeight: 320 }}>
+          <h3>Распределение по источникам</h3>
+          <div style={{ width: "100%", height: 240, marginTop: 16, display: "flex", justifyContent: "center", alignItems: "center" }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie
+                  data={pieData.length ? pieData : [{ name: "нет данных", value: 1 }]}
+                  dataKey="value"
+                  nameKey="name"
+                  innerRadius={60}
+                  outerRadius={85}
+                  paddingAngle={4}
+                >
+                  {(pieData.length ? pieData : [{ name: "нет данных", value: 1 }]).map((_, index) => (
+                    <Cell key={index} fill={COLORS[index % COLORS.length]} stroke="var(--surface)" strokeWidth={2} />
+                  ))}
+                </Pie>
+                <Tooltip
+                  contentStyle={{ background: "var(--surface-2)", borderColor: "var(--border)", borderRadius: 8 }}
+                  itemStyle={{ color: "var(--text)" }}
+                />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
         </article>
       </div>
 
+      {/* Таблица последних документов */}
       <div className="panel">
-        <h3>Последние добавленные</h3>
-        <table className="table">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Название</th>
-              <th>Источник</th>
-              <th>Дата</th>
-              <th>Действия</th>
-            </tr>
-          </thead>
-          <tbody>
-            {latest.length === 0 ? (
-              <tr>
-                <td colSpan={5} className="muted">
-                  Пока нет данных. Запустите парсинг.
-                </td>
-              </tr>
-            ) : (
-              latest.map((p) => (
-                <tr key={p.id}>
-                  <td>{p.id}</td>
-                  <td style={{ maxWidth: 520 }}>{p.title}</td>
-                  <td>{p.source}</td>
-                  <td>{p.publicationDate ? p.publicationDate.slice(0, 10) : "—"}</td>
-                  <td>
-                    <Link className="action-link" to={`/papers/${p.id}`}>
-                      Открыть
-                    </Link>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-        <p className="muted">Обновлено: {updatedAt.toLocaleTimeString("ru-RU")}</p>
-      </div>
-
-      <div className="panel">
-        <h3>Текущие парсинг-задачи</h3>
-        {jobs.length === 0 ? (
-          <p className="muted">Задачи появятся после запуска парсинга.</p>
-        ) : (
+        <h3>Последние добавленные документы</h3>
+        <div style={{ overflowX: "auto", marginTop: 12 }}>
           <table className="table">
             <thead>
               <tr>
-                <th>Celery task_id</th>
-                <th>Источник</th>
-                <th>Запрос</th>
-                <th>Статус</th>
-                <th>Прогресс</th>
-                <th>Сохранено</th>
-                <th>Действия</th>
+                <th style={{ width: "80px" }}>ID</th>
+                <th>Название</th>
+                <th style={{ width: "140px" }}>Источник</th>
+                <th style={{ width: "140px" }}>Дата публикации</th>
+                <th style={{ width: "100px", textAlign: "right" }}>Действия</th>
               </tr>
             </thead>
             <tbody>
-              {jobs.slice(0, 10).map((j) => {
-                const progress = (() => {
-                  if (j.status === "completed") return 100;
-                  if (j.celeryStatus) {
-                    const current = j.celeryStatus.current || j.celeryStatus.result?.current || 0;
-                    const total = j.celeryStatus.total || j.celeryStatus.result?.total || 0;
-                    if (total > 0) return Math.round((current / total) * 100);
-                  }
-                  const delta = j.lastObservedCount - j.initialCount;
-                  const expectedDelta = 50;
-                  return Math.min(100, Math.round((delta / expectedDelta) * 100));
-                })();
-
-                const statusText = (() => {
-                  if (j.status === "completed") return "✓ Завершено";
-                  if (j.status === "cancelled") return "Отменено";
-
-                  if (j.celeryStatus) {
-                    const status = j.celeryStatus.status;
-                    if (status === "SUCCESS") return "✓ Завершено";
-                    if (status === "FAILURE") return "✕ Ошибка";
-                    if (status === "REVOKED") return "Отменено";
-                    if (status === "PENDING") return "Ожидание...";
-                    if (status === "STARTED") return j.celeryStatus.result?.status || "В процессе...";
-                    if (status === "RETRY") return "Повтор...";
-                  }
-                  return "В обработке";
-                })();
-
-                const savedCount =
-                  j.celeryStatus?.saved_count ||
-                  j.celeryStatus?.result?.saved_count ||
-                  j.lastObservedCount - j.initialCount;
-
-                return (
-                  <tr key={j.jobId}>
-                    <td style={{ wordBreak: "break-word", fontFamily: "monospace", fontSize: "0.85em" }}>
-                      {j.jobId}
-                    </td>
-                    <td>{j.source}</td>
-                    <td style={{ maxWidth: 280 }}>{j.query}</td>
-                    <td>
-                      <span
-                        className={`status ${
-                          j.status === "completed" || j.celeryStatus?.status === "SUCCESS" ? "active" : ""
-                        }`}
-                      >
-                        {statusText}
-                      </span>
-                    </td>
-                    <td style={{ minWidth: 120 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <div style={{ flex: 1, height: 8, background: "#e0e0e0", borderRadius: 4, overflow: "hidden" }}>
-                          <div
-                            style={{
-                              width: `${progress}%`,
-                              height: "100%",
-                              background: progress === 100 ? "#22c55e" : "#4a6cf7",
-                              transition: "width 0.3s ease",
-                            }}
-                          />
-                        </div>
-                        <span style={{ fontSize: "0.85em", minWidth: 38 }}>{progress}%</span>
-                      </div>
-                    </td>
-                    <td>{savedCount}</td>
-                    <td style={{ display: "flex", gap: 8 }}>
-                      {j.status === "in_progress" && j.celeryStatus?.status !== "REVOKED" ? (
-                        <button className="btn" onClick={() => cancelJob(j.jobId)}>
-                          Остановить
-                        </button>
-                      ) : (
-                        <button className="btn btn-danger" onClick={() => deleteJob(j.jobId)}>
-                          Удалить
-                        </button>
-                      )}
+              {latest.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="muted" style={{ textAlign: "center", padding: "24px 0" }}>
+                    Пока нет данных. Запустите парсинг для наполнения базы.
+                  </td>
+                </tr>
+              ) : (
+                latest.slice(0, 10).map((p) => (
+                  <tr key={p.id}>
+                    <td className="muted" style={{ fontFamily: "monospace" }}>{p.id}</td>
+                    <td style={{ fontWeight: 500 }}>{p.title}</td>
+                    <td><span className="user-chip" style={{ fontSize: "12px", padding: "4px 10px" }}>{p.source}</span></td>
+                    <td className="muted">{p.publicationDate ? p.publicationDate.slice(0, 10) : "—"}</td>
+                    <td style={{ textAlign: "right" }}>
+                      <Link className="action-link" to={`/papers/${p.id}`}>
+                        Открыть
+                      </Link>
                     </td>
                   </tr>
-                );
-              })}
+                ))
+              )}
             </tbody>
           </table>
+        </div>
+        <p className="muted" style={{ marginTop: 14 }}>Синхронизировано: {updatedAt.toLocaleTimeString("ru-RU")}</p>
+      </div>
+
+      {/* Текущие фоновые процессы парсинга */}
+      <div className="panel">
+        <h3>Мониторинг процессов Celery</h3>
+        {jobs.length === 0 ? (
+          <p className="muted" style={{ padding: "12px 0 0" }}>Задачи появятся после запуска фонового парсинга.</p>
+        ) : (
+          <div style={{ overflowX: "auto", marginTop: 16 }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Celery ID</th>
+                  <th>Провайдер</th>
+                  <th>Ключевой запрос</th>
+                  <th>Статус</th>
+                  <th style={{ width: "200px" }}>Индикатор прогресса</th>
+                  <th>Найдено</th>
+                  <th style={{ textAlign: "right" }}>Управление</th>
+                </tr>
+              </thead>
+              <tbody>
+                {jobs.slice(0, 10).map((j) => {
+                  const progress = (() => {
+                    if (j.status === "completed") return 100;
+                    if (j.celeryStatus) {
+                      const current = j.celeryStatus.current || j.celeryStatus.result?.current || 0;
+                      const total = j.celeryStatus.total || j.celeryStatus.result?.total || 0;
+                      if (total > 0) return Math.round((current / total) * 100);
+                    }
+                    const delta = j.lastObservedCount - j.initialCount;
+                    return Math.min(100, Math.round((delta / 50) * 100));
+                  })();
+
+                  const statusText = (() => {
+                    if (j.status === "completed") return "✓ Готово";
+                    if (j.status === "cancelled") return "Отменено";
+                    if (j.celeryStatus) {
+                      const status = j.celeryStatus.status;
+                      if (status === "SUCCESS") return "✓ Готово";
+                      if (status === "FAILURE") return "✕ Сбой";
+                      if (status === "REVOKED") return "Отменено";
+                      if (status === "PENDING") return "Очередь";
+                      if (status === "STARTED") return j.celeryStatus.result?.status || "Парсинг...";
+                    }
+                    return "В обработке";
+                  })();
+
+                  const isJobActive = j.status === "in_progress" && j.celeryStatus?.status !== "REVOKED";
+                  const savedCount = j.celeryStatus?.saved_count || j.celeryStatus?.result?.saved_count || (j.lastObservedCount - j.initialCount);
+
+                  return (
+                    <tr key={j.jobId}>
+                      <td className="muted" style={{ fontFamily: "monospace", fontSize: "12px" }}>{j.jobId.slice(0, 8)}...</td>
+                      <td><span className="user-chip" style={{ fontSize: "11px", padding: "2px 8px" }}>{j.source}</span></td>
+                      <td style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{j.query}</td>
+                      <td>
+                        <span className={`status ${j.status === "completed" || j.celeryStatus?.status === "SUCCESS" ? "active" : j.status === "cancelled" ? "expired" : ""}`}>
+                          {statusText}
+                        </span>
+                      </td>
+                      <td>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          {/* Красивый кастомный прогресс-бар с анимацией */}
+                          <div style={{ flex: 1, height: 6, background: "rgba(255,255,255,0.08)", borderRadius: 3, overflow: "hidden" }}>
+                            <div
+                              style={{
+                                width: `${progress}%`,
+                                height: "100%",
+                                background: progress === 100 ? "#22c55e" : "#3b82f6",
+                                boxShadow: progress === 100 ? "0 0 8px rgba(34,197,94,0.4)" : "0 0 8px rgba(59,130,246,0.4)",
+                                transition: "width 0.4s cubic-bezier(0.4, 0, 0.2, 1)",
+                              }}
+                            />
+                          </div>
+                          <span style={{ fontSize: "12px", fontFamily: "monospace", minWidth: 32 }}>{progress}%</span>
+                        </div>
+                      </td>
+                      <td style={{ fontWeight: 600 }}>{savedCount}</td>
+                      <td style={{ textAlign: "right" }}>
+                        {isJobActive ? (
+                          <button className="btn" onClick={() => cancelJob(j.jobId)} style={{ padding: "6px 12px", fontSize: "12px" }}>
+                            Прервать
+                          </button>
+                        ) : (
+                          <button className="btn btn-danger" onClick={() => deleteJob(j.jobId)} style={{ padding: "6px 12px", fontSize: "12px" }}>
+                            Удалить
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>

@@ -1,4 +1,4 @@
-﻿import { useAuthStore } from "../../store/authStore";
+import { useAuthStore } from "../../store/authStore";
 import { useAuth } from "../../hooks/useAuth";
 import { useNavigate } from "react-router-dom";
 import { ThemeToggle } from "../../context/ThemeProvider";
@@ -15,20 +15,18 @@ export default function Header() {
     navigate("/login");
   };
 
-  let sessionLabel = "Session: none";
-  let sessionClass = "inactive";
+  let sessionTitle = "Нет сессии";
+  let dotColor = "#555";
 
   if (isSessionChecking) {
-    sessionLabel = "Session: checking";
-    sessionClass = "checking";
+    sessionTitle = "Проверка...";
+    dotColor = "#f59e0b";
+  } else if (isAuthenticated && user) {
+    sessionTitle = "Сессия активна";
+    dotColor = "#22c55e";
   } else if (isAuthenticated) {
-    if (user) {
-      sessionLabel = "Session: active";
-      sessionClass = "active";
-    } else {
-      sessionLabel = "Session: pending";
-      sessionClass = "pending";
-    }
+    sessionTitle = "Ожидание";
+    dotColor = "#f59e0b";
   }
 
   return (
@@ -39,11 +37,28 @@ export default function Header() {
       </div>
       <div className="header-actions">
         <ThemeToggle />
-        <div className={`session-status ${sessionClass}`} title={sessionLabel}>
-          <span className="session-dot" />
-          <span>{sessionLabel}</span>
-        </div>
-        <span className="user-chip">{user?.username || user?.email || "guest@local"}</span>
+
+        {/* Только точка с tooltip вместо текста */}
+        <div
+          title={sessionTitle}
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: "50%",
+            background: dotColor,
+            boxShadow: `0 0 6px ${dotColor}`,
+            animation: "pulse-dot 2.4s ease-in-out infinite",
+            flexShrink: 0,
+            cursor: "default",
+          }}
+        />
+
+        {user && (
+          <span className="user-chip">
+            {user.username || user.email}
+          </span>
+        )}
+
         {user ? (
           <button className="btn btn-ghost" onClick={handleLogout}>
             Выйти

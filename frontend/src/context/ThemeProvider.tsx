@@ -1,4 +1,4 @@
-﻿import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 
 type Theme = "light" | "dark";
 
@@ -17,41 +17,21 @@ interface ThemeProviderProps {
   defaultTheme?: Theme;
 }
 
-/**
- * Провайдер темы приложения.
- */
-export function ThemeProvider({ children, defaultTheme = "light" }: ThemeProviderProps) {
+export function ThemeProvider({ children, defaultTheme = "dark" }: ThemeProviderProps) {
   const [theme, setThemeState] = useState<Theme>(() => {
-    // Проверяем сохраненную тему
     const saved = localStorage.getItem(STORAGE_KEY) as Theme | null;
-    if (saved && (saved === "light" || saved === "dark")) {
-      return saved;
-    }
-
-    // Проверяем системную тему
-    if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
-      return "dark";
-    }
-
+    if (saved === "light" || saved === "dark") return saved;
+    if (window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
     return defaultTheme;
   });
 
   useEffect(() => {
-    // Применяем тему к документу
-    const root = document.documentElement;
-    root.setAttribute("data-theme", theme);
-
-    // Сохраняем в localStorage
+    document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem(STORAGE_KEY, theme);
   }, [theme]);
 
-  const setTheme = (newTheme: Theme) => {
-    setThemeState(newTheme);
-  };
-
-  const toggleTheme = () => {
-    setThemeState((prev) => (prev === "light" ? "dark" : "light"));
-  };
+  const setTheme = (t: Theme) => setThemeState(t);
+  const toggleTheme = () => setThemeState((p) => (p === "light" ? "dark" : "light"));
 
   return (
     <ThemeContext.Provider value={{ theme, toggleTheme, setTheme }}>
@@ -60,34 +40,43 @@ export function ThemeProvider({ children, defaultTheme = "light" }: ThemeProvide
   );
 }
 
-/**
- * Хук для использования темы.
- */
 export function useTheme() {
-  const context = useContext(ThemeContext);
-  if (context === undefined) {
-    throw new Error("useTheme must be used within a ThemeProvider");
-  }
-  return context;
+  const ctx = useContext(ThemeContext);
+  if (!ctx) throw new Error("useTheme must be used within ThemeProvider");
+  return ctx;
 }
 
-/**
- * Компонент переключателя темы.
- */
+const SunIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="4" />
+    <line x1="12" y1="2" x2="12" y2="5" />
+    <line x1="12" y1="19" x2="12" y2="22" />
+    <line x1="4.22" y1="4.22" x2="6.34" y2="6.34" />
+    <line x1="17.66" y1="17.66" x2="19.78" y2="19.78" />
+    <line x1="2" y1="12" x2="5" y2="12" />
+    <line x1="19" y1="12" x2="22" y2="12" />
+    <line x1="4.22" y1="19.78" x2="6.34" y2="17.66" />
+    <line x1="17.66" y1="6.34" x2="19.78" y2="4.22" />
+  </svg>
+);
+
+const MoonIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+  </svg>
+);
+
 export function ThemeToggle({ className = "" }: { className?: string }) {
   const { theme, toggleTheme } = useTheme();
-  const label = theme === "light" ? "Светлая" : "Темная";
-  const nextLabel = theme === "light" ? "темную" : "светлую";
 
   return (
     <button
-      className={`btn theme-toggle ${className}`}
+      className={`theme-toggle ${className}`}
       onClick={toggleTheme}
-      title={`Переключить на ${nextLabel} тему`}
+      title={theme === "dark" ? "Светлая тема" : "Тёмная тема"}
       type="button"
     >
-      <span className="theme-label">Тема</span>
-      <span className="theme-value">{label}</span>
+      {theme === "dark" ? <SunIcon /> : <MoonIcon />}
     </button>
   );
 }
