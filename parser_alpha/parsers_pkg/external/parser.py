@@ -1,4 +1,4 @@
-﻿"""Parser for normalized external-source rows."""
+"""Parser for normalized external-source rows."""
 
 from __future__ import annotations
 

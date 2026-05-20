@@ -118,9 +118,9 @@ async def test_vector_stats(client: AsyncClient, test_db: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_vector_rebuild(client: AsyncClient, test_db: AsyncSession):
+async def test_vector_rebuild(client: AsyncClient, test_db: AsyncSession, auth_headers: dict[str, str]):
     """Тест перестройки векторного индекса."""
-    response = await client.post("/api/v1/vector/rebuild")
+    response = await client.post("/api/v1/vector/rebuild", headers=auth_headers)
     
     # Перестройка должна работать даже без статей
     assert response.status_code == 200

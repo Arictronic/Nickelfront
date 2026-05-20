@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from app.services.parser_service import PDFParser, WebScraper, pdf_parser
+from rag.app.services.parser_service import PDFParser, WebScraper, pdf_parser
 
 
 class TestPDFParser:

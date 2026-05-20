@@ -164,8 +164,8 @@ class ChromaVectorService:
             if journal:
                 metadata["journal"] = journal[:500]
 
-            # Добавляем в коллекцию
-            self.collection.add(
+            # Добавляем или обновляем запись. upsert безопасен при повторной обработке статьи.
+            self.collection.upsert(
                 ids=[f"paper_{paper_id}"],
                 embeddings=[embedding],
                 metadatas=[metadata],
@@ -384,11 +384,17 @@ class ChromaVectorService:
             return False
 
         try:
-            if self._collection is not None:
+            # Коллекция может существовать на диске, даже если текущий процесс её ещё не открывал.
+            try:
                 self.client.delete_collection(self.COLLECTION_NAME)
-                self._collection = None
-                logger.info("Векторное хранилище очищено")
-                return True
+            except Exception as exc:
+                message = str(exc).lower()
+                if "does not exist" not in message and "not found" not in message:
+                    raise
+
+            self._collection = None
+            logger.info("Векторное хранилище очищено")
+            return True
         except Exception as e:
             logger.error(f"Ошибка при очистке хранилища: {e}")
 

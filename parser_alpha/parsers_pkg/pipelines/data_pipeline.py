@@ -1,4 +1,4 @@
-﻿"""Data pipeline with stage-level diagnostics and partial failure semantics."""
+"""Data pipeline with stage-level diagnostics and partial failure semantics."""
 
 from __future__ import annotations
 

@@ -15,7 +15,7 @@ import pdfplumber
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-from app.config import settings
+from ..config import settings
 
 logger = logging.getLogger(__name__)
 

@@ -27,6 +27,10 @@ class PaperBase(BaseModel):
     summary_ru: str | None = Field(None, description="Краткая суть статьи на русском")
     analysis_ru: str | None = Field(None, description="Анализ статьи на русском")
     translation_ru: str | None = Field(None, description="Перевод статьи на русский")
+    parse_confidence: float | None = Field(None, ge=0.0, le=1.0, description="Parser confidence score (0-1)")
+    provenance: dict[str, str] = Field(default_factory=dict, description="Per-field provenance metadata")
+    quality_flags: list[str] = Field(default_factory=list, description="Quality/degradation flags from parser pipeline")
+    schema_version: str | None = Field(default="2.0", description="Normalized record schema version")
 
 
 class PaperCreate(PaperBase):
@@ -104,12 +108,19 @@ class VectorStats(BaseModel):
 
 
 class VectorStatsResponse(BaseModel):
-    """Ответ со статистикой векторного поиска."""
+    """Ответ со статистикой векторного поиска.
+
+    `vector_store` — основная структурированная форма.
+    Верхнеуровневые поля оставлены для обратной совместимости со старыми клиентами/тестами.
+    """
 
     vector_store: VectorStats
     embedding_model: str | None = Field(None, description="Модель эмбеддингов")
     embedding_dim: int | None = Field(None, description="Размерность эмбеддингов")
     embedding_available: bool = Field(..., description="Доступность эмбеддингов")
+    count: int = Field(default=0, description="Количество документов, backward-compatible alias")
+    available: bool = Field(default=False, description="Доступность vector store, backward-compatible alias")
+    collection: str | None = Field(None, description="Название коллекции, backward-compatible alias")
 
 
 class VectorRebuildRequest(BaseModel):

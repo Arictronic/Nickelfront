@@ -16,6 +16,46 @@ class PaperService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
+    async def _enrich_existing_paper(
+        self,
+        existing: PaperModel,
+        paper_data: PaperCreate,
+    ) -> PaperModel:
+        """Аккуратно дозаполнить существующую статью новыми непустыми данными."""
+        updated = False
+        fields_to_fill = (
+            "authors",
+            "publication_date",
+            "journal",
+            "abstract",
+            "full_text",
+            "keywords",
+            "url",
+            "pdf_url",
+            "pdf_local_path",
+            "processing_error",
+            "summary_ru",
+            "analysis_ru",
+            "translation_ru",
+        )
+
+        for field_name in fields_to_fill:
+            current_value = getattr(existing, field_name, None)
+            new_value = getattr(paper_data, field_name, None)
+            if not current_value and new_value:
+                setattr(existing, field_name, new_value)
+                updated = True
+
+        if existing.processing_status in {None, "pending"} and paper_data.processing_status:
+            existing.processing_status = paper_data.processing_status
+            updated = True
+
+        if updated:
+            await self.db.commit()
+            await self.db.refresh(existing)
+
+        return existing
+
     async def create_paper(self, paper_data: PaperCreate) -> PaperSchema:
         """
         Создать статью в БД.
@@ -31,7 +71,7 @@ class PaperService:
             existing = await self.get_by_doi(paper_data.doi)
             if existing:
                 logger.info(f"Статья с DOI {paper_data.doi} уже существует")
-                return existing
+                return await self._enrich_existing_paper(existing, paper_data)
 
         # Проверяем по source_id
         if paper_data.source_id:
@@ -40,7 +80,7 @@ class PaperService:
             )
             if existing:
                 logger.info(f"Статья {paper_data.source_id} из {paper_data.source} уже существует")
-                return existing
+                return await self._enrich_existing_paper(existing, paper_data)
 
         # Создаём новую статью
         db_paper = PaperModel(
@@ -56,7 +96,13 @@ class PaperService:
             source_id=paper_data.source_id,
             url=paper_data.url,
             pdf_url=paper_data.pdf_url,
-            processing_status="pending",
+            pdf_local_path=paper_data.pdf_local_path,
+            processing_status=paper_data.processing_status or "pending",
+            content_task_id=paper_data.content_task_id,
+            processing_error=paper_data.processing_error,
+            summary_ru=paper_data.summary_ru,
+            analysis_ru=paper_data.analysis_ru,
+            translation_ru=paper_data.translation_ru,
         )
 
         self.db.add(db_paper)
@@ -94,6 +140,8 @@ class PaperService:
         query: str,
         limit: int = 10,
         offset: int = 0,
+        sources: list[str] | None = None,
+        full_text_only: bool = False,
     ) -> list[PaperSchema]:
         """
         Поиск статей по названию и аннотации.
@@ -108,15 +156,23 @@ class PaperService:
         """
         # Простой поиск по подстроке (для PostgreSQL можно использовать full-text search)
         search_pattern = f"%{query}%"
-        result = await self.db.execute(
-            select(PaperModel)
-            .where(
-                (PaperModel.title.ilike(search_pattern)) |
-                (PaperModel.abstract.ilike(search_pattern)) |
-                (PaperModel.keywords.cast(String).ilike(search_pattern))
+        stmt = select(PaperModel).where(
+            (PaperModel.title.ilike(search_pattern)) |
+            (PaperModel.abstract.ilike(search_pattern)) |
+            (PaperModel.keywords.cast(String).ilike(search_pattern))
+        )
+
+        if sources:
+            stmt = stmt.where(PaperModel.source.in_(sources))
+
+        if full_text_only:
+            stmt = stmt.where(
+                (PaperModel.full_text.is_not(None)) |
+                (PaperModel.pdf_local_path.is_not(None))
             )
-            .limit(limit)
-            .offset(offset)
+
+        result = await self.db.execute(
+            stmt.order_by(PaperModel.created_at.desc()).limit(limit).offset(offset)
         )
         return list(result.scalars().all())
 
@@ -124,19 +180,23 @@ class PaperService:
         self,
         limit: int = 10,
         offset: int = 0,
+        source: str | None = None,
     ) -> list[PaperSchema]:
-        """Получить список всех статей."""
-        result = await self.db.execute(
-            select(PaperModel)
-            .order_by(PaperModel.created_at.desc())
-            .limit(limit)
-            .offset(offset)
-        )
+        """Получить список статей с пагинацией и опциональным фильтром по источнику."""
+        stmt = select(PaperModel).order_by(PaperModel.created_at.desc())
+        if source and source != "all":
+            stmt = stmt.where(PaperModel.source == source)
+
+        result = await self.db.execute(stmt.limit(limit).offset(offset))
         return list(result.scalars().all())
 
-    async def get_total_count(self) -> int:
-        """Получить общее количество статей."""
-        result = await self.db.execute(select(func.count()).select_from(PaperModel))
+    async def get_total_count(self, source: str | None = None) -> int:
+        """Получить количество статей с опциональным фильтром по источнику."""
+        stmt = select(func.count()).select_from(PaperModel)
+        if source and source != "all":
+            stmt = stmt.where(PaperModel.source == source)
+
+        result = await self.db.execute(stmt)
         return result.scalar() or 0
 
     async def update_paper(

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { getBackendRootUrl } from "../api/client";
 import { getPapersCount } from "../api/papers";
 import { PAPER_SOURCES } from "../types/paper";
 
@@ -107,7 +108,7 @@ export default function Database() {
           <a className="btn" href="/vector-search" style={{ textDecoration: "none" }}>
             Векторный поиск
           </a>
-          <a className="btn" href="/docs" target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
+          <a className="btn" href={`${getBackendRootUrl()}/docs`} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
             Swagger документация
           </a>
         </div>

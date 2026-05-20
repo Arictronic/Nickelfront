@@ -6,10 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_current_user, require_admin_user
 from app.db.session import get_db
 from app.services.embedding_service import get_embedding_service
 from app.services.paper_service import PaperService
 from app.services.vector_service import get_vector_service
+from shared.schemas.auth import UserResponse
 from shared.schemas.paper import (
     VectorClearRequest,
     VectorClearResponse,
@@ -163,21 +165,29 @@ async def vector_search_stats():
     embedding_service = get_embedding_service()
     embedding_available = await asyncio.to_thread(lambda: embedding_service.model is not None)
 
+    store_count = int(vector_stats.get("count", 0) or 0)
+    store_available = bool(vector_stats.get("available", False))
+    store_collection = str(vector_stats.get("collection", "papers"))
+
     return VectorStatsResponse(
         vector_store=VectorStats(
-            count=vector_stats.get("count", 0),
-            available=vector_stats.get("available", False),
-            collection=vector_stats.get("collection", "papers"),
+            count=store_count,
+            available=store_available,
+            collection=store_collection,
             persist_directory=vector_stats.get("persist_directory", "./chroma_db"),
         ),
         embedding_model=embedding_service.MODEL_NAME if embedding_available else None,
         embedding_dim=embedding_service.EMBEDDING_DIM if embedding_available else None,
         embedding_available=embedding_available,
+        count=store_count,
+        available=store_available,
+        collection=store_collection,
     )
 
 
 @router.post("/rebuild", response_model=VectorRebuildResponse)
 async def rebuild_vector_index(
+    _current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(default=10000, ge=1, le=100000, description="Макс. количество статей"),
     batch_size: int = Query(default=32, ge=1, le=128, description="Размер пакета"),
@@ -194,13 +204,9 @@ async def rebuild_vector_index(
     embedding_service = get_embedding_service()
     vector_service = get_vector_service()
 
-    embedding_available = await asyncio.to_thread(lambda: embedding_service.model is not None)
-    if not embedding_available:
-        raise HTTPException(status_code=500, detail="Модель эмбеддингов недоступна")
-
     logger.info(f"Начало перестройки векторного индекса (limit={limit}, batch_size={batch_size})")
 
-    # Получаем все статьи из БД
+    # Получаем все статьи из БД. Пустая база не должна требовать загруженной ML-модели.
     paper_service = PaperService(db)
     all_papers = await paper_service.get_all(limit=limit, offset=0)
 
@@ -211,13 +217,17 @@ async def rebuild_vector_index(
             total=0,
         )
 
+    embedding_available = await asyncio.to_thread(lambda: embedding_service.model is not None)
+    if not embedding_available:
+        raise HTTPException(status_code=500, detail="Модель эмбеддингов недоступна")
+
     # Генерируем тексты и эмбеддинги
     papers_with_embeddings = []
     for paper in all_papers:
         # Пропускаем если уже есть эмбеддинг
         if paper.embedding:
             papers_with_embeddings.append({
-                "id": paper.id,
+                "paper_id": paper.id,
                 "title": paper.title,
                 "source": paper.source,
                 "doi": paper.doi,
@@ -241,7 +251,7 @@ async def rebuild_vector_index(
                 # Сохраняем эмбеддинг в БД
                 await paper_service.update_paper(paper.id, embedding=embedding)
                 papers_with_embeddings.append({
-                    "id": paper.id,
+                    "paper_id": paper.id,
                     "title": paper.title,
                     "source": paper.source,
                     "doi": paper.doi,
@@ -265,6 +275,7 @@ async def rebuild_vector_index(
 @router.post("/clear", response_model=VectorClearResponse)
 async def clear_vector_index(
     request: VectorClearRequest,
+    _admin: UserResponse = Depends(require_admin_user),
 ):
     """
     Очистить векторный индекс.

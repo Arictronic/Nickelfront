@@ -7,11 +7,35 @@ import { useAuthStore } from "../store/authStore";
 const apiUrl = import.meta.env.VITE_API_URL;
 const baseURL = apiUrl ? apiUrl : "/api/v1";
 
+function serializeParams(params: Record<string, unknown>): string {
+  const searchParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "") return;
+
+    if (Array.isArray(value)) {
+      value.forEach((item) => {
+        if (item !== undefined && item !== null && item !== "") {
+          searchParams.append(key, String(item));
+        }
+      });
+      return;
+    }
+
+    searchParams.append(key, String(value));
+  });
+
+  return searchParams.toString();
+}
+
 export const apiClient = axios.create({
   baseURL,
   timeout: 30000,
   headers: {
     "Content-Type": "application/json",
+  },
+  paramsSerializer: {
+    serialize: serializeParams,
   },
 });
 
@@ -20,6 +44,9 @@ const refreshClient = axios.create({
   timeout: 30000,
   headers: {
     "Content-Type": "application/json",
+  },
+  paramsSerializer: {
+    serialize: serializeParams,
   },
 });
 
@@ -111,3 +138,19 @@ apiClient.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+export function getBackendRootUrl(): string {
+  const configuredBase = String(apiClient.defaults.baseURL || "");
+
+  try {
+    if (/^https?:\/\//i.test(configuredBase)) {
+      return new URL(configuredBase).origin;
+    }
+  } catch {
+    // Fallback below.
+  }
+
+  // In local Vite mode apiClient usually uses relative /api/v1 through proxy.
+  // Backend Swagger is not under /api, so point directly to the local FastAPI server.
+  return "http://localhost:8001";
+}

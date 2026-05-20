@@ -14,11 +14,13 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import router
-from app.config import settings
+from .api.routes import router
+from .config import settings
 
 # Настройка логирования
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 LOGS_DIR = PROJECT_ROOT / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 RAG_LOG_FILE = LOGS_DIR / "rag_api.log"
@@ -192,7 +194,7 @@ def main():
     logger.info(f"Запуск сервера на {settings.host}:{settings.port}")
 
     uvicorn.run(
-        "app.main:app",
+        "rag.app.main:app",
         host=settings.host,
         port=settings.port,
         reload=True,  # Автоперезагрузка при разработке

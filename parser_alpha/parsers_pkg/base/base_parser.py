@@ -1,4 +1,4 @@
-﻿"""Base parser abstractions and shared normalization/validation helpers."""
+"""Base parser abstractions and shared normalization/validation helpers."""
 
 from __future__ import annotations
 

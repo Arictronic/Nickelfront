@@ -1,4 +1,4 @@
-﻿* {
+* {
   box-sizing: border-box;
 }
 :root {
@@ -22,7 +22,7 @@
   --table-row-hover: #f8fbff;
 }
 
-/* РўРµРјРЅР°СЏ С‚РµРјР° */
+/* Тёмная тема */
 [data-theme="dark"] {
   --bg: #0f172a;
   --surface: #1e293b;

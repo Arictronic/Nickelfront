@@ -1,4 +1,4 @@
-﻿"""RAG vector store service based on Chroma + LangChain."""
+"""RAG vector store service based on Chroma + LangChain."""
 
 from __future__ import annotations
 

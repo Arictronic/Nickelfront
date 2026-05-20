@@ -92,16 +92,12 @@ async def search_papers(
 ):
     """Поиск статей в локальной базе данных."""
     paper_service = PaperService(db)
-    papers = await paper_service.search(query=request.query, limit=request.limit)
-
-    if request.sources:
-        papers = [p for p in papers if p.source in request.sources]
-    if request.full_text_only:
-        papers = [
-            p
-            for p in papers
-            if (p.full_text and p.full_text.strip()) or p.pdf_local_path
-        ]
+    papers = await paper_service.search(
+        query=request.query,
+        limit=request.limit,
+        sources=request.sources,
+        full_text_only=request.full_text_only,
+    )
 
     return PaperSearchResponse(
         papers=papers,
@@ -120,12 +116,7 @@ async def get_papers(
 ):
     """Получить список всех статей."""
     paper_service = PaperService(db)
-    papers = await paper_service.get_all(limit=limit, offset=offset)
-
-    if source:
-        papers = [p for p in papers if p.source == source]
-
-    return papers
+    return await paper_service.get_all(limit=limit, offset=offset, source=source)
 
 
 @router.get("/count")
@@ -315,11 +306,11 @@ async def get_paper_pdf(paper_id: int, db: AsyncSession = Depends(get_db)):
                 pdf_bytes = remote.content or b""
 
             if not pdf_bytes:
-                raise HTTPException(status_code=404, detail="PDF ??????")
+                raise HTTPException(status_code=404, detail="PDF пустой")
 
             content_type = (remote.headers.get("content-type") or "").lower()
             if "pdf" not in content_type and not pdf_bytes.startswith(b"%PDF"):
-                raise HTTPException(status_code=404, detail="????????? ???????? ?????? ??-PDF")
+                raise HTTPException(status_code=404, detail="Удалённый ресурс не является PDF")
 
             try:
                 cached_path = await asyncio.to_thread(save_pdf_locally, paper_id, pdf_bytes)
@@ -336,9 +327,9 @@ async def get_paper_pdf(paper_id: int, db: AsyncSession = Depends(get_db)):
             raise
         except Exception as exc:
             logger.warning("Failed to proxy PDF for paper {}: {}", paper_id, exc)
-            raise HTTPException(status_code=502, detail="?? ??????? ????????? PDF")
+            raise HTTPException(status_code=502, detail="Не удалось получить PDF")
 
-    raise HTTPException(status_code=404, detail="PDF ?? ??????")
+    raise HTTPException(status_code=404, detail="PDF не найден")
 
 
 @router.post("/id/{paper_id}/reprocess")
@@ -377,9 +368,7 @@ async def reprocess_all_papers(
 ):
     """Поставить в очередь постобработку набора существующих статей."""
     paper_service = PaperService(db)
-    papers = await paper_service.get_all(limit=limit, offset=0)
-    if source:
-        papers = [p for p in papers if p.source == source]
+    papers = await paper_service.get_all(limit=limit, offset=0, source=source)
 
     queued = 0
     task_ids: list[str] = []
@@ -398,7 +387,11 @@ async def reprocess_all_papers(
 
 
 @router.delete("/id/{paper_id}")
-async def delete_paper(paper_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_paper(
+    paper_id: int,
+    _current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Удалить статью."""
     paper_service = PaperService(db)
     deleted = await paper_service.delete_paper(paper_id)

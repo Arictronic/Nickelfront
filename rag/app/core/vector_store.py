@@ -14,8 +14,8 @@ from chromadb.config import Settings as ChromaSettings
 from langchain.schema import Document
 from langchain_community.vectorstores import Chroma
 
-from app.config import settings
-from app.core.embeddings import get_embeddings_model
+from ..config import settings
+from .embeddings import get_embeddings_model
 
 logger = logging.getLogger(__name__)
 

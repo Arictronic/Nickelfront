@@ -8,7 +8,7 @@ import logging
 
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
-from app.api.schemas import (
+from .schemas import (
     AskRequest,
     AskResponse,
     ClearStoreResponse,
@@ -19,11 +19,11 @@ from app.api.schemas import (
     UploadResponse,
     VectorStoreStats,
 )
-from app.config import settings
-from app.core.rag_chain import process_query, process_query_with_sources
-from app.core.vector_store import vector_store_manager
-from app.services.llm_service import llm_service
-from app.services.parser_service import pdf_parser
+from ..config import settings
+from ..core.rag_chain import process_query, process_query_with_sources
+from ..core.vector_store import vector_store_manager
+from ..services.llm_service import llm_service
+from ..services.parser_service import pdf_parser
 
 logger = logging.getLogger(__name__)
 

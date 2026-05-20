@@ -10,6 +10,7 @@ import io
 import sys
 from datetime import datetime
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 # Добавляем корень проекта в PATH
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -34,6 +35,13 @@ try:
     DOCX_AVAILABLE = True
 except ImportError:
     DOCX_AVAILABLE = False
+
+
+def _pdf_text(value: object) -> str:
+    """Escape user/provider text before passing it to ReportLab Paragraph."""
+    if value is None:
+        return ""
+    return xml_escape(str(value), {"\n": "<br/>"})
 
 
 class PaperReportData:
@@ -153,41 +161,41 @@ class ReportExporter:
             spaceAfter=6
         )
 
-        elements.append(Paragraph(f"<b>ID:</b> {self.report_data.id}", info_style))
-        elements.append(Paragraph(f"<b>Источник:</b> {self.report_data.source}", info_style))
+        elements.append(Paragraph(f"<b>ID:</b> {_pdf_text(self.report_data.id)}", info_style))
+        elements.append(Paragraph(f"<b>Источник:</b> {_pdf_text(self.report_data.source)}", info_style))
         elements.append(Paragraph(f"<b>Дата генерации:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}", info_style))
         elements.append(Spacer(1, 0.3*inch))
 
         # Название
-        title_para = Paragraph(f"<b>{self.report_data.title}</b>", styles['Heading2'])
+        title_para = Paragraph(f"<b>{_pdf_text(self.report_data.title)}</b>", styles['Heading2'])
         elements.append(title_para)
         elements.append(Spacer(1, 0.2*inch))
 
         # Авторы
         if self.report_data.authors:
-            authors_text = "<b>Авторы:</b> " + ", ".join(self.report_data.authors)
+            authors_text = "<b>Авторы:</b> " + _pdf_text(", ".join(self.report_data.authors))
             elements.append(Paragraph(authors_text, styles['Normal']))
             elements.append(Spacer(1, 0.1*inch))
 
         # Журнал и дата
-        journal_text = f"<b>Журнал:</b> {self.report_data.journal}"
+        journal_text = f"<b>Журнал:</b> {_pdf_text(self.report_data.journal)}"
         elements.append(Paragraph(journal_text, styles['Normal']))
 
         if self.report_data.publication_date and self.report_data.publication_date != "N/A":
             pub_date = self.report_data.publication_date[:10] if len(str(self.report_data.publication_date)) > 10 else self.report_data.publication_date
-            elements.append(Paragraph(f"<b>Дата публикации:</b> {pub_date}", styles['Normal']))
+            elements.append(Paragraph(f"<b>Дата публикации:</b> {_pdf_text(pub_date)}", styles['Normal']))
         elements.append(Spacer(1, 0.1*inch))
 
         # DOI
         if self.report_data.doi and self.report_data.doi != "N/A":
-            elements.append(Paragraph(f"<b>DOI:</b> {self.report_data.doi}", styles['Normal']))
+            elements.append(Paragraph(f"<b>DOI:</b> {_pdf_text(self.report_data.doi)}", styles['Normal']))
             elements.append(Spacer(1, 0.2*inch))
 
         # Аннотация
         elements.append(Paragraph("<b>Аннотация</b>", styles['Heading3']))
         if self.report_data.abstract:
             abstract_text = self.report_data.abstract[:2000] + "..." if len(self.report_data.abstract) > 2000 else self.report_data.abstract
-            elements.append(Paragraph(abstract_text, styles['Normal']))
+            elements.append(Paragraph(_pdf_text(abstract_text), styles['Normal']))
         else:
             elements.append(Paragraph("<i>Аннотация отсутствует</i>", styles['Normal']))
         elements.append(Spacer(1, 0.2*inch))
@@ -196,7 +204,7 @@ class ReportExporter:
         elements.append(Paragraph("<b>Ключевые слова</b>", styles['Heading3']))
         if self.report_data.keywords:
             keywords_text = ", ".join(self.report_data.keywords)
-            elements.append(Paragraph(keywords_text, styles['Normal']))
+            elements.append(Paragraph(_pdf_text(keywords_text), styles['Normal']))
         else:
             elements.append(Paragraph("<i>Ключевые слова не указаны</i>", styles['Normal']))
         elements.append(Spacer(1, 0.2*inch))
@@ -232,7 +240,7 @@ class ReportExporter:
 
         if recommendations:
             for rec in recommendations:
-                elements.append(Paragraph(f"• {rec}", styles['Normal']))
+                elements.append(Paragraph(f"• {_pdf_text(rec)}", styles['Normal']))
         else:
             elements.append(Paragraph("<i>Нет рекомендаций. Статья соответствует критериям качества.</i>", styles['Normal']))
 

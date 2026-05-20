@@ -10,7 +10,7 @@ from functools import lru_cache
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
-from app.config import settings
+from ..config import settings
 
 logger = logging.getLogger(__name__)
 

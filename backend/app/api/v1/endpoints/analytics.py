@@ -115,16 +115,6 @@ async def get_analytics_summary(
 
     except HTTPException:
         raise
-    except HTTPException:
-        raise
-    except HTTPException:
-        raise
-    except HTTPException:
-        raise
-    except HTTPException:
-        raise
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -266,7 +256,7 @@ async def get_top_items(
 
 @router.get("/metrics/keyword-stats")
 async def get_keyword_stats(
-    source: str | None = Query(None, description="Р¤РёР»СЊС‚СЂ РїРѕ РёСЃС‚РѕС‡РЅРёРєСѓ"),
+    source: str | None = Query(None, description="Фильтр по источнику"),
     db: AsyncSession = Depends(get_db),
 ):
     try:

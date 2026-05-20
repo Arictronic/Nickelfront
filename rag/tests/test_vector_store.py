@@ -5,8 +5,8 @@
 import pytest
 from langchain.schema import Document
 
-from app.core.embeddings import get_embeddings_model
-from app.core.vector_store import (
+from rag.app.core.embeddings import get_embeddings_model
+from rag.app.core.vector_store import (
     VectorStoreManager,
     vector_store_manager,
 )

@@ -108,12 +108,19 @@ class VectorStats(BaseModel):
 
 
 class VectorStatsResponse(BaseModel):
-    """Ответ со статистикой векторного поиска."""
+    """Ответ со статистикой векторного поиска.
+
+    `vector_store` — основная структурированная форма.
+    Верхнеуровневые поля оставлены для обратной совместимости со старыми клиентами/тестами.
+    """
 
     vector_store: VectorStats
     embedding_model: str | None = Field(None, description="Модель эмбеддингов")
     embedding_dim: int | None = Field(None, description="Размерность эмбеддингов")
     embedding_available: bool = Field(..., description="Доступность эмбеддингов")
+    count: int = Field(default=0, description="Количество документов, backward-compatible alias")
+    available: bool = Field(default=False, description="Доступность vector store, backward-compatible alias")
+    collection: str | None = Field(None, description="Название коллекции, backward-compatible alias")
 
 
 class VectorRebuildRequest(BaseModel):

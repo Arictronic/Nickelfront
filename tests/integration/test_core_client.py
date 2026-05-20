@@ -1,6 +1,8 @@
 """Интеграционные тесты для CORE API."""
 
 import pytest
+
+pytestmark = pytest.mark.external
 from parsers_pkg.core.client import COREClient
 
 

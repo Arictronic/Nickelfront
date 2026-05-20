@@ -1,4 +1,4 @@
-﻿"""arXiv парсер научных статей."""
+"""arXiv парсер научных статей."""
 
 import re
 from datetime import datetime

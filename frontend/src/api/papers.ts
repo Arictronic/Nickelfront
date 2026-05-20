@@ -195,15 +195,28 @@ export async function vectorSearch(filters: VectorSearchFilters) {
 
 export async function getVectorStats() {
   const { data } = await apiClient.get<{
-    count: number;
-    available: boolean;
+    vector_store?: {
+      count?: number;
+      available?: boolean;
+      collection?: string;
+      persist_directory?: string;
+    };
+    count?: number;
+    available?: boolean;
     collection?: string;
     embedding_model?: string | null;
     embedding_dim?: number | null;
     embedding_available?: boolean;
   }>("/vector/stats");
 
-  return data;
+  return {
+    count: data.vector_store?.count ?? data.count ?? 0,
+    available: data.vector_store?.available ?? data.available ?? false,
+    collection: data.vector_store?.collection ?? data.collection,
+    embedding_model: data.embedding_model ?? null,
+    embedding_dim: data.embedding_dim ?? null,
+    embedding_available: data.embedding_available ?? false,
+  };
 }
 
 export async function rebuildVectorIndex() {

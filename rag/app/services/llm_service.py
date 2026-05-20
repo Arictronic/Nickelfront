@@ -9,7 +9,7 @@ import logging
 
 from langchain_community.llms import OpenAI
 
-from app.config import settings
+from ..config import settings
 
 logger = logging.getLogger(__name__)
 

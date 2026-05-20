@@ -1,12 +1,14 @@
+# shared/schemas/task.py
+
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class TaskCreate(BaseModel):
     patent_number: str
-    options: dict[str, Any] = {}
+    options: dict[str, Any] = Field(default_factory=dict)
 
 
 class TaskOut(BaseModel):
@@ -16,10 +18,12 @@ class TaskOut(BaseModel):
     result: dict[str, Any] | None = None
     created_at: datetime
 
+    class Config:
+        from_attributes = True
+
 
 class CeleryTaskStatus(BaseModel):
     """Статус задачи Celery по task_id."""
-
     task_id: str
     status: Literal["PENDING", "STARTED", "RETRY", "FAILURE", "SUCCESS", "REVOKED"]
     state: str | None = None

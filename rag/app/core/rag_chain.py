@@ -13,9 +13,9 @@ from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document
 
-from app.config import settings
-from app.core.vector_store import vector_store_manager
-from app.services.llm_service import create_llm
+from ..config import settings
+from .vector_store import vector_store_manager
+from ..services.llm_service import create_llm
 
 logger = logging.getLogger(__name__)
 

@@ -1,4 +1,4 @@
-﻿"""External source clients (OpenAlex, Crossref, Europe PMC)."""
+"""External source clients (OpenAlex, Crossref, Europe PMC)."""
 
 from __future__ import annotations
 

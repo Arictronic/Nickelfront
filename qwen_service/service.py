@@ -156,9 +156,9 @@ if qwen_token:
         logger=lambda msg: logging.info(msg),
         default_model=str(config.get("model", DEFAULT_MODEL)),
     )
-    logging.info(f"Qwen API ??????????????? ? ???????: {qwen_token[:20]}...")
+    logging.info("Qwen API инициализирован: токен найден")
 else:
-    logging.warning("Qwen ????? ?? ?????? ? .env!")
+    logging.warning("Qwen токен не найден в .env!")
 
 # Хранилище сессий в памяти
 active_sessions: dict[str, dict[str, Any]] = {}

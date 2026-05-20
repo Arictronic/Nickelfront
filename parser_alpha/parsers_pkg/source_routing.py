@@ -1,4 +1,4 @@
-﻿"""Source routing, query adaptation, fallback chains, and health persistence."""
+"""Source routing, query adaptation, fallback chains, and health persistence."""
 
 from __future__ import annotations
 

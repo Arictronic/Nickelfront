@@ -1,14 +1,39 @@
 """Test configuration."""
 
-import pytest
+from datetime import timedelta
 from typing import AsyncGenerator
-from httpx import AsyncClient
+
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# Важно: порядок путей должен быть стабильным.
+# 1) backend — чтобы импорты app.* шли из backend/app;
+# 2) корень проекта — чтобы shared.* шёл из корневого shared/, а не из parser_alpha/shared;
+# 3) parser_alpha — чтобы были доступны parsers_pkg.*.
+DESIRED_IMPORT_PATHS = (
+    PROJECT_ROOT / "backend",
+    PROJECT_ROOT,
+    PROJECT_ROOT / "parser_alpha",
+)
+
+for _path in reversed(DESIRED_IMPORT_PATHS):
+    _path_str = str(_path)
+    while _path_str in sys.path:
+        sys.path.remove(_path_str)
+    sys.path.insert(0, _path_str)
+
+import pytest
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.main import app
+from app.core.security import create_access_token, get_password_hash
 from app.db.base import Base
+from app.db.models.user import User
 from app.db.session import get_db
+from app.main import app
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -74,10 +99,32 @@ async def client(engine, test_db) -> AsyncGenerator[AsyncClient, None]:
 
     app.dependency_overrides[get_db] = override_get_db
 
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
 
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+async def auth_headers(test_db: AsyncSession) -> dict[str, str]:
+    """Create an authorized test user and return Bearer headers."""
+    user = User(
+        email="api-test@example.com",
+        username="api_test",
+        password_hash=get_password_hash("TestPassword123!"),
+        is_active=True,
+        is_verified=True,
+    )
+    test_db.add(user)
+    await test_db.commit()
+    await test_db.refresh(user)
+
+    access_token = create_access_token(
+        data={"sub": user.email, "user_id": user.id},
+        expires_delta=timedelta(minutes=30),
+    )
+    return {"Authorization": f"Bearer {access_token}"}
 
 
 @pytest.fixture

@@ -3,7 +3,7 @@
 """
 
 import pytest
-from app.config import Settings, settings
+from rag.app.config import Settings, settings
 
 
 class TestSettings:

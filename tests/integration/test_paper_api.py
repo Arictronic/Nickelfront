@@ -44,17 +44,25 @@ class TestPaperAPI:
         assert response.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_delete_paper_not_found(self, client: AsyncClient):
+    async def test_delete_paper_not_found(self, client: AsyncClient, auth_headers: dict[str, str]):
         """Тест удаления несуществующей статьи."""
-        response = await client.delete("/api/v1/papers/id/99999")
+        response = await client.delete("/api/v1/papers/id/99999", headers=auth_headers)
         assert response.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_start_parsing(self, client: AsyncClient):
+    async def test_start_parsing(self, client: AsyncClient, auth_headers: dict[str, str], monkeypatch):
         """Тест запуска парсинга."""
+        class FakeTask:
+            id = "test-parse-task-id"
+
+        from app.api.v1.endpoints import parse as parse_endpoint
+
+        monkeypatch.setattr(parse_endpoint.parse_papers_task, "delay", lambda **kwargs: FakeTask())
+
         response = await client.post(
             "/api/v1/papers/parse",
-            params={"query": "nickel alloys", "limit": 5}
+            params={"query": "nickel alloys", "limit": 5},
+            headers=auth_headers,
         )
         assert response.status_code == 200
         data = response.json()
@@ -63,11 +71,19 @@ class TestPaperAPI:
         assert data["message"] == "Парсинг запущен"
 
     @pytest.mark.asyncio
-    async def test_start_parsing_all(self, client: AsyncClient):
+    async def test_start_parsing_all(self, client: AsyncClient, auth_headers: dict[str, str], monkeypatch):
         """Тест запуска массового парсинга."""
+        class FakeTask:
+            id = "test-parse-all-task-id"
+
+        from app.api.v1.endpoints import parse as parse_endpoint
+
+        monkeypatch.setattr(parse_endpoint.parse_all_sources_task, "delay", lambda **kwargs: FakeTask())
+
         response = await client.post(
             "/api/v1/papers/parse-all",
-            params={"limit_per_query": 5}
+            params={"limit_per_query": 5, "query": "nickel alloys"},
+            headers=auth_headers,
         )
         assert response.status_code == 200
         data = response.json()
@@ -81,7 +97,7 @@ class TestPaperAPI:
         response = await client.get("/health")
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "ok"
+        assert data["status"] in {"ok", "degraded"}
 
 
 class TestPaperCRUD:

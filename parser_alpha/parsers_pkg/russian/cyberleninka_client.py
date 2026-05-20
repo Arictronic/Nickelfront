@@ -1,4 +1,4 @@
-﻿"""CyberLeninka client for Russian scientific articles."""
+"""CyberLeninka client for Russian scientific articles."""
 
 from __future__ import annotations
 

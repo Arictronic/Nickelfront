@@ -1,4 +1,4 @@
-﻿import { Navigate, useNavigate } from "react-router-dom";
+import { Navigate, useNavigate } from "react-router-dom";
 import { useAuthStore } from "../store/authStore";
 
 export default function Landing() {

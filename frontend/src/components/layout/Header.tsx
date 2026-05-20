@@ -1,4 +1,4 @@
-﻿import { useAuthStore } from "../../store/authStore";
+import { useAuthStore } from "../../store/authStore";
 import { useAuth } from "../../hooks/useAuth";
 import { useNavigate } from "react-router-dom";
 import { ThemeToggle } from "../../context/ThemeProvider";

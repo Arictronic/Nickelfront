@@ -4,158 +4,106 @@ eLibrary.ru Parser
 Парсер для обработки результатов поиска из eLibrary.ru (РИНЦ).
 """
 
-from typing import Dict, List, Optional, Any
+from __future__ import annotations
+
 from datetime import datetime
-from parsers_pkg.models import Paper
+from typing import Any
+
+from shared.schemas.paper import Paper
 
 
 class ELibraryParser:
-    """Парсер для результатов eLibrary.ru"""
-    
-    def __init__(self):
-        """Инициализация парсера"""
+    """Парсер для результатов поиска eLibrary.ru."""
+
+    def __init__(self) -> None:
         self.source_name = "eLibrary"
-    
-    async def parse_search_results(
-        self,
-        results: List[Dict[str, Any]]
-    ) -> List[Paper]:
-        """
-        Парсинг результатов поиска
-        
-        Args:
-            results: Список словарей с результатами поиска
-        
-        Returns:
-            Список объектов Paper
-        """
-        papers = []
-        
+
+    async def parse_search_results(self, results: list[dict[str, Any]]) -> list[Paper]:
+        """Преобразовать сырые результаты поиска в схемы Paper."""
+        papers: list[Paper] = []
+
         for result in results:
             try:
                 paper = self._parse_single_result(result)
                 if paper:
                     papers.append(paper)
-            except Exception as e:
-                print(f"Ошибка парсинга результата: {e}")
+            except Exception as exc:
+                print(f"Ошибка парсинга результата eLibrary: {exc}")
                 continue
-        
+
         return papers
-    
-    def _parse_single_result(self, result: Dict[str, Any]) -> Optional[Paper]:
-        """
-        Парсинг одного результата
-        
-        Args:
-            result: Словарь с данными статьи
-        
-        Returns:
-            Объект Paper или None
-        """
-        try:
-            # Обязательные поля
-            if not result.get('title') or not result.get('url'):
-                return None
-            
-            # Создать объект Paper
-            paper = Paper(
-                title=result['title'],
-                authors=result.get('authors', []),
-                abstract=result.get('abstract', ''),
-                url=result['url'],
-                source=self.source_name,
-                published_date=self._parse_date(result.get('year')),
-                doi=result.get('doi'),
-                pdf_url=None,  # eLibrary обычно не предоставляет прямые PDF ссылки
-                keywords=result.get('keywords', []),
-                citations=result.get('citations', 0),
-                metadata={
-                    'elibrary_id': result.get('elibrary_id'),
-                    'source_info': result.get('source', ''),
-                    'year': result.get('year'),
-                }
-            )
-            
-            return paper
-            
-        except Exception as e:
-            print(f"Ошибка создания Paper объекта: {e}")
+
+    def _parse_single_result(self, result: dict[str, Any]) -> Paper | None:
+        """Преобразовать один результат eLibrary в Paper."""
+        title = str(result.get("title") or "").strip()
+        url = str(result.get("url") or "").strip()
+        if not title or not url:
             return None
-    
-    def _parse_date(self, year: Optional[str]) -> Optional[str]:
-        """
-        Парсинг даты из года
-        
-        Args:
-            year: Год публикации
-        
-        Returns:
-            Дата в формате ISO или None
-        """
+
+        authors = result.get("authors") or []
+        if not isinstance(authors, list):
+            authors = [str(authors)]
+
+        keywords = result.get("keywords") or []
+        if not isinstance(keywords, list):
+            keywords = [str(keywords)]
+
+        metadata_keywords = [
+            str(item).strip()
+            for item in [
+                result.get("source"),
+                result.get("year"),
+                f"цитирований: {result.get('citations')}" if result.get("citations") is not None else None,
+            ]
+            if item
+        ]
+
+        return Paper(
+            title=title,
+            authors=[str(author).strip() for author in authors if str(author).strip()],
+            abstract=str(result.get("abstract") or "").strip() or None,
+            url=url,
+            source=self.source_name,
+            publication_date=self._parse_date(result.get("year")),
+            doi=str(result.get("doi") or "").strip() or None,
+            pdf_url=None,
+            keywords=[str(keyword).strip() for keyword in [*keywords, *metadata_keywords] if str(keyword).strip()],
+            source_id=str(result.get("elibrary_id") or "").strip() or None,
+        )
+
+    def _parse_date(self, year: Any) -> datetime | None:
+        """Преобразовать год публикации в datetime."""
         if not year:
             return None
-        
+
         try:
-            # Попытка создать дату из года
-            year_int = int(year)
-            if 1900 <= year_int <= datetime.now().year:
-                return f"{year_int}-01-01"
+            year_int = int(str(year).strip())
         except (ValueError, TypeError):
-            pass
-        
+            return None
+
+        if 1900 <= year_int <= datetime.now().year:
+            return datetime(year_int, 1, 1)
         return None
-    
-    async def parse_article_details(
-        self,
-        details: Dict[str, Any]
-    ) -> Optional[Paper]:
-        """
-        Парсинг детальной информации о статье
-        
-        Args:
-            details: Словарь с детальными данными
-        
-        Returns:
-            Объект Paper или None
-        """
+
+    async def parse_article_details(self, details: dict[str, Any]) -> Paper | None:
+        """Преобразовать детальную карточку статьи."""
         return self._parse_single_result(details)
-    
-    def enrich_paper_with_details(
-        self,
-        paper: Paper,
-        details: Dict[str, Any]
-    ) -> Paper:
-        """
-        Обогащение объекта Paper детальной информацией
-        
-        Args:
-            paper: Существующий объект Paper
-            details: Словарь с дополнительными данными
-        
-        Returns:
-            Обновленный объект Paper
-        """
-        # Обновить поля, если они отсутствуют
-        if not paper.abstract and details.get('abstract'):
-            paper.abstract = details['abstract']
-        
-        if not paper.keywords and details.get('keywords'):
-            paper.keywords = details['keywords']
-        
-        if not paper.doi and details.get('doi'):
-            paper.doi = details['doi']
-        
-        if not paper.citations and details.get('citations'):
-            paper.citations = details['citations']
-        
-        # Обновить метаданные
-        if paper.metadata is None:
-            paper.metadata = {}
-        
-        paper.metadata.update({
-            'elibrary_id': details.get('elibrary_id'),
-            'source_info': details.get('source', ''),
-            'year': details.get('year'),
-        })
-        
+
+    def enrich_paper_with_details(self, paper: Paper, details: dict[str, Any]) -> Paper:
+        """Обогатить Paper детальными данными, если они отсутствуют."""
+        if not paper.abstract and details.get("abstract"):
+            paper.abstract = str(details["abstract"]).strip() or None
+
+        if not paper.keywords and details.get("keywords"):
+            raw_keywords = details.get("keywords") or []
+            if not isinstance(raw_keywords, list):
+                raw_keywords = [str(raw_keywords)]
+            paper.keywords = [str(keyword).strip() for keyword in raw_keywords if str(keyword).strip()]
+
+        if not paper.doi and details.get("doi"):
+            paper.doi = str(details["doi"]).strip() or None
+
+        if not paper.source_id and details.get("elibrary_id"):
+            paper.source_id = str(details["elibrary_id"]).strip() or None
+
         return paper

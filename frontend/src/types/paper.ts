@@ -1,4 +1,4 @@
-﻿export const PAPER_SOURCES = [
+export const PAPER_SOURCES = [
   "CORE",
   "arXiv",
   "OpenAlex",
@@ -136,7 +136,7 @@ export interface VectorSearchResponse {
   search_type: SearchType | "text_fallback";
 }
 
-export type CeleryTaskStatusType = "PENDING" | "STARTED" | "RETRY" | "FAILURE" | "SUCCESS";
+export type CeleryTaskStatusType = "PENDING" | "STARTED" | "RETRY" | "FAILURE" | "SUCCESS" | "REVOKED";
 
 export interface CeleryTaskStatus {
   task_id: string;

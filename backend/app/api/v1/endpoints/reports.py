@@ -61,6 +61,8 @@ async def export_paper_pdf(
             }
         )
 
+    except HTTPException:
+        raise
     except ImportError as e:
         raise HTTPException(status_code=503, detail=f"Сервис отчётов недоступен: {str(e)}")
     except Exception as e:
@@ -115,6 +117,8 @@ async def export_paper_docx(
             }
         )
 
+    except HTTPException:
+        raise
     except ImportError as e:
         raise HTTPException(status_code=503, detail=f"Сервис отчётов недоступен: {str(e)}")
     except Exception as e:
@@ -180,5 +184,7 @@ async def get_paper_report(
                 "keywords_count": len(paper.keywords) if paper.keywords else 0,
             }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка получения отчёта: {str(e)}")

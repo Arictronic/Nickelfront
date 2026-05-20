@@ -4,6 +4,8 @@
 """
 
 import pytest
+
+pytestmark = pytest.mark.external
 from parsers_pkg.arxiv.client import ArxivClient
 
 

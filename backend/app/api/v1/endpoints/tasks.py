@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin_user
+from app.api.deps import get_current_user, require_admin_user
 from app.db.session import get_db
 from app.services.celery_cancel import clear_cancel_flag, set_cancel_flag
 from app.services.parse_job_history import list_parse_jobs, remove_parse_job
@@ -18,6 +18,7 @@ from app.services.task_service import create_task, get_task_by_id
 from app.tasks.alloy_analysis_tasks import analyze_papers_alloys_task, extract_alloys_task
 from app.tasks.celery_app import celery_app
 from app.tasks.tasks import get_celery_task_status
+from shared.schemas.auth import UserResponse
 from shared.schemas.task import CeleryTaskStatus, TaskCreate, TaskOut
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -69,7 +70,11 @@ def _inspect_revoke_candidates() -> list[str]:
 
 
 @router.post("/", response_model=TaskOut)
-async def create_patent_task(task: TaskCreate, db: AsyncSession = Depends(get_db)):
+async def create_patent_task(
+    task: TaskCreate,
+    _current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Создать задачу на обработку патента."""
     try:
         result = await create_task(db, task.dict())
@@ -79,18 +84,28 @@ async def create_patent_task(task: TaskCreate, db: AsyncSession = Depends(get_db
 
 
 @router.get("/parse-jobs")
-async def get_shared_parse_jobs(limit: int = 50):
+async def get_shared_parse_jobs(
+    limit: int = 50,
+    _current_user: UserResponse = Depends(get_current_user),
+):
     return {"jobs": await asyncio.to_thread(list_parse_jobs, limit)}
 
 
 @router.delete("/parse-jobs/{job_id}")
-async def delete_shared_parse_job(job_id: str):
+async def delete_shared_parse_job(
+    job_id: str,
+    _current_user: UserResponse = Depends(get_current_user),
+):
     removed = await asyncio.to_thread(remove_parse_job, job_id)
     return {"job_id": job_id, "deleted": removed}
 
 
 @router.get("/{task_id}", response_model=TaskOut)
-async def get_task_status(task_id: int, db: AsyncSession = Depends(get_db)):
+async def get_task_status(
+    task_id: int,
+    _current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Получить статус задачи по ID."""
     task = await get_task_by_id(db, task_id)
     if not task:
@@ -100,7 +115,8 @@ async def get_task_status(task_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.get("/celery/{task_id}/status", response_model=CeleryTaskStatus)
 async def get_celery_task_status_endpoint(
-    task_id: str = Path(..., description="Celery task UUID")
+    task_id: str = Path(..., description="Celery task UUID"),
+    _current_user: UserResponse = Depends(get_current_user),
 ):
     """
     Получить статус задачи Celery по task_id.
@@ -140,7 +156,10 @@ async def get_celery_task_status_endpoint(
 
 
 @router.post("/celery/alloy-analysis")
-async def create_alloy_analysis_task(request: AlloyAnalysisRequest):
+async def create_alloy_analysis_task(
+    request: AlloyAnalysisRequest,
+    _current_user: UserResponse = Depends(get_current_user),
+):
     prompt = build_alloy_analysis_prompt(request.document_id, request.text)
     if len(prompt) > 50000:
         raise HTTPException(
@@ -157,7 +176,10 @@ async def create_alloy_analysis_task(request: AlloyAnalysisRequest):
 
 
 @router.post("/celery/alloy-analysis/batch")
-async def create_alloy_batch_analysis_task(request: AlloyBatchAnalysisRequest):
+async def create_alloy_batch_analysis_task(
+    request: AlloyBatchAnalysisRequest,
+    _current_user: UserResponse = Depends(get_current_user),
+):
     task = analyze_papers_alloys_task.delay(
         request.id_spec,
         request.sources,
@@ -173,20 +195,28 @@ async def create_alloy_batch_analysis_task(request: AlloyBatchAnalysisRequest):
 
 
 @router.get("/celery/alloy-analysis/results")
-async def get_alloy_analysis_results(limit: int = 200):
+async def get_alloy_analysis_results(
+    limit: int = 200,
+    _current_user: UserResponse = Depends(get_current_user),
+):
     return {
         "results": await asyncio.to_thread(list_saved_alloy_analysis_results, limit),
     }
 
 
 @router.get("/celery/alloy-analysis/prompt")
-async def get_alloy_prompt():
+async def get_alloy_prompt(
+    _current_user: UserResponse = Depends(get_current_user),
+):
     prompt = await asyncio.to_thread(get_alloy_analysis_prompt)
     return {"prompt": prompt}
 
 
 @router.put("/celery/alloy-analysis/prompt")
-async def update_alloy_prompt(request: AlloyPromptUpdateRequest):
+async def update_alloy_prompt(
+    request: AlloyPromptUpdateRequest,
+    _current_user: UserResponse = Depends(get_current_user),
+):
     prompt = await asyncio.to_thread(save_alloy_analysis_prompt, request.prompt)
     return {"prompt": prompt, "status": "saved"}
 
@@ -227,6 +257,7 @@ async def stop_celery_queues(
 async def revoke_celery_task(
     task_id: str = Path(..., description="Celery task UUID"),
     terminate: bool = False,
+    _current_user: UserResponse = Depends(get_current_user),
 ):
     """
     Отменить задачу Celery по task_id.
@@ -257,6 +288,7 @@ async def revoke_celery_task(
 @router.delete("/celery/{task_id}")
 async def delete_celery_task(
     task_id: str = Path(..., description="Celery task UUID"),
+    _current_user: UserResponse = Depends(get_current_user),
 ):
     """
     Удалить задачу Celery по task_id.

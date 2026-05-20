@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { apiClient } from "../api/client";
 import { reprocessAllPapers, stopCeleryQueues } from "../api/papers";
 

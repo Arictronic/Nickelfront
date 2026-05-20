@@ -1,7 +1,9 @@
 """Alembic migrations environment."""
 
 import asyncio
+import sys
 from logging.config import fileConfig
+from pathlib import Path
 
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
@@ -9,8 +11,15 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
 
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = BACKEND_DIR.parent
+for _path in (PROJECT_ROOT, BACKEND_DIR):
+    _path_str = str(_path)
+    if _path_str not in sys.path:
+        sys.path.insert(0, _path_str)
+
 from app.db.base import Base
-from app.db.models import Paper, PatentTask
+import app.db.models  # noqa: F401 - register SQLAlchemy models for Alembic
 from app.core.config import settings
 
 config = context.config

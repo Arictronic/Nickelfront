@@ -1,16 +1,24 @@
-﻿param(
+param(
     [ValidateSet('start', 'stop', 'status', 'restart', 'menu')]
     [string]$Action = 'menu',
     [switch]$IncludeRag,
     [switch]$KillByPorts,
     [int]$RedisPort = 6380,
-    [int]$FlowerPort = 5555
+    [int]$FlowerPort = 5555,
+    [int]$FrontendPort = 5173,
+    [int]$CeleryWorkers = 3
 )
 
 $ErrorActionPreference = 'Stop'
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$VenvPython = Join-Path $RepoRoot 'venv\Scripts\python.exe'
+$VenvPython = Join-Path $RepoRoot '.venv\Scripts\python.exe'
+if (-not (Test-Path $VenvPython)) {
+    $VenvPython = Join-Path $RepoRoot 'venv\Scripts\python.exe'
+}
+if (-not (Test-Path $VenvPython)) {
+    throw "Python virtual environment not found. Create it from repo root: python -m venv .venv; .venv\Scripts\activate; pip install -r requirements.txt"
+}
 $FrontendNpm = 'npm'
 
 function Resolve-RedisBinary {
@@ -54,10 +62,10 @@ $Services = @(
         Optional = $false
     },
     @{
-        Tag = 'NF_CELERY'
+        Tag = 'NF_CELERY_1'
         WorkDir = Join-Path $RepoRoot 'backend'
         Ports = @()
-        Command = "`$host.UI.RawUI.WindowTitle='NF_CELERY'; Set-Location '$($RepoRoot.Replace("'", "''"))\\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app worker --loglevel=info --pool=solo"
+        Command = "`$host.UI.RawUI.WindowTitle='NF_CELERY_1'; Set-Location '$($RepoRoot.Replace("'", "''"))\\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app worker --loglevel=info --pool=solo --concurrency=1 -n worker-1@$env:COMPUTERNAME"
         Optional = $false
     },
     @{
@@ -77,11 +85,23 @@ $Services = @(
     @{
         Tag = 'NF_FRONTEND'
         WorkDir = Join-Path $RepoRoot 'frontend'
-        Ports = @(80)
-        Command = "`$host.UI.RawUI.WindowTitle='NF_FRONTEND'; Set-Location '$($RepoRoot.Replace("'", "''"))\\frontend'; & '$FrontendNpm' run dev -- --host 0.0.0.0 --port 80 --strictPort"
+        Ports = @($FrontendPort)
+        Command = "`$host.UI.RawUI.WindowTitle='NF_FRONTEND'; Set-Location '$($RepoRoot.Replace("'", "''"))\\frontend'; & '$FrontendNpm' run dev -- --host 0.0.0.0 --port $FrontendPort --strictPort"
         Optional = $false
     }
 )
+
+if ($CeleryWorkers -gt 1) {
+    for ($i = 2; $i -le $CeleryWorkers; $i++) {
+        $script:Services += @{
+            Tag = "NF_CELERY_$i"
+            WorkDir = Join-Path $RepoRoot 'backend'
+            Ports = @()
+            Command = "`$host.UI.RawUI.WindowTitle='NF_CELERY_$i'; Set-Location '$($RepoRoot.Replace("'", "''"))\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app worker --loglevel=info --pool=solo --concurrency=1 -n worker-$i@`$env:COMPUTERNAME"
+            Optional = $false
+        }
+    }
+}
 
 function Ensure-RagService {
     if ($Services | Where-Object { $_.Tag -eq 'NF_RAG' }) {
@@ -92,7 +112,7 @@ function Ensure-RagService {
         Tag = 'NF_RAG'
         WorkDir = Join-Path $RepoRoot 'rag'
         Ports = @(8000)
-        Command = "`$host.UI.RawUI.WindowTitle='NF_RAG'; Set-Location '$($RepoRoot.Replace("'", "''"))\\rag'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m app.main"
+        Command = "`$host.UI.RawUI.WindowTitle='NF_RAG'; Set-Location '$($RepoRoot.Replace("'", "''"))'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m rag.app.main"
         Optional = $false
     }
 }
@@ -206,7 +226,7 @@ function Stop-Services {
     }
 
     if ($KillByPorts) {
-        $ports = @(80, 8000, 8001, 8767, $FlowerPort, $RedisPort)
+        $ports = @($FrontendPort, 8000, 8001, 8767, $FlowerPort, $RedisPort)
         foreach ($port in $ports | Sort-Object -Unique) {
             $listeners = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue
             $owners = @($listeners | Select-Object -ExpandProperty OwningProcess -Unique)

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Base module for parsers.
 
 Modules:
