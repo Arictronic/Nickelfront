@@ -1,166 +1,28 @@
-# Nickelfront
+# Nickelfront Frontend
 
-Не могу запустить проект
+Frontend часть проекта Nickelfront на `React + Vite + TypeScript`.
 
-Запуск всего проекта (бэк+воркер+фронт)
-Сейчас я не могу запустить бэк “как в проекте”, потому что на машине не доступны локальные сервисы:
+## Что реализовано
 
-PostgreSQL на 127.0.0.1:5432 не отвечает
-Redis на 127.0.0.1:6379 не отвечает
-и команда docker в окружении не найдена (поэтому run_all.bat/docker-compose поднять не получается).
-Если у вас запущены PostgreSQL+Redis локально (или доступен docker), после этого бэк поднимется как обычно.
+- Главная (демо) (`/`)
+- Dashboard парсинга (`/dashboard`)
+- Каталог статей (`/papers`)
+- Карточка статьи и отчет (`/papers/:id`, `/papers/:id/report`)
+- Векторный поиск UI (`/vector-search`, fallback на `/papers/search`)
+- Статус парсинга (`/jobs`, эвристика)
+- Доступные данные/таблицы (`/database`)
+- Авторизация и регистрация (`/login`, `/register`) — UI, backend auth endpoints пока отсутствуют
 
+## Технологии
 
-Платформа для парсинга и анализа научных статей по материаловедению (никелевые сплавы, жаропрочные сплавы, суперсплавы).
+- React 18
+- React Router
+- Zustand
+- Axios
+- Recharts
+- Vite
 
-## 📋 О проекте
-
-Проект предназначен для:
-- Парсинга научных статей из открытых источников (arXiv, CORE)
-- Сохранения и каталогизации статей в базе данных
-- Анализа данных с помощью ML (в разработке)
-- Визуализации и отчетности (в разработке)
-
-## 🚀 Быстрый старт
-
-### Требования
-- Python 3.12+
-- Docker с Redis и PostgreSQL
-- Node.js (для фронтенда)
-
-### Запуск бэкенда
-
-```bash
-# Из корня проекта
-cd Nickelfront
-
-# Запуск всех компонентов (Redis, PostgreSQL, Backend, Worker)
-docker-compose up -d
-
-# Или локально (Windows)
-.\run_all.bat
-```
-
-### Проверка работы
-
-```bash
-# Health check
-curl http://localhost:8000/health
-
-# Swagger UI
-# http://localhost:8000/docs
-```
-
-### Запуск парсинга
-
-```bash
-# Парсинг из arXiv
-curl -X POST "http://localhost:8000/api/v1/papers/parse?query=nickel%20alloys&limit=5&source=arXiv"
-
-# Массовый парсинг
-curl -X POST "http://localhost:8000/api/v1/papers/parse-all?limit_per_query=5&source=all"
-
-# Проверка результата
-curl http://localhost:8000/api/v1/papers/count
-```
-
-## 📁 Структура проекта
-
-```
-Nickelfront/
-├── backend/              # Бэкенд на FastAPI + Celery
-│   ├── app/
-│   │   ├── api/          # REST API endpoints
-│   │   ├── core/         # Конфигурация, логирование
-│   │   ├── db/           # SQLAlchemy модели, миграции
-│   │   ├── services/     # Бизнес-логика
-│   │   └── tasks/        # Celery задачи
-│   ├── alembic/          # Миграции БД
-│   └── tests/            # Тесты
-│
-├── parser/               # Парсер научных статей
-│   ├── base/             # Базовые классы
-│   ├── core/             # CORE API парсер
-│   └── arxiv/            # arXiv API парсер
-│
-├── frontend/             # Фронтенд на React + Vite
-│   └── src/
-│
-├── ml/                   # Машинное обучение
-│   ├── models/           # Обученные модели
-│   └── training/         # Скрипты обучения
-│
-├── analytics/            # Аналитика и отчёты
-├── tests/                # Общие тесты
-└── shared/               # Общие модули (schemas, utils)
-```
-
-## 🔌 API Endpoints
-
-### Papers
-
-| Метод | Endpoint | Описание |
-|-------|----------|----------|
-| GET | `/api/v1/papers` | Список статей |
-| GET | `/api/v1/papers/count` | Количество статей |
-| GET | `/api/v1/papers/id/{id}` | Статья по ID |
-| POST | `/api/v1/papers/search` | Поиск в БД |
-| POST | `/api/v1/papers/parse` | Запустить парсинг |
-| POST | `/api/v1/papers/parse-all` | Массовый парсинг |
-| DELETE | `/api/v1/papers/id/{id}` | Удалить статью |
-
-### Примеры
-
-```bash
-# Получить все статьи
-curl http://localhost:8000/api/v1/papers?limit=10
-
-# Поиск
-curl -X POST "http://localhost:8000/api/v1/papers/search" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "superalloys", "limit": 20}'
-
-# Запустить парсинг arXiv
-curl -X POST "http://localhost:8000/api/v1/papers/parse?query=nickel%20alloys&limit=5&source=arXiv"
-```
-
-## 📊 Источники данных
-
-### arXiv (arxiv.org)
-- **Статус**: ✅ Реализовано
-- **API**: https://arxiv.org/help/api
-- **Тематика**: Препринты по материаловедению, физике, CS
-- **Категории**: cond-mat.mtrl-sci, physics.chem-ph, physics.app-ph
-
-### CORE (core.ac.uk)
-- **Статус**: ✅ Реализовано
-- **API**: https://core.ac.uk/services/api
-- **Тематика**: Open Access научные статьи
-
-## 🧪 Тесты
-
-```bash
-# Все тесты
-pytest tests/ -v
-
-# Тесты парсеров
-pytest tests/unit/parser/ -v
-
-# Integration тесты
-pytest tests/integration/ -v
-```
-
-## 🔧 Разработка
-
-### Backend
-
-```bash
-cd backend
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
-
-### Frontend
+## Запуск
 
 ```bash
 cd frontend
@@ -168,39 +30,50 @@ npm install
 npm run dev
 ```
 
-### Парсер (тестирование)
+Приложение будет доступно на `http://localhost:3000`.
+
+## Production build
 
 ```bash
-# Быстрый тест arXiv парсинга
-python test_parse.py
+npm run build
 ```
 
-## 📈 Roadmap
+## Связь с backend
 
-- [x] Парсер arXiv API
-- [x] Парсер CORE API
-- [x] Интеграция с Celery
-- [x] REST API для управления статьями
-- [ ] Парсер ScienceDirect (Selenium)
-- [ ] Парсер ResearchGate
-- [ ] ML анализ статей (NER, классификация)
-- [ ] Дашборд аналитики
-- [ ] Экспорт результатов
+- В `vite.config.js` настроен proxy:
+  - `/api` -> `http://localhost:8000`
+- Используемые backend endpoints:
+  - `GET    /api/v1/papers?limit&offset&source`
+  - `GET    /api/v1/papers/count?source`
+  - `GET    /api/v1/papers/id/{id}`
+  - `POST   /api/v1/papers/search`
+  - `POST   /api/v1/papers/parse?query&limit&source`
+  - `POST   /api/v1/papers/parse-all?limit_per_query&source`
+  - `DELETE /api/v1/papers/id/{id}`
 
-## 👥 Команда
+## Ограничения по интеграции
 
-| Участник | Роль | Модули |
-|----------|------|--------|
-| Ваня | Backend, парсеры | `backend/app/api/`, `parser/` |
-| Артем | БД | `backend/app/db/`, `alembic/` |
-| Сережа | ML, RAG-система | `ml/`, `rag/` |
-| Тамерлан | Frontend, тесты | `frontend/`, `tests/` |
-| Паша | ML, аналитика | `ml/`, `analytics/` |
+В текущем backend есть эндпоинты только для парсинга и управления **papers**:
+- поэтому таблицы/карточки на фронте работают с реальными данными из `/api/v1/papers/...`;
+- для “vector search” и ML-метрик сейчас используется текущий `/papers/search` как fallback, а сами метрики/отчет формируются на фронте (эвристики) до появления ML-endpoint-ов.
 
-## 📄 Лицензия
+Авторизация/регистрация в текущем проекте не подкреплена backend auth-эндпоинтами, поэтому UI хранит состояние локально.
 
-Проект создан в рамках учебного практикума.
+Где менять для настоящей авторизации:
+- backend: добавить endpoints auth (например, JWT)
+- frontend: заменить `src/api/auth.ts`, `src/hooks/useAuth.ts` и `src/store/authStore.ts` под контракт auth.
 
-## 📞 Контакты
+## Ключевые функции (live data)
 
-По вопросам обращайтесь к участникам проекта.
+- `/dashboard`: запуск парсинга (`/api/v1/papers/parse` и `/api/v1/papers/parse-all`) + KPI (кол-во статей) + список последних добавленных
+- `/papers`: каталог статей из БД (`GET /api/v1/papers`) + поиск (`POST /api/v1/papers/search`), сортировка на клиенте, удаление (`DELETE /api/v1/papers/id/{id}`), экспорт CSV текущей выборки
+- `/papers/:id`: карточка статьи (`GET /api/v1/papers/id/{id}`) + разбиение `full_text/abstract` на части по настройке токенов
+- `/papers/:id/report`: страница отчета по частям (сейчас формируется на фронте до появления ML-endpoint-ов)
+- `/vector-search`: поисковый экран (fallback через `POST /api/v1/papers/search`)
+- `/jobs`: статус ваших парсинг-задач (эвристика, так как endpoint celery-status отсутствует)
+- `/database`: просмотр доступных таблиц/сущностей в текущем бэкенде (по фактическим endpoint-ам)
+
+## Примечания
+
+- Интерфейс сделан без градиентов.
+- Emoji удалены из UI.
