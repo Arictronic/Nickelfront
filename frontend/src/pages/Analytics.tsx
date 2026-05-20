@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { apiClient } from "../api/client";
 import { getVectorStats, rebuildVectorIndex, searchPapers, vectorSearch } from "../api/papers";
 import { PAPER_SOURCES } from "../types/paper";
 import type { PaperSource, SearchType, VectorSearchResult } from "../types/paper";
+
+type TopItem = {
+  name: string;
+  count: number;
+};
 
 export default function Analytics() {
   const [query, setQuery] = useState("nickel superalloy creep");
@@ -18,6 +24,8 @@ export default function Analytics() {
   const [error, setError] = useState<string | null>(null);
   const [total, setTotal] = useState(0);
   const [results, setResults] = useState<VectorSearchResult[]>([]);
+  const [keywordHints, setKeywordHints] = useState<TopItem[]>([]);
+  const [hintsExpanded, setHintsExpanded] = useState(false);
   const [vectorStats, setVectorStats] = useState<{
     count: number;
     available: boolean;
@@ -27,6 +35,7 @@ export default function Analytics() {
 
   useEffect(() => {
     loadVectorStats();
+    loadKeywordHints();
   }, []);
 
   const sources = useMemo<PaperSource[]>(
@@ -38,6 +47,15 @@ export default function Analytics() {
     try {
       const stats = await getVectorStats();
       setVectorStats(stats);
+    } catch {
+      // non-blocking
+    }
+  };
+
+  const loadKeywordHints = async () => {
+    try {
+      const { data } = await apiClient.get<{ items: TopItem[] }>("/analytics/metrics/top?item_type=keywords&limit=100");
+      setKeywordHints(data.items ?? []);
     } catch {
       // non-blocking
     }
@@ -98,6 +116,30 @@ export default function Analytics() {
     return { color: "#ef4444" };
   };
 
+  const resultInsights = useMemo(() => {
+    const sourcesMap = new Map<string, number>();
+    const keywordSet = new Set<string>();
+    let similaritySum = 0;
+
+    for (const result of results) {
+      sourcesMap.set(result.paper.source, (sourcesMap.get(result.paper.source) ?? 0) + 1);
+      similaritySum += result.similarity || 0;
+      for (const keyword of result.paper.keywords ?? []) {
+        const normalized = keyword.trim().toLowerCase();
+        if (normalized) keywordSet.add(normalized);
+      }
+    }
+
+    return {
+      sourceCount: sourcesMap.size,
+      topSource: Array.from(sourcesMap.entries()).sort((a, b) => b[1] - a[1])[0],
+      uniqueKeywords: keywordSet.size,
+      avgSimilarity: results.length ? similaritySum / results.length : 0,
+    };
+  }, [results]);
+
+  const visibleHints = hintsExpanded ? keywordHints : keywordHints.slice(0, 24);
+
   return (
     <div className="page">
       <div className="page-head">
@@ -129,6 +171,30 @@ export default function Analytics() {
               </span>
             </div>
           </div>
+        </div>
+      )}
+
+      {keywordHints.length > 0 && (
+        <div className="panel">
+          <h3>Подсказки по терминам для поиска</h3>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {visibleHints.map((item) => (
+              <button
+                key={item.name}
+                className="btn"
+                style={{ padding: "7px 10px", fontSize: 12 }}
+                onClick={() => setQuery((current) => (current.trim() ? `${current.trim()} ${item.name}` : item.name))}
+                title={`Встречается: ${item.count}`}
+              >
+                {item.name} <span className="muted">{item.count}</span>
+              </button>
+            ))}
+          </div>
+          {keywordHints.length > 24 && (
+            <button className="btn" style={{ marginTop: 12 }} onClick={() => setHintsExpanded((v) => !v)}>
+              {hintsExpanded ? "Свернуть" : "Развернуть дальше"}
+            </button>
+          )}
         </div>
       )}
 
@@ -190,6 +256,26 @@ export default function Analytics() {
         <h3>
           Результаты <span className="muted">(найдено: {total})</span>
         </h3>
+        {results.length > 0 && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginBottom: 14 }}>
+            <div>
+              <p className="muted">Источников в выдаче</p>
+              <p className="kpi-status">{resultInsights.sourceCount}</p>
+            </div>
+            <div>
+              <p className="muted">Главный источник</p>
+              <p className="kpi-status">{resultInsights.topSource ? `${resultInsights.topSource[0]} (${resultInsights.topSource[1]})` : "нет"}</p>
+            </div>
+            <div>
+              <p className="muted">Keywords в найденных</p>
+              <p className="kpi-status">{resultInsights.uniqueKeywords}</p>
+            </div>
+            <div>
+              <p className="muted">Среднее сходство</p>
+              <p className="kpi-status">{searchType === "text" ? "нет" : `${(resultInsights.avgSimilarity * 100).toFixed(0)}%`}</p>
+            </div>
+          </div>
+        )}
         {results.length === 0 ? (
           <p className="muted">Нет результатов. Введите запрос и нажмите «Искать».</p>
         ) : (
@@ -237,4 +323,3 @@ export default function Analytics() {
     </div>
   );
 }
-

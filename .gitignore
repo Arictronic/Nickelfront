@@ -7,14 +7,38 @@ __pycache__/
 env/
 venv/
 .venv/
+.python-version
 *.egg-info/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.cache/
+.ipynb_checkpoints/
 logs/
 
 # Node
 node_modules/
 dist/
 build/
+.tmp_wheels/
+.next/
+.nuxt/
+.svelte-kit/
+.parcel-cache/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # IDE
 .idea/
@@ -25,6 +49,8 @@ build/
 # Environment
 .env
 .env.local
+.env.*
+!.env.example
 
 # ML
 *.pth
@@ -40,6 +66,9 @@ data/
 !data/.gitkeep
 storage/
 !storage/.gitkeep
+tmp/
+temp/
+*.tmp
 
 # Databases
 *.db
@@ -72,6 +101,14 @@ celerybeat-schedule.db
 *.log
 *.har
 
+# Generated archives
+archives/
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+
 # Docs
 docs/
 **/docs/
@@ -88,3 +125,4 @@ docs/
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini

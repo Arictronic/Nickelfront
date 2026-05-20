@@ -1,5 +1,6 @@
 """API endpoints для аналитики и метрик."""
 
+import re
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -10,6 +11,30 @@ from app.db.models.paper import Paper as PaperModel
 from app.db.session import get_db
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
+
+
+def _normalize_metric_item(value: object) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n,;:.")
+    return text[:160]
+
+
+def _counter_key(value: str) -> str:
+    return value.casefold()
+
+
+def _count_normalized_items(values: list[object]):
+    from collections import Counter
+
+    counter: Counter[str] = Counter()
+    labels: dict[str, str] = {}
+    for raw in values:
+        item = _normalize_metric_item(raw)
+        if not item:
+            continue
+        key = _counter_key(item)
+        counter[key] += 1
+        labels.setdefault(key, item)
+    return counter, labels
 
 
 @router.get("/metrics/summary")
@@ -205,29 +230,26 @@ async def get_top_items(
         result = await db.execute(query)
         papers = result.scalars().all()
 
-        from collections import Counter
 
         if item_type == "journals":
             items = [p.journal for p in papers if p.journal]
-            counter = Counter(items)
         elif item_type == "authors":
             items = []
             for p in papers:
                 if p.authors and isinstance(p.authors, list):
                     items.extend(p.authors)
-            counter = Counter(items)
         elif item_type == "keywords":
             items = []
             for p in papers:
                 if p.keywords and isinstance(p.keywords, list):
                     items.extend(p.keywords)
-            counter = Counter(items)
         else:
             raise HTTPException(status_code=400, detail=f"Неизвестный тип: {item_type}")
 
+        counter, labels = _count_normalized_items(items)
         top_items = [
-            {"name": name, "count": count}
-            for name, count in counter.most_common(limit)
+            {"name": labels[key], "count": count}
+            for key, count in counter.most_common(limit)
         ]
 
         return {
@@ -238,6 +260,60 @@ async def get_top_items(
 
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/metrics/keyword-stats")
+async def get_keyword_stats(
+    source: str | None = Query(None, description="Р¤РёР»СЊС‚СЂ РїРѕ РёСЃС‚РѕС‡РЅРёРєСѓ"),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        query = select(PaperModel)
+        if source and source != "all":
+            query = query.where(PaperModel.source == source)
+        query = query.limit(5000)
+
+        result = await db.execute(query)
+        papers = result.scalars().all()
+        total = len(papers)
+
+        keyword_values: list[object] = []
+        per_paper_counts: list[int] = []
+        for paper in papers:
+            keywords = paper.keywords if isinstance(paper.keywords, list) else []
+            normalized = [_normalize_metric_item(item) for item in keywords]
+            normalized = [item for item in normalized if item]
+            keyword_values.extend(normalized)
+            per_paper_counts.append(len(set(_counter_key(item) for item in normalized)))
+
+        counter, labels = _count_normalized_items(keyword_values)
+        with_keywords = sum(1 for count in per_paper_counts if count > 0)
+        rich_keywords = sum(1 for count in per_paper_counts if count >= 10)
+        sparse_keywords = sum(1 for count in per_paper_counts if 0 < count < 10)
+        keywordless = total - with_keywords
+
+        rare_keywords = sum(1 for count in counter.values() if count == 1)
+        top_preview = [
+            {"name": labels[key], "count": count}
+            for key, count in counter.most_common(10)
+        ]
+
+        return {
+            "total_papers": total,
+            "papers_with_keywords": with_keywords,
+            "papers_with_10_plus_keywords": rich_keywords,
+            "papers_with_1_to_9_keywords": sparse_keywords,
+            "papers_without_keywords": keywordless,
+            "total_keyword_mentions": sum(counter.values()),
+            "unique_keywords": len(counter),
+            "rare_keywords": rare_keywords,
+            "avg_keywords_per_paper": round(sum(per_paper_counts) / total, 2) if total else 0,
+            "max_keywords_per_paper": max(per_paper_counts) if per_paper_counts else 0,
+            "top_preview": top_preview,
+            "generated_at": datetime.now().isoformat(),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from loguru import logger
+from bs4 import BeautifulSoup
 
 from parsers_pkg.base import BaseAPIClient, RetryConfig, decide_for_exception, decide_for_status
 from parsers_pkg.errors import SourceUnavailableError
@@ -119,27 +120,36 @@ class CyberLeninkaClient(BaseAPIClient):
         if not raw_html:
             return None
 
-        html_text = html.unescape(raw_html)
-        html_text = cls._SCRIPT_STYLE_RE.sub(" ", html_text)
+        soup = BeautifulSoup(raw_html, "html.parser")
+        for tag in soup(["script", "style", "noscript", "template"]):
+            tag.decompose()
 
-        candidates = re.findall(
-            r"<(?:article|section|div)[^>]*class=['\"][^'\"]*(?:article|content|text|ocr|full)[^'\"]*['\"][^>]*>([\s\S]*?)</(?:article|section|div)>",
-            html_text,
-            flags=re.IGNORECASE,
-        )
-        if not candidates:
-            candidates = [html_text]
+        # Prefer OCR/body blocks; fallback to broader containers.
+        selectors = [
+            ".ocr",
+            "[itemprop='articleBody']",
+            "article",
+            ".full",
+            ".content",
+            "main",
+        ]
 
-        best = ""
-        for candidate in candidates:
-            cleaned = cls._TAG_RE.sub(" ", html.unescape(candidate))
-            cleaned = re.sub(r"\s+", " ", cleaned).strip()
-            if len(cleaned) > len(best):
-                best = cleaned
+        # Keep selector priority: OCR/article body is cleaner than generic containers.
+        for selector in selectors:
+            best_for_selector = ""
+            for node in soup.select(selector):
+                cleaned = html.unescape(node.get_text(" ", strip=True))
+                cleaned = cleaned.replace("\ufeff", " ")
+                cleaned = re.sub(r"\s+", " ", cleaned).strip()
+                if len(cleaned) > len(best_for_selector):
+                    best_for_selector = cleaned
+            if len(best_for_selector) >= 200:
+                return best_for_selector
 
-        if not best:
-            return None
-        return best if len(best) >= 200 else None
+        fallback = html.unescape(soup.get_text(" ", strip=True))
+        fallback = fallback.replace("\ufeff", " ")
+        fallback = re.sub(r"\s+", " ", fallback).strip()
+        return fallback if len(fallback) >= 200 else None
 
     def _parse_api_results(self, data: dict[str, Any], limit: int) -> list[dict[str, Any]]:
         """Parse /api/search JSON response into normalized records."""

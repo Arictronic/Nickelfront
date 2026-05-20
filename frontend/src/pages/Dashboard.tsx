@@ -1,5 +1,5 @@
 ﻿import { useEffect, useMemo, useRef, useState } from "react";
-import { LineChart, Line, XAxis, YAxis, Tooltip, PieChart, Pie, Cell } from "recharts";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, PieChart, Pie, Cell, LineChart, Line, ResponsiveContainer, Legend } from "recharts";
 import {
   getPapersCount,
   getPapersList,
@@ -8,11 +8,22 @@ import {
   getCeleryTaskStatus,
   revokeCeleryTask,
   deleteCeleryTask,
+  getSharedParseJobs,
+  deleteSharedParseJob,
 } from "../api/papers";
 import { PAPER_SOURCES, Paper, PaperSource } from "../types/paper";
 import { Link } from "react-router-dom";
+import { apiClient } from "../api/client";
 
-const COLORS = ["#0088FE", "#00C49F", "#FFBB28"];
+const COLORS = ["#4a6cf7", "#00c49f", "#ffbb28", "#ff8042", "#8884d8"];
+const COMPLETENESS_LABELS_RU: Record<string, string> = {
+  with_abstract: "Аннотация",
+  with_full_text: "Полный текст",
+  with_keywords: "Ключевые слова",
+  with_doi: "DOI",
+  with_authors: "Авторы",
+  with_embedding: "Эмбеддинг",
+};
 
 type ParseJob = {
   jobId: string;
@@ -26,9 +37,41 @@ type ParseJob = {
   celeryStatus?: any;
 };
 
-const LS_KEY = "parseJobs.v4";
-const LEGACY_LS_KEYS = ["parseJobs.v3", "parseJobs.v2", "parseJobs.v1"];
-const LS_RESET_MARK = "parseJobs.reset.v1";
+type AnalyticsSummary = {
+  total_papers: number;
+  papers_by_source: Record<string, number>;
+  papers_with_embedding: number;
+  embedding_coverage: number;
+  avg_quality_score: number;
+};
+
+type TrendData = {
+  period: string;
+  count: number;
+};
+
+type TopItem = {
+  name: string;
+  count: number;
+};
+
+type QualityReport = {
+  total: number;
+  completeness: Record<string, { count: number; percent: number }>;
+  averages: {
+    avg_abstract_length: number;
+    avg_keywords_count: number;
+  };
+  quality_score: {
+    avg: number;
+    min: number;
+    max: number;
+  };
+};
+
+const LS_KEY = "parseJobs.v6";
+const LEGACY_LS_KEYS = ["parseJobs.v5", "parseJobs.v4", "parseJobs.v3", "parseJobs.v2", "parseJobs.v1"];
+const LS_RESET_MARK = "parseJobs.reset.v3";
 
 function clearAllParseJobKeys() {
   const toDelete: string[] = [];
@@ -60,11 +103,46 @@ function saveJobs(jobs: ParseJob[]) {
   localStorage.setItem(LS_KEY, JSON.stringify(jobs));
 }
 
+function mergeJobs(localJobs: ParseJob[], sharedJobs: ParseJob[]): ParseJob[] {
+  const byId = new Map<string, ParseJob>();
+  for (const job of [...sharedJobs, ...localJobs]) {
+    byId.set(job.jobId, {
+      ...job,
+      source: job.source as PaperSource | "all",
+      status: job.status as ParseJob["status"],
+    });
+  }
+  return Array.from(byId.values()).sort((a, b) => b.startedAt - a.startedAt).slice(0, 50);
+}
+
+function normalizeQualityReport(data: any): QualityReport | null {
+  if (!data) return null;
+  const completeness = data.completeness ?? data.quality_metrics ?? {};
+  const averages = data.averages ?? {
+    avg_abstract_length: 0,
+    avg_keywords_count: 0,
+  };
+  const quality_score = data.quality_score ?? { avg: 0, min: 0, max: 0 };
+
+  return {
+    total: data.total ?? 0,
+    completeness,
+    averages,
+    quality_score,
+  };
+}
+
 export default function Dashboard() {
   const [totalPapers, setTotalPapers] = useState(0);
   const [latest, setLatest] = useState<Paper[]>([]);
-  const [sourceCounts, setSourceCounts] = useState<Record<string, number>>({});
   const [jobs, setJobs] = useState<ParseJob[]>(() => loadJobs());
+  const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
+  const [trend, setTrend] = useState<TrendData[]>([]);
+  const [topJournals, setTopJournals] = useState<TopItem[]>([]);
+  const [topKeywords, setTopKeywords] = useState<TopItem[]>([]);
+  const [topAuthors, setTopAuthors] = useState<TopItem[]>([]);
+  const [sourceDistribution, setSourceDistribution] = useState<Record<string, { count: number; percent: number }>>({});
+  const [qualityReport, setQualityReport] = useState<QualityReport | null>(null);
 
   const [query, setQuery] = useState("nickel-based superalloys");
   const [source, setSource] = useState<PaperSource | "all">("arXiv");
@@ -93,20 +171,41 @@ export default function Dashboard() {
   );
 
   const fetchPage = async () => {
-    const [count, latestPapers, sourceEntries] = await Promise.all([
+    const [countRes, latestRes, summaryRes, trendRes, journalsRes, keywordsRes, authorsRes, sourceRes, qualityRes] = await Promise.allSettled([
       getPapersCount("all"),
       getPapersList({ limit: 300, offset: 0, source: "all" }),
-      Promise.all(PAPER_SOURCES.map(async (src) => [src, await getPapersCount(src)] as const)),
+      apiClient.get<AnalyticsSummary>("/analytics/metrics/summary"),
+      apiClient.get<{ trend: TrendData[] }>("/analytics/metrics/trend?group_by=month&limit=12"),
+      apiClient.get<{ items: TopItem[] }>("/analytics/metrics/top?item_type=journals&limit=10"),
+      apiClient.get<{ items: TopItem[] }>("/analytics/metrics/top?item_type=keywords&limit=15"),
+      apiClient.get<{ items: TopItem[] }>("/analytics/metrics/top?item_type=authors&limit=10"),
+      apiClient.get<{ distribution: Record<string, { count: number; percent: number }> }>("/analytics/metrics/source-distribution"),
+      apiClient.get<QualityReport>("/analytics/metrics/quality-report"),
     ]);
-    setTotalPapers(count);
-    setLatest(latestPapers);
-    setSourceCounts(Object.fromEntries(sourceEntries));
+    setTotalPapers(countRes.status === "fulfilled" ? countRes.value : 0);
+    setLatest(latestRes.status === "fulfilled" ? latestRes.value : []);
+    setSummary(summaryRes.status === "fulfilled" ? summaryRes.value.data ?? null : null);
+    setTrend(trendRes.status === "fulfilled" ? trendRes.value.data?.trend ?? [] : []);
+    setTopJournals(journalsRes.status === "fulfilled" ? journalsRes.value.data?.items ?? [] : []);
+    setTopKeywords(keywordsRes.status === "fulfilled" ? keywordsRes.value.data?.items ?? [] : []);
+    setTopAuthors(authorsRes.status === "fulfilled" ? authorsRes.value.data?.items ?? [] : []);
+    setSourceDistribution(sourceRes.status === "fulfilled" ? sourceRes.value.data?.distribution ?? {} : {});
+    setQualityReport(qualityRes.status === "fulfilled" ? normalizeQualityReport(qualityRes.value.data) : null);
   };
 
   useEffect(() => {
     fetchPage().catch(() => {
       // initial load errors - just keep empty UI
     });
+    getSharedParseJobs(50)
+      .then((sharedJobs) => {
+        setJobs((current) => {
+          const merged = mergeJobs(current, sharedJobs as ParseJob[]);
+          saveJobs(merged);
+          return merged;
+        });
+      })
+      .catch(() => null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -189,23 +288,31 @@ export default function Dashboard() {
     return () => window.clearInterval(interval);
   }, []);
 
-  const lineData = useMemo(() => {
-    const byDate = latest.reduce<Record<string, number>>((acc, p) => {
-      const parsedDate = (p.createdAt ?? p.updatedAt ?? p.publicationDate ?? "").slice(0, 10);
-      if (!parsedDate) return acc;
-      acc[parsedDate] = (acc[parsedDate] ?? 0) + 1;
-      return acc;
-    }, {});
-    return Object.entries(byDate)
-      .map(([date, count]) => ({ date, count }))
-      .sort((a, b) => a.date.localeCompare(b.date));
-  }, [latest]);
+  const sourcePieData = useMemo(
+    () =>
+      Object.entries(sourceDistribution ?? {}).map(([name, data]) => ({
+        name,
+        value: data.count,
+      })),
+    [sourceDistribution]
+  );
 
-  const pieData = useMemo(() => {
-    return Object.entries(sourceCounts)
-      .map(([name, value]) => ({ name, value }))
-      .filter((item) => item.value > 0);
-  }, [sourceCounts]);
+  const qualityData = useMemo(
+    () =>
+      qualityReport
+        ? Object.entries(qualityReport.completeness ?? {}).map(([key, data]) => ({
+            name: COMPLETENESS_LABELS_RU[key] ?? key.replace("with_", "").replaceAll("_", " "),
+            percent: data.percent,
+          }))
+        : [],
+    [qualityReport]
+  );
+
+  const avgCompleteness = useMemo(() => {
+    if (!qualityData.length) return 0;
+    const sum = qualityData.reduce((acc, item) => acc + item.percent, 0);
+    return Number((sum / qualityData.length).toFixed(1));
+  }, [qualityData]);
 
   const startParsing = async () => {
     setParsingError(null);
@@ -293,6 +400,7 @@ export default function Dashboard() {
     try {
       // Вызываем API для удаления флага отмены (опционально)
       await deleteCeleryTask(jobId);
+      await deleteSharedParseJob(jobId).catch(() => null);
       setJobs((prev: ParseJob[]): ParseJob[] => {
         const nextJobs: ParseJob[] = prev.filter((job) => job.jobId !== jobId);
         saveJobs(nextJobs);
@@ -306,7 +414,7 @@ export default function Dashboard() {
   return (
     <div className="page">
       <div className="page-head">
-        <h2>Dashboard</h2>
+        <h2>Главная</h2>
         <div className="actions">
           <button className="btn btn-primary" onClick={startParsing}>
             Запустить парсинг статей
@@ -356,34 +464,142 @@ export default function Dashboard() {
           <h3>Завершено (ваши)</h3>
           <p className="kpi">{completedJobsCount}</p>
         </article>
+        <article className="panel kpi-card">
+          <h3>С эмбеддингами</h3>
+          <p className="kpi">{summary?.papers_with_embedding || 0}</p>
+        </article>
+        <article className="panel kpi-card">
+          <h3>Покрытие эмбеддингами</h3>
+          <p className="kpi">{summary?.embedding_coverage || 0}%</p>
+        </article>
+        <article className="panel kpi-card">
+          <h3>Полнота данных</h3>
+          <p className="kpi">{avgCompleteness}%</p>
+        </article>
+        <article className="panel kpi-card">
+          <h3>Среднее качество</h3>
+          <p className="kpi">{summary?.avg_quality_score || 0}</p>
+        </article>
       </div>
 
-      <div className="chart-grid">
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 16 }}>
         <article className="panel">
-          <h3>Метрика (пример): последние даты</h3>
-          <LineChart width={520} height={230} data={lineData.length ? lineData : [{ date: "—", count: 0 }]}>
-            <XAxis dataKey="date" />
-            <YAxis />
-            <Tooltip />
-            <Line type="monotone" dataKey="count" stroke="#4a6cf7" />
-          </LineChart>
+          <h3>Тренд публикаций (по месяцам)</h3>
+          {trend.length > 0 ? (
+            <ResponsiveContainer width="100%" height={250}>
+              <LineChart data={trend}>
+                <XAxis dataKey="period" />
+                <YAxis />
+                <Tooltip />
+                <Line type="monotone" dataKey="count" stroke="#4a6cf7" strokeWidth={2} />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : (
+            <p className="muted">Нет данных</p>
+          )}
         </article>
         <article className="panel">
-          <h3>Метрика (пример): источники (по последним)</h3>
-          <PieChart width={350} height={230}>
-            <Pie
-              data={pieData.length ? pieData : [{ name: "нет данных", value: 1 }]}
-              dataKey="value"
-              nameKey="name"
-              outerRadius={80}
-            >
-              {(pieData.length ? pieData : [{ name: "нет данных", value: 1 }]).map((_, index) => (
-                <Cell key={index} fill={COLORS[index % COLORS.length]} />
+          <h3>Распределение по источникам</h3>
+          {sourcePieData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={250}>
+              <PieChart>
+                <Pie data={sourcePieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label>
+                  {sourcePieData.map((_, index) => (
+                    <Cell key={index} fill={COLORS[index % COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip />
+                <Legend />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : (
+            <p className="muted">Нет данных</p>
+          )}
+        </article>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 16 }}>
+        <article className="panel">
+          <h3>Топ журналов</h3>
+          {topJournals.length > 0 ? (
+            <ResponsiveContainer width="100%" height={250}>
+              <BarChart data={topJournals}>
+                <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-45} textAnchor="end" height={80} />
+                <YAxis />
+                <Tooltip />
+                <Bar dataKey="count" fill="#4a6cf7" />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <p className="muted">Нет данных</p>
+          )}
+        </article>
+        <article className="panel">
+          <h3>Полнота данных</h3>
+          {qualityData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={250}>
+              <BarChart data={qualityData} layout="vertical">
+                <XAxis type="number" domain={[0, 100]} />
+                <YAxis dataKey="name" type="category" width={100} />
+                <Tooltip formatter={(value: number) => `${value.toFixed(1)}%`} />
+                <Bar dataKey="percent" fill="#00c49f" />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <p className="muted">Нет данных</p>
+          )}
+        </article>
+      </div>
+
+      <div className="panel">
+        <h3>Топ авторов</h3>
+        {topAuthors.length > 0 ? (
+          <table className="table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Автор</th>
+                <th>Количество статей</th>
+              </tr>
+            </thead>
+            <tbody>
+              {topAuthors.map((author, idx) => (
+                <tr key={idx}>
+                  <td>{idx + 1}</td>
+                  <td>{author.name}</td>
+                  <td>{author.count}</td>
+                </tr>
               ))}
-            </Pie>
-            <Tooltip />
-          </PieChart>
-        </article>
+            </tbody>
+          </table>
+        ) : (
+          <p className="muted">Нет данных</p>
+        )}
+      </div>
+
+      <div className="panel">
+        <h3>Топ ключевых слов</h3>
+        {topKeywords.length > 0 ? (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {topKeywords.map((item, idx) => (
+              <span
+                key={idx}
+                style={{
+                  padding: "6px 12px",
+                  background: `rgba(74, 108, 247, ${0.1 + (idx / topKeywords.length) * 0.4})`,
+                  borderRadius: 16,
+                  fontSize: 14,
+                  color: "var(--text)",
+                  border: "1px solid var(--border)",
+                }}
+              >
+                {item.name} <strong style={{ marginLeft: 4 }}>{item.count}</strong>
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">Нет данных</p>
+        )}
       </div>
 
       <div className="panel">

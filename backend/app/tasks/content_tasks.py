@@ -14,6 +14,7 @@ from app.services.paper_content_service import (
     download_pdf_bytes,
     extract_pdf_text,
     fetch_additional_full_text,
+    generate_article_keywords,
     generate_ai_enrichment_ru,
     normalize_pdf_text_markdown,
     resolve_pdf_url,
@@ -153,6 +154,31 @@ async def _process_paper_content_async(self, paper_id: int) -> dict[str, Any]:
                 processing_error=fallback_reason,
             )
 
+            await _set_stage(paper_service, paper_id, "extracting_keywords", task_id=task_id)
+            try:
+                keywords = await asyncio.to_thread(
+                    generate_article_keywords,
+                    title=paper.title,
+                    authors=paper.authors or [],
+                    journal=paper.journal,
+                    doi=paper.doi,
+                    source=paper.source,
+                    source_id=paper.source_id,
+                    url=paper.url,
+                    abstract=paper.abstract,
+                    full_text=content_text,
+                    existing_keywords=paper.keywords or [],
+                    summary_ru=enrichment.summary_ru,
+                    analysis_ru=enrichment.analysis_ru,
+                    translation_ru=enrichment.translation_ru,
+                    session_id=session_id,
+                )
+                if keywords:
+                    await paper_service.update_paper(paper_id, keywords=keywords)
+                    paper.keywords = keywords
+            except Exception as keyword_exc:
+                logger.warning("Keyword generation failed for paper {}: {}", paper_id, keyword_exc)
+
             await _set_stage(paper_service, paper_id, "indexing_vector", task_id=task_id)
             embedding_service = get_embedding_service()
             vector_service = get_vector_service()
@@ -208,6 +234,7 @@ async def _process_paper_content_async(self, paper_id: int) -> dict[str, Any]:
                 "pdf_url": pdf_url,
                 "pdf_local_path": pdf_local_path,
                 "text_length": len(content_text),
+                "keywords_count": len(paper.keywords or []),
                 "embedded": embedded,
             }
     except Exception as exc:

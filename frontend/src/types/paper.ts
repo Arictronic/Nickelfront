@@ -42,17 +42,59 @@ const PROCESSING_STATUS_LABELS: Record<string, string> = {
   pending: "Ожидает обработки",
   queued_for_content_processing: "В очереди на обработку",
   processing_content: "Обрабатывается",
+  started: "Запущено",
+  downloading_pdf: "Загрузка PDF",
+  pdf_pending: "Ожидание PDF",
+  pdf_downloaded: "PDF загружен",
+  pdf_parsed: "PDF разобран",
+  fulltext_fallback_parsed: "Текст получен (резервный источник)",
+  formatting_markdown: "Форматирование текста",
   analyzing_ru: "Анализ на русском",
+  extracting_keywords: "Выделение ключевых слов",
+  indexing_vector: "Индексация в векторной базе",
   ready: "Готово",
   ready_with_fallback: "Готово (резервный режим)",
   completed: "Готово",
   failed: "Ошибка обработки",
 };
 
+const PROCESSING_STATUS_PROGRESS: Record<string, number> = {
+  pending: 0,
+  queued_for_content_processing: 5,
+  processing_content: 10,
+  started: 12,
+  pdf_pending: 18,
+  downloading_pdf: 28,
+  pdf_downloaded: 38,
+  pdf_parsed: 48,
+  fulltext_fallback_parsed: 48,
+  formatting_markdown: 62,
+  analyzing_ru: 78,
+  extracting_keywords: 86,
+  indexing_vector: 92,
+  ready: 100,
+  ready_with_fallback: 100,
+  completed: 100,
+  failed: 100,
+};
+
+const PROCESSING_FINAL_STATUSES = new Set(["ready", "ready_with_fallback", "completed", "failed"]);
+
 export function getProcessingStatusLabel(status: string | null | undefined): string {
   const key = (status ?? "").trim();
   if (!key) return "Неизвестно";
   return PROCESSING_STATUS_LABELS[key] ?? key;
+}
+
+export function getProcessingProgress(status: string | null | undefined): number {
+  const key = (status ?? "").trim();
+  if (!key) return 0;
+  return PROCESSING_STATUS_PROGRESS[key] ?? 0;
+}
+
+export function isPaperProcessing(status: string | null | undefined): boolean {
+  const key = (status ?? "").trim();
+  return Boolean(key && !PROCESSING_FINAL_STATUSES.has(key));
 }
 
 export interface PaperSearchFilters {

@@ -6,6 +6,7 @@ const RU = {
   papers: "\u0421\u0442\u0430\u0442\u044c\u0438",
   search: "\u041f\u043e\u0438\u0441\u043a",
   metrics: "\u041c\u0435\u0442\u0440\u0438\u043a\u0438",
+  analysis: "\u0410\u043d\u0430\u043b\u0438\u0437 \u0441\u043f\u043b\u0430\u0432\u043e\u0432",
   jobs: "\u0421\u0442\u0430\u0442\u0443\u0441 \u043f\u0430\u0440\u0441\u0438\u043d\u0433\u0430",
   tech: "\u0422\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u043e\u0442\u0434\u0435\u043b",
   tasks: "\u0417\u0430\u0434\u0430\u0447\u0438",
@@ -31,6 +32,9 @@ export default function Sidebar() {
       <NavLink className={cls} to="/metrics">
         <span>{RU.metrics}</span>
       </NavLink>
+      <NavLink className={cls} to="/analysis">
+        <span>{RU.analysis}</span>
+      </NavLink>
       <NavLink className={cls} to="/jobs">
         <span>{RU.jobs}</span>
       </NavLink>
@@ -49,4 +53,3 @@ export default function Sidebar() {
     </aside>
   );
 }
-

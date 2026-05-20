@@ -6,6 +6,7 @@ import Dashboard from "./pages/Dashboard";
 import Patents from "./pages/Patents";
 import PatentDetail from "./pages/PatentDetail";
 import Analytics from "./pages/Analytics";
+import AlloyAnalysis from "./pages/AlloyAnalysis";
 import Metrics from "./pages/Metrics";
 import CeleryMonitoring from "./pages/CeleryMonitoring";
 import WorkerStatus from "./pages/WorkerStatus";
@@ -171,6 +172,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <Analytics />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/analysis"
+            element={
+              <ProtectedRoute>
+                <AlloyAnalysis />
               </ProtectedRoute>
             }
           />

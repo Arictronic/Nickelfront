@@ -1,21 +1,5 @@
-import { useEffect, useState } from "react";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, PieChart, Pie, Cell, LineChart, Line, ResponsiveContainer, Legend } from "recharts";
+﻿import { useEffect, useState } from "react";
 import { apiClient } from "../api/client";
-
-const COLORS = ["#4a6cf7", "#00c49f", "#ffbb28", "#ff8042", "#8884d8"];
-
-type AnalyticsSummary = {
-  total_papers: number;
-  papers_by_source: Record<string, number>;
-  papers_with_embedding: number;
-  embedding_coverage: number;
-  avg_quality_score: number;
-};
-
-type TrendData = {
-  period: string;
-  count: number;
-};
 
 type TopItem = {
   name: string;
@@ -34,6 +18,19 @@ type QualityReport = {
     min: number;
     max: number;
   };
+};
+
+type KeywordStats = {
+  total_papers: number;
+  papers_with_keywords: number;
+  papers_with_10_plus_keywords: number;
+  papers_with_1_to_9_keywords: number;
+  papers_without_keywords: number;
+  total_keyword_mentions: number;
+  unique_keywords: number;
+  rare_keywords: number;
+  avg_keywords_per_paper: number;
+  max_keywords_per_paper: number;
 };
 
 function normalizeQualityReport(data: any): QualityReport | null {
@@ -56,58 +53,29 @@ function normalizeQualityReport(data: any): QualityReport | null {
 export default function Metrics() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  
-  // Summary data
-  const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
-  
-  // Trend data
-  const [trend, setTrend] = useState<TrendData[]>([]);
-  
-  // Top items
-  const [topJournals, setTopJournals] = useState<TopItem[]>([]);
   const [topKeywords, setTopKeywords] = useState<TopItem[]>([]);
-  const [topAuthors, setTopAuthors] = useState<TopItem[]>([]);
-  
-  // Source distribution
-  const [sourceDistribution, setSourceDistribution] = useState<Record<string, { count: number; percent: number }>>({});
-  
-  // Quality report
   const [qualityReport, setQualityReport] = useState<QualityReport | null>(null);
+  const [keywordStats, setKeywordStats] = useState<KeywordStats | null>(null);
+  const [keywordsExpanded, setKeywordsExpanded] = useState(false);
 
   useEffect(() => {
-    loadAnalytics();
+    void loadAnalytics();
   }, []);
 
   const loadAnalytics = async () => {
     setLoading(true);
     setError(null);
-    
+
     try {
-      const [
-        summaryRes,
-        trendRes,
-        journalsRes,
-        keywordsRes,
-        authorsRes,
-        sourceRes,
-        qualityRes,
-      ] = await Promise.all([
-        apiClient.get<AnalyticsSummary>("/analytics/metrics/summary"),
-        apiClient.get<{ trend: TrendData[] }>("/analytics/metrics/trend?group_by=month&limit=12"),
-        apiClient.get<{ items: TopItem[] }>("/analytics/metrics/top?item_type=journals&limit=10"),
-        apiClient.get<{ items: TopItem[] }>("/analytics/metrics/top?item_type=keywords&limit=15"),
-        apiClient.get<{ items: TopItem[] }>("/analytics/metrics/top?item_type=authors&limit=10"),
-        apiClient.get<{ distribution: Record<string, { count: number; percent: number }> }>("/analytics/metrics/source-distribution"),
+      const [keywordsRes, qualityRes, keywordStatsRes] = await Promise.all([
+        apiClient.get<{ items: TopItem[] }>("/analytics/metrics/top?item_type=keywords&limit=100"),
         apiClient.get<QualityReport>("/analytics/metrics/quality-report"),
+        apiClient.get<KeywordStats>("/analytics/metrics/keyword-stats"),
       ]);
 
-      setSummary(summaryRes.data ?? null);
-      setTrend(trendRes.data?.trend ?? []);
-      setTopJournals(journalsRes.data?.items ?? []);
       setTopKeywords(keywordsRes.data?.items ?? []);
-      setTopAuthors(authorsRes.data?.items ?? []);
-      setSourceDistribution(sourceRes.data?.distribution ?? {});
       setQualityReport(normalizeQualityReport(qualityRes.data));
+      setKeywordStats(keywordStatsRes.data ?? null);
     } catch (e: any) {
       setError(e.message || "Ошибка загрузки данных");
       console.error("Analytics error:", e);
@@ -115,18 +83,6 @@ export default function Metrics() {
       setLoading(false);
     }
   };
-
-  const sourcePieData = Object.entries(sourceDistribution ?? {}).map(([name, data]) => ({
-    name,
-    value: data.count,
-  }));
-
-  const qualityData = qualityReport
-    ? Object.entries(qualityReport.completeness ?? {}).map(([key, data]) => ({
-        name: key.replace("with_", "").replace("_", " ").toUpperCase(),
-        percent: data.percent,
-      }))
-    : [];
 
   if (loading) {
     return (
@@ -155,6 +111,11 @@ export default function Metrics() {
     );
   }
 
+  const visibleKeywords = keywordsExpanded ? topKeywords : topKeywords.slice(0, 30);
+  const keywordCoverage = keywordStats && keywordStats.total_papers > 0
+    ? Math.round((keywordStats.papers_with_keywords / keywordStats.total_papers) * 100)
+    : 0;
+
   return (
     <div className="page">
       <div className="page-head">
@@ -164,174 +125,70 @@ export default function Metrics() {
         </div>
       </div>
 
-      {/* KPI Cards */}
-      <div className="kpi-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))" }}>
-        <article className="panel kpi-card">
-          <h3>Всего статей</h3>
-          <p className="kpi">{summary?.total_papers || 0}</p>
-        </article>
-        
-        <article className="panel kpi-card">
-          <h3>CORE</h3>
-          <p className="kpi">{summary?.papers_by_source?.CORE || 0}</p>
-        </article>
-        
-        <article className="panel kpi-card">
-          <h3>arXiv</h3>
-          <p className="kpi">{summary?.papers_by_source?.arXiv || 0}</p>
-        </article>
-        
-        <article className="panel kpi-card">
-          <h3>С эмбеддингами</h3>
-          <p className="kpi">{summary?.papers_with_embedding || 0}</p>
-        </article>
-        
-        <article className="panel kpi-card">
-          <h3>Покрытие эмбеддингами</h3>
-          <p className="kpi">{summary?.embedding_coverage || 0}%</p>
-        </article>
-        
-        <article className="panel kpi-card">
-          <h3>Среднее качество</h3>
-          <p className="kpi">{summary?.avg_quality_score || 0}</p>
-        </article>
-      </div>
-
-      {/* Charts Row 1 */}
-      <div className="chart-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))" }}>
-        <article className="panel">
-          <h3>Тренд публикаций (по месяцам)</h3>
-          {trend.length > 0 ? (
-            <ResponsiveContainer width="100%" height={250}>
-              <LineChart data={trend}>
-                <XAxis dataKey="period" />
-                <YAxis />
-                <Tooltip />
-                <Line type="monotone" dataKey="count" stroke="#4a6cf7" strokeWidth={2} />
-              </LineChart>
-            </ResponsiveContainer>
-          ) : (
-            <p className="muted">Нет данных</p>
-          )}
-        </article>
-
-        <article className="panel">
-          <h3>Распределение по источникам</h3>
-          {sourcePieData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={250}>
-              <PieChart>
-                <Pie
-                  data={sourcePieData}
-                  dataKey="value"
-                  nameKey="name"
-                  cx="50%"
-                  cy="50%"
-                  outerRadius={80}
-                  label
-                >
-                  {sourcePieData.map((_, index) => (
-                    <Cell key={index} fill={COLORS[index % COLORS.length]} />
-                  ))}
-                </Pie>
-                <Tooltip />
-                <Legend />
-              </PieChart>
-            </ResponsiveContainer>
-          ) : (
-            <p className="muted">Нет данных</p>
-          )}
-        </article>
-      </div>
-
-      {/* Charts Row 2 */}
-      <div className="chart-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))" }}>
-        <article className="panel">
-          <h3>Топ журналов</h3>
-          {topJournals.length > 0 ? (
-            <ResponsiveContainer width="100%" height={250}>
-              <BarChart data={topJournals}>
-                <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-45} textAnchor="end" height={80} />
-                <YAxis />
-                <Tooltip />
-                <Bar dataKey="count" fill="#4a6cf7" />
-              </BarChart>
-            </ResponsiveContainer>
-          ) : (
-            <p className="muted">Нет данных</p>
-          )}
-        </article>
-
-        <article className="panel">
-          <h3>Полнота данных</h3>
-          {qualityData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={250}>
-              <BarChart data={qualityData} layout="vertical">
-                <XAxis type="number" domain={[0, 100]} />
-                <YAxis dataKey="name" type="category" width={100} />
-                <Tooltip formatter={(value: number) => `${value.toFixed(1)}%`} />
-                <Bar dataKey="percent" fill="#00c49f" />
-              </BarChart>
-            </ResponsiveContainer>
-          ) : (
-            <p className="muted">Нет данных</p>
-          )}
-        </article>
-      </div>
-
-      {/* Top Keywords */}
-      <div className="panel">
-        <h3>Топ ключевых слов</h3>
-        {topKeywords.length > 0 ? (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {topKeywords.map((item, idx) => (
-              <span
-                key={idx}
-                style={{
-                  padding: "6px 12px",
-                  background: `rgba(74, 108, 247, ${0.1 + (idx / topKeywords.length) * 0.4})`,
-                  borderRadius: 16,
-                  fontSize: 14,
-                  color: "var(--text)",
-                  border: "1px solid var(--border)",
-                }}
-              >
-                {item.name} <strong style={{ marginLeft: 4 }}>{item.count}</strong>
-              </span>
-            ))}
+      {keywordStats && (
+        <div className="panel">
+          <h3>Словарь ключевых слов</h3>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+            <div>
+              <p className="muted">Уникальных терминов</p>
+              <p className="kpi-status ok">{keywordStats.unique_keywords}</p>
+            </div>
+            <div>
+              <p className="muted">Всего упоминаний</p>
+              <p className="kpi-status">{keywordStats.total_keyword_mentions}</p>
+            </div>
+            <div>
+              <p className="muted">Статей с keywords</p>
+              <p className="kpi-status">{keywordCoverage}%</p>
+            </div>
+            <div>
+              <p className="muted">Статей с 10+ keywords</p>
+              <p className="kpi-status">{keywordStats.papers_with_10_plus_keywords}</p>
+            </div>
+            <div>
+              <p className="muted">Редких терминов</p>
+              <p className="kpi-status">{keywordStats.rare_keywords}</p>
+            </div>
+            <div>
+              <p className="muted">Максимум на статью</p>
+              <p className="kpi-status">{keywordStats.max_keywords_per_paper}</p>
+            </div>
           </div>
-        ) : (
-          <p className="muted">Нет данных</p>
-        )}
-      </div>
+        </div>
+      )}
 
-      {/* Top Authors */}
       <div className="panel">
-        <h3>Топ авторов</h3>
-        {topAuthors.length > 0 ? (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Автор</th>
-                <th>Количество статей</th>
-              </tr>
-            </thead>
-            <tbody>
-              {topAuthors.map((author, idx) => (
-                <tr key={idx}>
-                  <td>{idx + 1}</td>
-                  <td>{author.name}</td>
-                  <td>{author.count}</td>
-                </tr>
+        <h3>Топ ключевых слов <span className="muted">({topKeywords.length} из 100)</span></h3>
+        {topKeywords.length > 0 ? (
+          <>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {visibleKeywords.map((item, idx) => (
+                <span
+                  key={`${item.name}-${idx}`}
+                  style={{
+                    padding: "6px 12px",
+                    background: `rgba(74, 108, 247, ${0.1 + (idx / Math.max(1, visibleKeywords.length)) * 0.35})`,
+                    borderRadius: 16,
+                    fontSize: 14,
+                    color: "var(--text)",
+                    border: "1px solid var(--border)",
+                  }}
+                >
+                  {item.name} <strong style={{ marginLeft: 4 }}>{item.count}</strong>
+                </span>
               ))}
-            </tbody>
-          </table>
+            </div>
+            {topKeywords.length > 30 && (
+              <button className="btn" style={{ marginTop: 12 }} onClick={() => setKeywordsExpanded((v) => !v)}>
+                {keywordsExpanded ? "Свернуть" : "Развернуть дальше"}
+              </button>
+            )}
+          </>
         ) : (
           <p className="muted">Нет данных</p>
         )}
       </div>
 
-      {/* Quality Details */}
       {qualityReport && (
         <div className="panel">
           <h3>Детали качества данных</h3>

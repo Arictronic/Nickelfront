@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { getPapersCount, getCeleryTaskStatus, revokeCeleryTask, deleteCeleryTask, type CeleryTaskStatus } from "../api/papers";
+import {
+  getPapersCount,
+  getCeleryTaskStatus,
+  revokeCeleryTask,
+  deleteCeleryTask,
+  getSharedParseJobs,
+  deleteSharedParseJob,
+  type CeleryTaskStatus,
+} from "../api/papers";
 import type { PaperSource } from "../types/paper";
 
 type ParseJob = {
@@ -15,9 +23,9 @@ type ParseJob = {
   lastPolledAt?: number;
 };
 
-const LS_KEY = "parseJobs.v4";
-const LEGACY_LS_KEYS = ["parseJobs.v3", "parseJobs.v2", "parseJobs.v1"];
-const LS_RESET_MARK = "parseJobs.reset.v1";
+const LS_KEY = "parseJobs.v6";
+const LEGACY_LS_KEYS = ["parseJobs.v5", "parseJobs.v4", "parseJobs.v3", "parseJobs.v2", "parseJobs.v1"];
+const LS_RESET_MARK = "parseJobs.reset.v3";
 
 function clearAllParseJobKeys() {
   const toDelete: string[] = [];
@@ -49,6 +57,18 @@ function saveJobs(jobs: ParseJob[]) {
   localStorage.setItem(LS_KEY, JSON.stringify(jobs));
 }
 
+function mergeJobs(localJobs: ParseJob[], sharedJobs: ParseJob[]): ParseJob[] {
+  const byId = new Map<string, ParseJob>();
+  for (const job of [...sharedJobs, ...localJobs]) {
+    byId.set(job.jobId, {
+      ...job,
+      source: job.source as PaperSource | "all",
+      status: job.status as ParseJob["status"],
+    });
+  }
+  return Array.from(byId.values()).sort((a, b) => b.startedAt - a.startedAt).slice(0, 50);
+}
+
 export default function WorkerStatus() {
   const [jobs, setJobs] = useState<ParseJob[]>(() => loadJobs());
   const [allCount, setAllCount] = useState<number>(0);
@@ -61,8 +81,16 @@ export default function WorkerStatus() {
   }, [jobs]);
 
   useEffect(() => {
-    getPapersCount("all")
-      .then((c) => setAllCount(c))
+    Promise.all([getPapersCount("all"), getSharedParseJobs(50)])
+      .then(([count, sharedJobs]) => {
+        setAllCount(count);
+        setJobs((current) => {
+          const merged = mergeJobs(current, sharedJobs as ParseJob[]);
+          jobsRef.current = merged;
+          saveJobs(merged);
+          return merged;
+        });
+      })
       .catch((e) => setError((e as Error).message));
   }, []);
 
@@ -219,6 +247,7 @@ export default function WorkerStatus() {
 
     try {
       await deleteCeleryTask(jobId);
+      await deleteSharedParseJob(jobId).catch(() => null);
       const nextJobs = jobs.filter((job) => job.jobId !== jobId);
       setJobs(nextJobs);
       jobsRef.current = nextJobs;
@@ -269,9 +298,12 @@ export default function WorkerStatus() {
               try {
                 setError(null);
                 const fromStorage = loadJobs();
-                jobsRef.current = fromStorage;
-                setJobs(fromStorage);
-                await refreshJobs(fromStorage);
+                const sharedJobs = await getSharedParseJobs(50);
+                const merged = mergeJobs(fromStorage, sharedJobs as ParseJob[]);
+                jobsRef.current = merged;
+                setJobs(merged);
+                saveJobs(merged);
+                await refreshJobs(merged);
               } catch (e) {
                 setError((e as Error).message);
               }
@@ -297,7 +329,7 @@ export default function WorkerStatus() {
             <p className="kpi">{inProgress}</p>
           </article>
           <article className="panel kpi-card">
-            <h3>Завершено (ваши)</h3>
+            <h3>Завершено</h3>
             <p className="kpi">{completed}</p>
           </article>
           <article className="panel kpi-card">
@@ -311,9 +343,9 @@ export default function WorkerStatus() {
       </div>
 
       <div className="panel">
-        <h3>Ваши задания парсинга</h3>
+        <h3>Общая история заданий парсинга</h3>
         {jobs.length === 0 ? (
-          <p className="muted">История задач пустая. Запустите парсинг в разделе Dashboard.</p>
+          <p className="muted">История задач пустая. Запустите парсинг в разделе Главная.</p>
         ) : (
           <table className="table">
             <thead>

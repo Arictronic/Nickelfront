@@ -123,6 +123,19 @@ export async function reprocessPaperContent(paperId: number) {
   return data;
 }
 
+export async function reprocessAllPapers(args?: { limit?: number; source?: string }) {
+  const { data } = await apiClient.post<{
+    queued: number;
+    task_ids: string[];
+  }>(`/papers/reprocess-all`, undefined, {
+    params: {
+      limit: args?.limit ?? 500,
+      source: args?.source,
+    },
+  });
+  return data;
+}
+
 export async function deletePaper(paperId: number) {
   await apiClient.delete(`/papers/id/${paperId}`);
 }
@@ -239,6 +252,29 @@ export async function getCeleryTaskStatus(taskId: string) {
   return data;
 }
 
+export type SharedParseJob = {
+  jobId: string;
+  startedAt: number;
+  query: string;
+  source: PaperSource | "all" | string;
+  initialCount: number;
+  lastObservedCount: number;
+  lastCountChangeAt: number;
+  status: "in_progress" | "completed" | "cancelled" | string;
+  celeryStatus?: CeleryTaskStatus;
+};
+
+export async function getSharedParseJobs(limit: number = 50) {
+  const { data } = await apiClient.get<{ jobs: SharedParseJob[] }>("/tasks/parse-jobs", {
+    params: { limit },
+  });
+  return data.jobs ?? [];
+}
+
+export async function deleteSharedParseJob(jobId: string) {
+  await apiClient.delete(`/tasks/parse-jobs/${jobId}`);
+}
+
 export async function revokeCeleryTask(taskId: string, terminate: boolean = false) {
   const { data } = await apiClient.post<{
     task_id: string;
@@ -258,6 +294,82 @@ export async function deleteCeleryTask(taskId: string) {
     status: string;
     message?: string;
   }>(`/tasks/celery/${taskId}`);
+  return data;
+}
+
+export async function stopCeleryQueues(terminate: boolean = false) {
+  const { data } = await apiClient.post<{
+    status: string;
+    revoked: number;
+    task_ids: string[];
+    purged: number;
+    terminate: boolean;
+    message?: string;
+  }>("/tasks/celery/queues/stop", undefined, {
+    params: { terminate },
+  });
+  return data;
+}
+
+export async function startAlloyAnalysis(args: { documentId: string; text: string }) {
+  const { data } = await apiClient.post<{
+    task_id: string;
+    status: string;
+    document_id: string;
+  }>("/tasks/celery/alloy-analysis", {
+    document_id: args.documentId,
+    text: args.text,
+  });
+  return data;
+}
+
+export async function startAlloyBatchAnalysis(args: { idSpec?: string; sources?: string[]; limit?: number }) {
+  const { data } = await apiClient.post<{
+    task_id: string;
+    status: string;
+    id_spec?: string | null;
+    sources: string[];
+    limit: number;
+  }>("/tasks/celery/alloy-analysis/batch", {
+    id_spec: args.idSpec || null,
+    sources: args.sources || [],
+    limit: args.limit ?? 100,
+  });
+  return data;
+}
+
+export async function getAlloyAnalysisResults(limit: number = 200) {
+  const { data } = await apiClient.get<{
+    results: Array<{
+      paper_id: number;
+      paper_title: string;
+      source: string;
+      text_length: number;
+      chunks_total: number;
+      items_count: number;
+      warnings_count: number;
+      summary_path: string;
+      chunk_files: string[];
+      extraction?: any;
+      error?: string | null;
+      updated_at?: string;
+    }>;
+  }>("/tasks/celery/alloy-analysis/results", {
+    params: { limit },
+  });
+  return data.results || [];
+}
+
+export async function getAlloyAnalysisPrompt() {
+  const { data } = await apiClient.get<{ prompt: string }>("/tasks/celery/alloy-analysis/prompt");
+  return data.prompt || "";
+}
+
+export async function saveAlloyAnalysisPrompt(prompt: string) {
+  const { data } = await apiClient.put<{ prompt: string; status: string }>(
+    "/tasks/celery/alloy-analysis/prompt",
+    { prompt }
+  );
   return data;
 }
 

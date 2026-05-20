@@ -8,11 +8,14 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from loguru import logger
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.db.models.paper import Paper as PaperModel
 from app.db.session import get_db
+from app.services.parse_job_history import add_parse_job
 from app.services.paper_content_service import save_pdf_locally
 from app.services.paper_service import PaperService
 from app.tasks.content_tasks import process_paper_content_task
@@ -50,6 +53,36 @@ def _get_cached_count(source: str | None) -> tuple[int, bool] | None:
 
 def _set_cached_count(source: str | None, total: int) -> None:
     _papers_count_cache[_count_cache_key(source)] = (total, time.monotonic())
+
+
+async def _count_papers_for_source(db: AsyncSession, source: str | None) -> int:
+    stmt = select(func.count()).select_from(PaperModel)
+    if source and source != "all":
+        stmt = stmt.where(PaperModel.source == source)
+    result = await db.execute(stmt)
+    return int(result.scalar() or 0)
+
+
+def _record_parse_job(
+    *,
+    task_id: str,
+    query: str,
+    source: str,
+    initial_count: int,
+) -> None:
+    started_at = int(time.time() * 1000)
+    add_parse_job(
+        {
+            "jobId": task_id,
+            "startedAt": started_at,
+            "query": query,
+            "source": source,
+            "initialCount": initial_count,
+            "lastObservedCount": initial_count,
+            "lastCountChangeAt": started_at,
+            "status": "in_progress",
+        }
+    )
 
 
 @router.post("/search", response_model=PaperSearchResponse)
@@ -134,6 +167,7 @@ async def start_parsing(
     limit: int = Query(default=50, ge=1, le=100, description="Макс. количество результатов"),
     source: str = Query(default="CORE", description="Источник"),
     _current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Запустить парсинг статей.
@@ -148,6 +182,13 @@ async def start_parsing(
         raise HTTPException(status_code=400, detail=f"Неподдерживаемый источник. Доступны: {', '.join(AVAILABLE_SOURCES)}")
 
     task = parse_papers_task.delay(query=normalized_query, limit=limit, source=source)
+    initial_count = await _count_papers_for_source(db, source)
+    _record_parse_job(
+        task_id=task.id,
+        query=normalized_query,
+        source=source,
+        initial_count=initial_count,
+    )
     logger.info(f"Запущен парсинг: source={source}, query={normalized_query}, task_id={task.id}")
 
     return {
@@ -165,6 +206,7 @@ async def start_parsing_all(
     source: str = Query(default="all", description="Источник (или all)"),
     query: str = Query(..., description="Пользовательский запрос для всех источников"),
     _current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Запустить парсинг по всем стандартным запросам.
@@ -215,6 +257,13 @@ async def start_parsing_all(
         normalized_query or "<default_templates>",
         limit_per_query,
         task.id,
+    )
+    initial_count = await _count_papers_for_source(db, "all" if source == "all" else source_list[0])
+    _record_parse_job(
+        task_id=task.id,
+        query=normalized_query,
+        source="all" if source == "all" else source_list[0],
+        initial_count=initial_count,
     )
 
     return {
@@ -310,6 +359,11 @@ async def reprocess_paper_content(
         processing_status="queued_for_content_processing",
         content_task_id=task.id,
         processing_error=None,
+        full_text=None,
+        summary_ru=None,
+        analysis_ru=None,
+        translation_ru=None,
+        embedding=None,
     )
     return {"paper_id": paper_id, "task_id": task.id, "status": "queued"}
 

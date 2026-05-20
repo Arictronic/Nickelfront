@@ -7,7 +7,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { deletePaper, getPaperById, getPaperPdfUrl, reprocessPaperContent } from "../api/papers";
 import type { Paper } from "../types/paper";
-import { getProcessingStatusLabel } from "../types/paper";
+import { getProcessingProgress, getProcessingStatusLabel, isPaperProcessing } from "../types/paper";
 
 type Tab = "main" | "parts" | "report";
 
@@ -23,25 +23,23 @@ const RU = {
   journal: "\u0416\u0443\u0440\u043d\u0430\u043b",
   keywords: "\u041a\u043b\u044e\u0447\u0435\u0432\u044b\u0435 \u0441\u043b\u043e\u0432\u0430",
   status: "\u0421\u0442\u0430\u0442\u0443\u0441 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0438",
-  fullText: "full_text",
+  fullText: "\u041f\u043e\u043b\u043d\u044b\u0439 \u0442\u0435\u043a\u0441\u0442",
   yes: "\u0415\u0441\u0442\u044c",
   no: "\u041d\u0435\u0442",
   open: "\u041e\u0442\u043a\u0440\u044b\u0442\u044c",
   openPdf: "\u041e\u0442\u043a\u0440\u044b\u0442\u044c PDF",
   workerTask: "Worker task",
   tabMain: "\u0413\u043b\u0430\u0432\u043d\u0430\u044f",
-  tabParts: "\u0427\u0430\u0441\u0442\u0438 \u0442\u0435\u043a\u0441\u0442\u0430 (\u0442\u043e\u043a\u0435\u043d\u044b)",
+  tabParts: "\u0422\u0435\u043a\u0441\u0442 \u043f\u043e \u0447\u0430\u0441\u0442\u044f\u043c",
   tabReport: "\u041e\u0442\u0447\u0435\u0442",
   gist: "\u0421\u0443\u0442\u044c \u0441\u0442\u0430\u0442\u044c\u0438",
   gistNotReady: "\u0421\u0443\u0442\u044c \u0441\u0442\u0430\u0442\u044c\u0438 \u043f\u043e\u043a\u0430 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432\u0430.",
   pdfLen: "PDF (\u043a\u043e\u043b. \u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432",
   articleText: "\u0422\u0435\u043a\u0441\u0442 \u0441\u0442\u0430\u0442\u044c\u0438",
-  splitBtn: "\u0420\u0430\u0437\u0431\u0438\u0442\u044c full_text \u043d\u0430 \u0447\u0430\u0441\u0442\u0438",
   reportBtn: "\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u043e\u0442\u0447\u0435\u0442 \u043d\u0430 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u043e\u0439 \u0441\u0442\u0440\u0430\u043d\u0438\u0446\u0435",
-  reprocessBtn: "\u041f\u0435\u0440\u0435\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c (PDF + AI)",
+  reprocessBtn: "\u041f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0443",
   tokensPerPart: "\u0422\u043e\u043a\u0435\u043d\u043e\u0432 \u043d\u0430 \u0447\u0430\u0441\u0442\u044c",
   approxTokens: "\u041f\u0440\u0438\u0431\u043b\u0438\u0437\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0439 total tokens",
-  noFullTextFallback: "full_text \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442, \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0435\u043c abstract \u0434\u043b\u044f \u043f\u0440\u0435\u0434\u0432\u0430\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0439 \u0440\u0430\u0437\u043c\u0435\u0442\u043a\u0438.",
   parts: "\u0427\u0430\u0441\u0442\u0438",
   emptyText: "\u0422\u0435\u043a\u0441\u0442 \u043f\u0443\u0441\u0442.",
   part: "\u0427\u0430\u0441\u0442\u044c",
@@ -118,7 +116,7 @@ export default function PatentDetail() {
   const [tokensPerPart, setTokensPerPart] = useState(350);
   const [activePartIndex, setActivePartIndex] = useState(0);
 
-  const loadPaper = async () => {
+  const loadPaper = async (showLoading = true) => {
     const paperId = Number(id);
     if (!paperId || Number.isNaN(paperId)) {
       setError(RU.invalidId);
@@ -126,12 +124,16 @@ export default function PatentDetail() {
       return;
     }
 
-    setLoading(true);
+    if (showLoading) setLoading(true);
     setError(null);
-    getPaperById(paperId)
-      .then((p) => setPaper(p))
-      .catch((e) => setError((e as Error).message))
-      .finally(() => setLoading(false));
+    try {
+      const nextPaper = await getPaperById(paperId);
+      setPaper(nextPaper);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      if (showLoading) setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -139,15 +141,31 @@ export default function PatentDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  const fullText = paper?.fullText ?? paper?.abstract ?? "";
+  useEffect(() => {
+    if (!paper || !isPaperProcessing(paper.processingStatus)) return;
+    const timer = window.setInterval(() => {
+      loadPaper(false).catch(() => null);
+    }, 4000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paper?.id, paper?.processingStatus]);
+
+  const fullText = paper?.fullText ?? "";
+  const hasFullText = Boolean(paper?.fullText?.trim().length);
   const hasFullTextOrPdf = Boolean((paper?.fullText && paper.fullText.trim().length > 0) || paper?.pdfUrl || paper?.pdfLocalPath);
 
   const parts = useMemo(() => {
     if (!paper) return [];
-    const text = paper.fullText || paper.abstract || "";
+    const text = paper.fullText || "";
     if (!text.trim()) return [];
     return splitByTokens(text, Math.max(50, tokensPerPart));
   }, [paper, tokensPerPart]);
+
+  useEffect(() => {
+    if (tab === "parts" && !hasFullText) {
+      setTab("main");
+    }
+  }, [tab, hasFullText]);
 
   useEffect(() => {
     setActivePartIndex(0);
@@ -202,9 +220,18 @@ export default function PatentDetail() {
           <p>
             <strong>{RU.keywords}:</strong> {paper.keywords.length ? paper.keywords.slice(0, 10).join(", ") : RU.unknown}
           </p>
-          <p>
-            <strong>{RU.status}:</strong> {getProcessingStatusLabel(paper.processingStatus)}
-          </p>
+          <div className="detail-progress">
+            <div className="paper-progress-head">
+              <strong>{RU.status}:</strong>
+              <span>{getProcessingStatusLabel(paper.processingStatus)} - {getProcessingProgress(paper.processingStatus)}%</span>
+            </div>
+            <div className="paper-progress-track" aria-label={`paper-${paper.id}-progress`}>
+              <div
+                className={`paper-progress-fill ${paper.processingStatus === "failed" ? "failed" : getProcessingProgress(paper.processingStatus) === 100 ? "done" : ""}`}
+                style={{ width: `${Math.max(3, getProcessingProgress(paper.processingStatus))}%` }}
+              />
+            </div>
+          </div>
           <p>
             <strong>{RU.fullText}:</strong> {hasFullTextOrPdf ? RU.yes : RU.no}
           </p>
@@ -238,9 +265,11 @@ export default function PatentDetail() {
         <button className={`btn ${tab === "main" ? "btn-primary" : ""}`} onClick={() => setTab("main")}>
           {RU.tabMain}
         </button>
-        <button className={`btn ${tab === "parts" ? "btn-primary" : ""}`} onClick={() => setTab("parts")}>
-          {RU.tabParts}
-        </button>
+        {hasFullText && (
+          <button className={`btn ${tab === "parts" ? "btn-primary" : ""}`} onClick={() => setTab("parts")}>
+            {RU.tabParts}
+          </button>
+        )}
         <button className={`btn ${tab === "report" ? "btn-primary" : ""}`} onClick={() => setTab("report")}>
           {RU.tabReport}
         </button>
@@ -273,10 +302,7 @@ export default function PatentDetail() {
           )}
 
           <div style={{ marginTop: 12 }}>
-            <button className="btn btn-primary" onClick={() => setTab("parts")}>
-              {RU.splitBtn}
-            </button>
-            <button className="btn" style={{ marginLeft: 10 }} onClick={() => navigate(`/papers/${paper.id}/report`)}>
+            <button className="btn" onClick={() => navigate(`/papers/${paper.id}/report`)}>
               {RU.reportBtn}
             </button>
             <button className="btn" style={{ marginLeft: 10 }} onClick={onReprocess}>
@@ -305,8 +331,6 @@ export default function PatentDetail() {
               {RU.approxTokens}: {approxTokenCount(fullText)}
             </span>
           </div>
-
-          {!paper.fullText && <p className="muted">{RU.noFullTextFallback}</p>}
 
           <div style={{ display: "grid", gridTemplateColumns: "340px 1fr", gap: 12, alignItems: "start" }}>
             <div className="panel" style={{ padding: 12, boxShadow: "none" }}>
@@ -412,4 +436,3 @@ export default function PatentDetail() {
     </div>
   );
 }
-

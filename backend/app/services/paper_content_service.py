@@ -27,6 +27,9 @@ class AIEnrichmentResult:
     fallback_reason: str | None = None
 
 
+MAX_KEYWORD_SOURCE_CHARS = 32000
+
+
 _PAGE_MARKER_SPLIT_RE = re.compile("(?=\\[(?:\\u0421\\u0442\\u0440\\u0430\\u043d\\u0438\\u0446\\u0430|Page)\\s+\\d+\\])")
 
 def _decode_cp1251_utf8_mojibake(value: str) -> str:
@@ -186,9 +189,9 @@ def _clean_html_text(raw: str) -> str:
     # Decode entities first so encoded tags (&lt;div&gt;) are also removed.
     text = html.unescape(raw or "")
     text = html.unescape(text)
-    text = re.sub(r"<script[\\s\\S]*?</script>", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"<style[\\s\\S]*?</style>", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"<noscript[\\s\\S]*?</noscript>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<script[\s\S]*?</script>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<noscript[\s\S]*?</noscript>", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", text)
     # Second pass to catch tags revealed by unescape cascades.
     text = html.unescape(text)
@@ -341,7 +344,7 @@ def normalize_pdf_text_markdown(
                 thinking_enabled=True,
                 search_enabled=False,
                 auto_continue=False,
-                timeout=240.0,
+                timeout=1000.0,
             )
             response_text = (result.get("response") or "").strip()
             error_text = str(result.get("error") or "").strip()
@@ -434,7 +437,7 @@ def generate_ai_enrichment_ru(
         thinking_enabled=True,
         search_enabled=False,
         auto_continue=True,
-        timeout=240.0,
+        timeout=1000.0,
     )
     response_text = (result.get("response") or "").strip()
     if not response_text:
@@ -481,3 +484,150 @@ def generate_ai_enrichment_ru(
         analysis_ru=analysis_ru,
         translation_ru=translation_ru,
     )
+
+
+def _normalize_keyword(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n,;:.")
+    return cleaned[:120]
+
+
+def _dedupe_keywords(values: list[str], limit: int = 50) -> list[str]:
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        keyword = _normalize_keyword(raw)
+        if not keyword:
+            continue
+        key = keyword.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        keywords.append(keyword)
+        if len(keywords) >= limit:
+            break
+    return keywords
+
+
+def _coerce_keyword_list(raw: object) -> list[str]:
+    if isinstance(raw, list):
+        return [str(item) for item in raw if str(item or "").strip()]
+    if isinstance(raw, str):
+        parts = re.split(r"[,;\n]+", raw)
+        return [part for part in parts if part.strip()]
+    return []
+
+
+def _parse_keywords_response(response_text: str) -> list[str]:
+    parsed = None
+    try:
+        parsed = json.loads(response_text)
+    except Exception:
+        match = re.search(r"\{[\s\S]*\}", response_text or "")
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+            except Exception:
+                parsed = None
+
+    if isinstance(parsed, dict):
+        return _coerce_keyword_list(parsed.get("keywords"))
+    if isinstance(parsed, list):
+        return _coerce_keyword_list(parsed)
+    return []
+
+
+def _sample_text_chunks(text: str, chunk_size: int = 6000, max_chunks: int = 5) -> list[str]:
+    clean = (text or "").strip()
+    if not clean:
+        return []
+    chunks = [clean[i : i + chunk_size].strip() for i in range(0, len(clean), chunk_size)]
+    chunks = [chunk for chunk in chunks if chunk]
+    if len(chunks) <= max_chunks:
+        return chunks
+
+    indexes = sorted({round(i * (len(chunks) - 1) / (max_chunks - 1)) for i in range(max_chunks)})
+    return [chunks[index] for index in indexes]
+
+
+def generate_article_keywords(
+    *,
+    title: str,
+    authors: list[str] | None,
+    journal: str | None,
+    doi: str | None,
+    source: str | None,
+    source_id: str | None,
+    url: str | None,
+    abstract: str | None,
+    full_text: str | None,
+    existing_keywords: list[str] | None,
+    summary_ru: str | None = None,
+    analysis_ru: str | None = None,
+    translation_ru: str | None = None,
+    session_id: str | None = None,
+) -> list[str]:
+    """Generate 10-50 article keywords with Qwen, preserving useful existing keywords."""
+    existing = _dedupe_keywords(existing_keywords or [])
+    text_sections = _sample_text_chunks(full_text or abstract or "")
+    chunks_text = "\n\n".join(
+        f"[Фрагмент текста {index}/{len(text_sections)}]\n{chunk}"
+        for index, chunk in enumerate(text_sections, start=1)
+    )
+
+    article_payload = {
+        "title": title,
+        "authors": authors or [],
+        "journal": journal,
+        "doi": doi,
+        "source": source,
+        "source_id": source_id,
+        "url": url,
+        "existing_keywords": existing,
+        "abstract": abstract or "",
+        "summary_ru": summary_ru or "",
+        "analysis_ru": analysis_ru or "",
+        "translation_ru": translation_ru or "",
+    }
+
+    payload_json = json.dumps(article_payload, ensure_ascii=False, indent=2)
+    prompt = (
+        "Ты научный ассистент по разметке статей.\n"
+        "Нужно выделить от 10 до 50 ключевых слов и коротких терминологических фраз для статьи.\n\n"
+        "Используй всю переданную информацию: метаданные, авторские keywords, аннотацию, AI-анализ, перевод и фрагменты полного текста.\n"
+        "Если existing_keywords уже содержат полезные ключевые слова, обязательно сохрани их в итоговом списке.\n"
+        "Добавь недостающие термины из содержания статьи: материалы, сплавы, методы, свойства, процессы, области применения, важные параметры.\n\n"
+        "Правила:\n"
+        "1) Верни только строгий JSON без markdown.\n"
+        "2) Формат: {\"keywords\":[\"keyword 1\",\"keyword 2\"]}\n"
+        "3) Количество keywords: минимум 10, максимум 50.\n"
+        "4) Не выдумывай термины, которых нет или которые не следуют из статьи.\n"
+        "5) Убирай дубли, слишком общие слова и целые предложения.\n"
+        "6) Предпочитай язык оригинальной статьи для технических терминов; русские термины допустимы, если статья/анализ на русском.\n"
+        "7) Один keyword должен быть коротким: обычно 1-5 слов.\n\n"
+        f"Информация о статье:\n{payload_json}\n\n"
+        f"Фрагменты полного текста:\n{chunks_text[:MAX_KEYWORD_SOURCE_CHARS]}"
+    )
+
+    qwen_client = get_qwen_client()
+    result = qwen_client.send_message(
+        message=prompt,
+        session_id=session_id,
+        thinking_enabled=True,
+        search_enabled=False,
+        auto_continue=True,
+        timeout=1000.0,
+    )
+
+    response_text = (result.get("response") or "").strip()
+    error_text = str(result.get("error") or "").strip()
+    if not response_text:
+        logger.warning("Keyword generation returned empty response for title='{}': {}", title[:80], error_text or "none")
+        return existing
+
+    generated = _parse_keywords_response(response_text)
+    merged = _dedupe_keywords([*existing, *generated], limit=50)
+    if not merged:
+        logger.warning("Keyword generation returned no parseable keywords for title='{}'", title[:80])
+        return existing
+
+    return merged

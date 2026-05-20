@@ -5,12 +5,13 @@ from datetime import datetime
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.api.deps import require_admin_user
 from app.core.config import settings
 from app.tasks.celery_app import celery_app
 
-router = APIRouter(prefix="/monitoring", tags=["monitoring"])
+router = APIRouter(prefix="/monitoring", tags=["monitoring"], dependencies=[Depends(require_admin_user)])
 
 
 # Flower API base URL

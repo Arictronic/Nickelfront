@@ -1,5 +1,6 @@
 ﻿import { useEffect, useMemo, useRef, useState } from "react";
 import { apiClient } from "../api/client";
+import { reprocessAllPapers, stopCeleryQueues } from "../api/papers";
 
 type CeleryStatus = {
   status: "online" | "offline" | "unknown";
@@ -77,6 +78,10 @@ const initialLoading: PanelState = {
 
 export default function CeleryMonitoring() {
   const [refreshing, setRefreshing] = useState(false);
+  const [recovering, setRecovering] = useState(false);
+  const [stoppingQueues, setStoppingQueues] = useState(false);
+  const [recoverMessage, setRecoverMessage] = useState<string | null>(null);
+  const [queueStopMessage, setQueueStopMessage] = useState<string | null>(null);
 
   const [status, setStatus] = useState<CeleryStatus | null>(null);
   const [workers, setWorkers] = useState<WorkerInfo[]>([]);
@@ -168,6 +173,43 @@ export default function CeleryMonitoring() {
     setRefreshing(true);
     await Promise.all([fetchStatus(), fetchWorkers(), fetchQueues(), fetchTasks(), fetchScheduled()]);
     setRefreshing(false);
+  };
+
+  const recoverPaperStatuses = async () => {
+    if (!window.confirm("Поставить все статьи в очередь повторной обработки статусов (PDF + AI)?")) return;
+    setRecovering(true);
+    setRecoverMessage(null);
+    try {
+      const res = await reprocessAllPapers({ limit: 5000 });
+      setRecoverMessage(`Поставлено в очередь: ${res.queued}`);
+      await refreshAll();
+    } catch (e: any) {
+      setRecoverMessage(`Ошибка восстановления: ${e?.message || "неизвестная ошибка"}`);
+    } finally {
+      setRecovering(false);
+    }
+  };
+
+  const stopQueues = async () => {
+    if (
+      !window.confirm(
+        "Остановить очереди Celery? Активные/ожидающие задачи будут отменены, а сообщения в очереди очищены."
+      )
+    ) {
+      return;
+    }
+
+    setStoppingQueues(true);
+    setQueueStopMessage(null);
+    try {
+      const res = await stopCeleryQueues(false);
+      setQueueStopMessage(`Очереди остановлены: отменено задач ${res.revoked}, очищено сообщений ${res.purged}.`);
+      await refreshAll();
+    } catch (e: any) {
+      setQueueStopMessage(`Ошибка остановки очередей: ${e?.message || "неизвестная ошибка"}`);
+    } finally {
+      setStoppingQueues(false);
+    }
   };
 
   useEffect(() => {
@@ -263,6 +305,12 @@ export default function CeleryMonitoring() {
       <div className="page-head">
         <h2>Мониторинг Celery</h2>
         <div className="actions">
+          <button className="btn btn-danger" onClick={() => void stopQueues()} disabled={stoppingQueues}>
+            {stoppingQueues ? "Остановка..." : "Остановить очереди"}
+          </button>
+          <button className="btn btn-primary" onClick={() => void recoverPaperStatuses()} disabled={recovering}>
+            {recovering ? "Восстановление..." : "Восстановить статусы статей"}
+          </button>
           <a
             href={status?.flower_url || "http://localhost:5555"}
             target="_blank"
@@ -276,6 +324,18 @@ export default function CeleryMonitoring() {
           </button>
         </div>
       </div>
+
+      {recoverMessage && (
+        <div className="panel">
+          <p className={recoverMessage.startsWith("Ошибка") ? "error" : "muted"}>{recoverMessage}</p>
+        </div>
+      )}
+
+      {queueStopMessage && (
+        <div className="panel">
+          <p className={queueStopMessage.startsWith("Ошибка") ? "error" : "muted"}>{queueStopMessage}</p>
+        </div>
+      )}
 
       <div className="kpi-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
         <article className="panel kpi-card">

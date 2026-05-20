@@ -23,6 +23,7 @@ celery_app = Celery(
         "app.tasks.tasks",
         "app.tasks.parse_tasks",
         "app.tasks.content_tasks",
+        "app.tasks.alloy_analysis_tasks",
     ],
 )
 

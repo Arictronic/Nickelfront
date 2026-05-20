@@ -788,9 +788,68 @@ class ELibraryClient(_RetryingClient):
 class FreePatentClient(_RetryingClient):
     BASE_URL = "https://yandex.ru"
     SOURCE_NAME = "FreePatent"
+    _PATENT_PATH_RE = re.compile(r"^/(?:patents?|patent)/(?P<pid>\d+)(?:/|$)", re.IGNORECASE)
 
     def __init__(self, timeout: float = 30.0):
         super().__init__(base_url=self.BASE_URL, timeout=timeout)
+
+    @classmethod
+    def _extract_patent_id(cls, url: str) -> str | None:
+        parsed = urlparse(url)
+        if "freepatent.ru" not in parsed.netloc.lower():
+            return None
+        match = cls._PATENT_PATH_RE.match(parsed.path or "")
+        if not match:
+            return None
+        return match.group("pid")
+
+    @staticmethod
+    def _is_mpk_url(url: str) -> bool:
+        parsed = urlparse(url)
+        if "freepatent.ru" not in parsed.netloc.lower():
+            return False
+        return (parsed.path or "").lower().startswith("/mpk/")
+
+    @staticmethod
+    def _build_patent_url(patent_id: str) -> str:
+        return f"https://www.freepatent.ru/patents/{patent_id}"
+
+    def _extract_patents_from_mpk_html(self, html: str, limit: int) -> list[dict[str, Any]]:
+        soup = BeautifulSoup(html, "html.parser")
+        records: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        for anchor in soup.select("a[href]"):
+            href = _collapse_whitespace(anchor.get("href"))
+            if not href:
+                continue
+            absolute = urljoin("https://www.freepatent.ru/", href)
+            patent_id = self._extract_patent_id(absolute)
+            if not patent_id or patent_id in seen_ids:
+                continue
+            seen_ids.add(patent_id)
+
+            title_raw = _collapse_whitespace(anchor.get_text(" ", strip=True))
+            title = _repair_mojibake_ru(title_raw) or f"Патент {patent_id}"
+            records.append(
+                {
+                    "title": title,
+                    "authors": [],
+                    "published_date": None,
+                    "journal": "FreePatent",
+                    "doi": None,
+                    "abstract": None,
+                    "keywords": [],
+                    "source": "FreePatent",
+                    "source_id": f"patents/{patent_id}",
+                    "url": self._build_patent_url(patent_id),
+                    "pdf_url": None,
+                }
+            )
+            if len(records) >= limit:
+                break
+
+        return records
 
     async def search(self, query: str, limit: int = 25, offset: int = 0, **kwargs: Any) -> list[dict[str, Any]]:
         page = max(0, offset // max(1, limit))
@@ -805,6 +864,8 @@ class FreePatentClient(_RetryingClient):
         )
         soup = BeautifulSoup(html, "html.parser")
         results: list[dict[str, Any]] = []
+        seen_source_ids: set[str] = set()
+        seen_mpk_urls: set[str] = set()
 
         for item in soup.select("li.b-serp-item"):
             link = item.select_one("a.b-serp-item__title-link")
@@ -818,30 +879,58 @@ class FreePatentClient(_RetryingClient):
             if "freepatent.ru" not in parsed.netloc:
                 continue
 
-            title = _collapse_whitespace(link.get_text(" ", strip=True)) or "Untitled"
-            abstract = _collapse_whitespace(
-                (item.select_one("div.b-serp-item__text") or item).get_text(" ", strip=True)
-            )
-            source_id = parsed.path.strip("/") or parsed.netloc
+            patent_id = self._extract_patent_id(url)
+            if patent_id:
+                source_id = f"patents/{patent_id}"
+                if source_id in seen_source_ids:
+                    continue
+                seen_source_ids.add(source_id)
 
-            results.append(
-                {
-                    "title": title,
-                    "authors": [],
-                    "published_date": None,
-                    "journal": "FreePatent",
-                    "doi": None,
-                    "abstract": abstract,
-                    "keywords": [],
-                    "source": "FreePatent",
-                    "source_id": source_id,
-                    "url": url,
-                    "pdf_url": None,
-                }
-            )
+                title = _repair_mojibake_ru(_collapse_whitespace(link.get_text(" ", strip=True))) or "Untitled"
+                abstract = _repair_mojibake_ru(
+                    _collapse_whitespace((item.select_one("div.b-serp-item__text") or item).get_text(" ", strip=True))
+                )
+                results.append(
+                    {
+                        "title": title,
+                        "authors": [],
+                        "published_date": None,
+                        "journal": "FreePatent",
+                        "doi": None,
+                        "abstract": abstract,
+                        "keywords": [],
+                        "source": "FreePatent",
+                        "source_id": source_id,
+                        "url": self._build_patent_url(patent_id),
+                        "pdf_url": None,
+                    }
+                )
+                if len(results) >= limit:
+                    break
+                continue
 
-            if len(results) >= limit:
-                break
+            if self._is_mpk_url(url):
+                normalized_mpk_url = url.split("#", 1)[0]
+                if normalized_mpk_url in seen_mpk_urls:
+                    continue
+                seen_mpk_urls.add(normalized_mpk_url)
+
+                try:
+                    category_html = await self._request_text(normalized_mpk_url)
+                    expanded = self._extract_patents_from_mpk_html(category_html, limit=limit - len(results))
+                except Exception:
+                    expanded = []
+
+                for record in expanded:
+                    sid = record.get("source_id")
+                    if not isinstance(sid, str) or sid in seen_source_ids:
+                        continue
+                    seen_source_ids.add(sid)
+                    results.append(record)
+                    if len(results) >= limit:
+                        break
+                if len(results) >= limit:
+                    break
 
         return results
 

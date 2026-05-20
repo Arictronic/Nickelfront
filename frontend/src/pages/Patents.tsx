@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { deletePaper, getPapersCount, getPapersList, searchPapers } from "../api/papers";
 import Pagination from "../components/ui/Pagination";
 import { useToast } from "../components/ui/Toast";
-import { getProcessingStatusLabel, PAPER_SOURCES } from "../types/paper";
+import { getProcessingProgress, getProcessingStatusLabel, isPaperProcessing, PAPER_SOURCES } from "../types/paper";
 import type { Paper, PaperListFilters, PaperSource } from "../types/paper";
 
 type SortState = {
@@ -40,6 +40,7 @@ const RU = {
   colSource: "\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a",
   colDate: "\u0414\u0430\u0442\u0430",
   colStatus: "\u0421\u0442\u0430\u0442\u0443\u0441",
+  colFullText: "\u041f\u043e\u043b\u043d\u044b\u0439 \u0442\u0435\u043a\u0441\u0442",
   colActions: "\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u044f",
   yes: "\u0414\u0430",
   no: "\u041d\u0435\u0442",
@@ -106,8 +107,8 @@ export default function Patents() {
     [filters.source]
   );
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (showLoading = true) => {
+    if (showLoading) setLoading(true);
     setError(null);
     try {
       if (!clientSideFiltersEnabled) {
@@ -145,11 +146,11 @@ export default function Patents() {
 
       setTotalCount(items.length);
       setPapers(items);
-      setPage(1);
+      if (showLoading) setPage(1);
     } catch (e) {
       setError((e as Error).message);
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   };
 
@@ -184,6 +185,16 @@ export default function Patents() {
 
   const currentIds = sortedPapers.map((p) => p.id);
   const allChecked = currentIds.length > 0 && currentIds.every((id) => selectedIds.includes(id));
+  const hasProcessingPapers = sortedPapers.some((p) => isPaperProcessing(p.processingStatus));
+
+  useEffect(() => {
+    if (!hasProcessingPapers) return;
+    const timer = window.setInterval(() => {
+      fetchData(false).catch(() => null);
+    }, 5000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasProcessingPapers, page, filters.source, filters.query, filters.fullTextOnly, filters.dateFrom, filters.dateTo, filters.processingStatus]);
 
   const toggleOne = (id: number) => {
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -338,7 +349,7 @@ export default function Patents() {
             <th>{RU.colSource}</th>
             <th>{RU.colDate}</th>
             <th>DOI</th>
-            <th>Full text</th>
+            <th>{RU.colFullText}</th>
             <th>{RU.colStatus}</th>
             <th>{RU.colActions}</th>
           </tr>
@@ -370,7 +381,20 @@ export default function Patents() {
                   <td>{p.publicationDate ? p.publicationDate.slice(0, 10) : RU.dash}</td>
                   <td>{p.doi ?? RU.dash}</td>
                   <td>{hasFullTextOrPdf(p) ? RU.yes : RU.no}</td>
-                  <td>{getProcessingStatusLabel(p.processingStatus)}</td>
+                  <td>
+                    <div className="paper-progress">
+                      <div className="paper-progress-head">
+                        <span>{getProcessingStatusLabel(p.processingStatus)}</span>
+                        <span>{getProcessingProgress(p.processingStatus)}%</span>
+                      </div>
+                      <div className="paper-progress-track" aria-label={`progress-${p.id}`}>
+                        <div
+                          className={`paper-progress-fill ${p.processingStatus === "failed" ? "failed" : getProcessingProgress(p.processingStatus) === 100 ? "done" : ""}`}
+                          style={{ width: `${Math.max(3, getProcessingProgress(p.processingStatus))}%` }}
+                        />
+                      </div>
+                    </div>
+                  </td>
                   <td>
                     <div className="actions-inline">
                       <Link className="action-link" to={`/papers/${p.id}`}>
@@ -392,4 +416,3 @@ export default function Patents() {
     </div>
   );
 }
-

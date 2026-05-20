@@ -86,3 +86,15 @@ async def get_current_user_optional(
         return await get_current_user(credentials, db)
     except HTTPException:
         return None
+
+
+async def require_admin_user(
+    current_user: UserResponse = Depends(get_current_user),
+) -> UserResponse:
+    """Require built-in admin rights for technical/admin endpoints."""
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Доступ разрешён только администратору",
+        )
+    return current_user
