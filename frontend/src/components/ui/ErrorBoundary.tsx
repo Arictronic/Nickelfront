@@ -10,7 +10,10 @@ export default class ErrorBoundary extends Component<{ children: ReactNode }, { 
     return { hasError: true };
   }
 
-  componentDidCatch(_error: Error, _errorInfo: ErrorInfo) {}
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    // eslint-disable-next-line no-console
+    console.error("[UI ErrorBoundary]", error, errorInfo);
+  }
 
   render() {
     if (this.state.hasError) {

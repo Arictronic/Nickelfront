@@ -25,24 +25,6 @@
 - Chromium (для веб-парсинга)
 
 ## Установка
-
-1. **Создайте виртуальное окружение:**
-   ```bash
-   python -m venv venv
-   venv\Scripts\activate  # Windows
-   source venv/bin/activate  # Linux/Mac
-   ```
-
-2. **Установите зависимости:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Настройте переменные окружения:**
-   ```bash
-   cp .env.example .env
-   ```
-   
    Отредактируйте `.env` и укажите:
    - `LLM_API_KEY` — ваш API ключ для LLM
    - `LLM_API_BASE_URL` — URL API (по умолчанию OpenAI)

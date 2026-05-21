@@ -60,14 +60,28 @@ type StoredAlloyTask = {
 };
 
 const ACTIVE_ALLOY_TASK_KEY = "alloyAnalysis.activeTask.v1";
+const ACTIVE_ALLOY_TASK_MAX_AGE_MS = 8 * 60 * 60_000;
+const STALE_PENDING_ALLOY_TASK_MS = 30 * 60_000;
+
+function clearActiveAlloyTask() {
+  localStorage.removeItem(ACTIVE_ALLOY_TASK_KEY);
+}
 
 function loadActiveAlloyTask(): StoredAlloyTask | null {
   try {
     const raw = localStorage.getItem(ACTIVE_ALLOY_TASK_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as StoredAlloyTask;
+    if (
+      parsed?.startedAt &&
+      Date.now() - parsed.startedAt > ACTIVE_ALLOY_TASK_MAX_AGE_MS
+    ) {
+      clearActiveAlloyTask();
+      return null;
+    }
     return parsed?.taskId ? parsed : null;
   } catch {
+    clearActiveAlloyTask();
     return null;
   }
 }
@@ -80,8 +94,22 @@ function taskIsFinished(status?: string) {
   return status === "SUCCESS" || status === "FAILURE" || status === "REVOKED";
 }
 
+function hasTaskProgress(status: CeleryTaskStatus | null | undefined) {
+  const progress = status?.result ?? status?.progress ?? {};
+  const current = Number(
+    progress.current || progress.processed || progress.processed_chunks || 0,
+  );
+  return current > 0 || status?.status === "STARTED";
+}
+
 function formatNumber(value: number | undefined | null) {
   return Number(value || 0).toLocaleString("ru-RU");
+}
+
+function normalizeLimit(value: unknown) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) return 1;
+  return Math.max(1, Math.min(1000, Math.floor(parsed)));
 }
 
 const scrollBoxStyle = {
@@ -102,7 +130,10 @@ const sourceLabelStyle = {
 
 function prettifyValue(value: unknown) {
   if (value === null || value === undefined) return "не указано";
-  if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  if (typeof value === "number")
+    return Number.isInteger(value)
+      ? String(value)
+      : value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
   if (typeof value === "string") return value || "не указано";
   return JSON.stringify(value);
 }
@@ -110,7 +141,9 @@ function prettifyValue(value: unknown) {
 function propertySummary(alloy: any) {
   const physical = Object.keys(alloy?.properties?.physical || {}).length;
   const mechanical = Object.keys(alloy?.properties?.mechanical || {}).length;
-  const highTemperature = Object.keys(alloy?.properties?.high_temperature || {}).length;
+  const highTemperature = Object.keys(
+    alloy?.properties?.high_temperature || {},
+  ).length;
   const total = physical + mechanical + highTemperature;
   if (!total) return "Свойства не извлечены";
   return `Свойства: физические ${physical}, механические ${mechanical}, высокотемпературные ${highTemperature}`;
@@ -132,9 +165,13 @@ export default function AlloyAnalysis() {
   const [savingPrompt, setSavingPrompt] = useState(false);
   const [promptMessage, setPromptMessage] = useState<string | null>(null);
 
-  const taskResult = (taskStatus?.result ?? null) as AlloyBatchTaskResult | null;
-  const results = taskResult?.results?.length ? taskResult.results : savedResults;
-  const running = submitting || (!!taskId && !taskIsFinished(taskStatus?.status));
+  const taskResult = (taskStatus?.result ??
+    null) as AlloyBatchTaskResult | null;
+  const results = taskResult?.results?.length
+    ? taskResult.results
+    : savedResults;
+  const running =
+    submitting || (!!taskId && !taskIsFinished(taskStatus?.status));
 
   useEffect(() => {
     const restoredTask = loadActiveAlloyTask();
@@ -145,10 +182,12 @@ export default function AlloyAnalysis() {
           task_id: restoredTask.taskId,
           status: "PENDING",
           state: "PENDING",
-        }
+        },
       );
       setIdSpec(restoredTask.idSpec || "");
-      setSelectedSources(Array.isArray(restoredTask.sources) ? restoredTask.sources : []);
+      setSelectedSources(
+        Array.isArray(restoredTask.sources) ? restoredTask.sources : [],
+      );
       setLimit(restoredTask.limit || 100);
     }
     void loadSavedResults();
@@ -157,6 +196,10 @@ export default function AlloyAnalysis() {
 
   useEffect(() => {
     if (!taskId) return;
+    if (taskIsFinished(taskStatus?.status)) {
+      clearActiveAlloyTask();
+      return;
+    }
     saveActiveAlloyTask({
       taskId,
       startedAt: loadActiveAlloyTask()?.startedAt || Date.now(),
@@ -176,10 +219,36 @@ export default function AlloyAnalysis() {
       try {
         const status = await getCeleryTaskStatus(taskId);
         if (!cancelled) {
+          const stored = loadActiveAlloyTask();
+          const isStalePending =
+            status.status === "PENDING" &&
+            !!stored?.startedAt &&
+            Date.now() - stored.startedAt > STALE_PENDING_ALLOY_TASK_MS &&
+            !hasTaskProgress(status);
+
+          if (isStalePending) {
+            clearActiveAlloyTask();
+            setTaskId(null);
+            setTaskStatus(null);
+            setError(
+              "Старая задача анализа не найдена в Celery/Redis и очищена из интерфейса.",
+            );
+            return;
+          }
+
           setTaskStatus(status);
+          if (taskIsFinished(status.status)) {
+            clearActiveAlloyTask();
+          }
         }
       } catch (e) {
         if (!cancelled) {
+          const statusCode = (e as any)?.response?.status;
+          if (statusCode === 404) {
+            clearActiveAlloyTask();
+            setTaskId(null);
+            setTaskStatus(null);
+          }
           setError((e as Error).message);
         }
       }
@@ -230,7 +299,9 @@ export default function AlloyAnalysis() {
       setPrompt(saved.prompt);
       setPromptDraft(saved.prompt);
       setEditingPrompt(false);
-      setPromptMessage("Промпт сохранён. Новые задачи будут использовать эту версию.");
+      setPromptMessage(
+        "Промпт сохранён. Новые задачи будут использовать эту версию.",
+      );
     } catch (e) {
       setPromptMessage(`Ошибка сохранения: ${(e as Error).message}`);
     } finally {
@@ -248,7 +319,13 @@ export default function AlloyAnalysis() {
           {Array.isArray(warnings) && warnings.length > 0 && (
             <div style={{ marginTop: 10 }}>
               <strong>Почему:</strong>
-              <ul style={{ margin: "8px 0 0 18px", color: "var(--muted)", lineHeight: 1.45 }}>
+              <ul
+                style={{
+                  margin: "8px 0 0 18px",
+                  color: "var(--muted)",
+                  lineHeight: 1.45,
+                }}
+              >
                 {warnings.slice(0, 5).map((warning: string, index: number) => (
                   <li key={`${item.paper_id}-warning-${index}`}>{warning}</li>
                 ))}
@@ -260,13 +337,23 @@ export default function AlloyAnalysis() {
     }
 
     return (
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+          gap: 12,
+        }}
+      >
         {alloys.slice(0, 8).map((alloy: any, index: number) => {
           const composition = alloy?.chemical_composition || {};
           const elements = Object.entries(composition).slice(0, 8);
           const notes = [
             ...(Array.isArray(alloy?.applications) ? alloy.applications : []),
-            ...(Array.isArray(alloy?.quality_flags?.conflicting_properties) ? alloy.quality_flags.conflicting_properties.map((p: string) => `Конфликт: ${p}`) : []),
+            ...(Array.isArray(alloy?.quality_flags?.conflicting_properties)
+              ? alloy.quality_flags.conflicting_properties.map(
+                  (p: string) => `Конфликт: ${p}`,
+                )
+              : []),
           ].filter(Boolean);
           return (
             <div
@@ -275,15 +362,31 @@ export default function AlloyAnalysis() {
               style={{
                 boxShadow: "none",
                 borderRadius: 18,
-                background: "linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%)",
+                background:
+                  "linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%)",
               }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 10,
+                  alignItems: "flex-start",
+                }}
+              >
                 <div>
-                  <h3 style={{ color: "var(--text)", fontSize: 17, marginBottom: 4 }}>
+                  <h3
+                    style={{
+                      color: "var(--text)",
+                      fontSize: 17,
+                      marginBottom: 4,
+                    }}
+                  >
                     {alloy?.alloy_name || "Сплав без названия"}
                   </h3>
-                  <p style={sourceLabelStyle}>{alloy?.alloy_class || "Класс не указан"}</p>
+                  <p style={sourceLabelStyle}>
+                    {alloy?.alloy_class || "Класс не указан"}
+                  </p>
                 </div>
                 <span className="counter-badge">{elements.length} эл.</span>
               </div>
@@ -304,15 +407,26 @@ export default function AlloyAnalysis() {
               <p className="muted" style={{ marginTop: 10 }}>
                 {propertySummary(alloy)}
               </p>
-              {Array.isArray(alloy?.standards) && alloy.standards.length > 0 && (
-                <p className="muted" style={{ marginTop: 10 }}>
-                  Стандарты: {alloy.standards.join(", ")}
-                </p>
-              )}
+              {Array.isArray(alloy?.standards) &&
+                alloy.standards.length > 0 && (
+                  <p className="muted" style={{ marginTop: 10 }}>
+                    Стандарты: {alloy.standards.join(", ")}
+                  </p>
+                )}
               {notes.length > 0 && (
-                <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 10 }}>
+                <div
+                  style={{
+                    marginTop: 10,
+                    borderTop: "1px solid var(--border)",
+                    paddingTop: 10,
+                  }}
+                >
                   {notes.slice(0, 3).map((note: string, noteIndex: number) => (
-                    <p key={`${note}-${noteIndex}`} className="muted" style={{ marginTop: noteIndex ? 6 : 0 }}>
+                    <p
+                      key={`${note}-${noteIndex}`}
+                      className="muted"
+                      style={{ marginTop: noteIndex ? 6 : 0 }}
+                    >
                       {note}
                     </p>
                   ))}
@@ -320,8 +434,12 @@ export default function AlloyAnalysis() {
               )}
               {alloy?.source_text_snippet && (
                 <details style={{ marginTop: 10 }}>
-                  <summary className="muted" style={{ cursor: "pointer" }}>Фрагмент источника</summary>
-                  <p style={{ marginTop: 8, lineHeight: 1.45 }}>{alloy.source_text_snippet}</p>
+                  <summary className="muted" style={{ cursor: "pointer" }}>
+                    Фрагмент источника
+                  </summary>
+                  <p style={{ marginTop: 8, lineHeight: 1.45 }}>
+                    {alloy.source_text_snippet}
+                  </p>
                 </details>
               )}
             </div>
@@ -342,7 +460,14 @@ export default function AlloyAnalysis() {
         if (item.error) acc.errors += 1;
         return acc;
       },
-      { articles: 0, chunks: 0, alloys: 0, warnings: 0, textLength: 0, errors: 0 }
+      {
+        articles: 0,
+        chunks: 0,
+        alloys: 0,
+        warnings: 0,
+        textLength: 0,
+        errors: 0,
+      },
     );
   }, [results]);
 
@@ -353,9 +478,15 @@ export default function AlloyAnalysis() {
   const articleChunks = Number(progress.chunks || 0);
   const processedChunks = Number(progress.processed_chunks || 0);
   const totalChunks = Number(progress.total_chunks || 0);
-  const stageLabel = String(progress.stage_label || progress.stage || taskStatus?.status || "Ожидание");
+  const stageLabel = String(
+    progress.stage_label || progress.stage || taskStatus?.status || "Ожидание",
+  );
   const progressPercent =
-    totalChunks > 0 ? Math.round((processedChunks / totalChunks) * 100) : totalArticles > 0 ? Math.round((currentArticle / totalArticles) * 100) : 0;
+    totalChunks > 0
+      ? Math.round((processedChunks / totalChunks) * 100)
+      : totalArticles > 0
+        ? Math.round((currentArticle / totalArticles) * 100)
+        : 0;
   const progressText =
     totalArticles > 0
       ? `${currentArticle} / ${totalArticles}`
@@ -363,28 +494,33 @@ export default function AlloyAnalysis() {
 
   const toggleSource = (source: string) => {
     setSelectedSources((prev) =>
-      prev.includes(source) ? prev.filter((item) => item !== source) : [...prev, source]
+      prev.includes(source)
+        ? prev.filter((item) => item !== source)
+        : [...prev, source],
     );
   };
 
   const runAnalysis = async () => {
+    const safeLimit = normalizeLimit(limit);
+    setLimit(safeLimit);
     setSubmitting(true);
     setError(null);
     setTaskId(null);
     setTaskStatus(null);
+    setSavedResults([]);
 
     try {
       const queued = await startAlloyBatchAnalysis({
         idSpec: idSpec.trim() || undefined,
         sources: selectedSources,
-        limit,
+        limit: safeLimit,
       });
       saveActiveAlloyTask({
         taskId: queued.task_id,
         startedAt: Date.now(),
         idSpec,
         sources: selectedSources,
-        limit,
+        limit: safeLimit,
       });
       setTaskId(queued.task_id);
       setTaskStatus({
@@ -405,14 +541,24 @@ export default function AlloyAnalysis() {
         <div>
           <h2>Анализ сплавов</h2>
           <p className="muted" style={{ marginTop: 6 }}>
-            Пакетный анализ статей с полным текстом: воркер режет текст на части до 40 000 символов, сохраняет JSON по чанкам и собирает итог по статье.
+            Пакетный анализ статей с полным текстом: воркер режет текст на части
+            до 40 000 символов, сохраняет JSON по чанкам и собирает итог по
+            статье.
           </p>
         </div>
         <div className="actions">
-          <button className="btn" onClick={() => void loadSavedResults()} disabled={loadingSaved}>
+          <button
+            className="btn"
+            onClick={() => void loadSavedResults()}
+            disabled={loadingSaved}
+          >
             {loadingSaved ? "Загрузка..." : "Обновить результаты"}
           </button>
-          <button className="btn btn-primary" onClick={runAnalysis} disabled={running}>
+          <button
+            className="btn btn-primary"
+            onClick={runAnalysis}
+            disabled={running}
+          >
             {running ? "Анализ выполняется..." : "Запустить анализ"}
           </button>
         </div>
@@ -436,21 +582,30 @@ export default function AlloyAnalysis() {
               min={1}
               max={1000}
               value={limit}
-              onChange={(e) => setLimit(Number(e.target.value))}
+              onChange={(e) => setLimit(normalizeLimit(e.target.value))}
               style={{ width: 110 }}
             />
           </label>
           {taskId && <span className="counter-badge">task_id: {taskId}</span>}
-          {taskStatus && <span className="counter-badge">статус: {taskStatus.status}</span>}
-          {running && <span className="counter-badge">прогресс: {progressText}</span>}
+          {taskStatus && (
+            <span className="counter-badge">статус: {taskStatus.status}</span>
+          )}
+          {running && (
+            <span className="counter-badge">прогресс: {progressText}</span>
+          )}
         </div>
         <p className="muted" style={{ marginTop: 8 }}>
-          Если диапазон ID пустой, будут взяты первые статьи с полным текстом по выбранным источникам и лимиту.
+          Если диапазон ID пустой, будут взяты первые статьи с полным текстом по
+          выбранным источникам и лимиту.
         </p>
 
         <div className="filters" style={{ marginTop: 14 }}>
           {PAPER_SOURCES.map((source) => (
-            <label key={source} className="counter-badge" style={{ cursor: "pointer" }}>
+            <label
+              key={source}
+              className="counter-badge"
+              style={{ cursor: "pointer" }}
+            >
               <input
                 type="checkbox"
                 checked={selectedSources.includes(source)}
@@ -464,20 +619,37 @@ export default function AlloyAnalysis() {
       </div>
 
       <div className="panel" style={{ overflow: "hidden" }}>
-        <div className="page-head" style={{ alignItems: "flex-start", gap: 12 }}>
+        <div
+          className="page-head"
+          style={{ alignItems: "flex-start", gap: 12 }}
+        >
           <div>
             <h3>Промпт анализа</h3>
             <p className="muted">
-              Этот текст использует Celery worker для новых задач анализа. Сейчас: {formatNumber((editingPrompt ? promptDraft : prompt).length)} символов.
+              Этот текст использует Celery worker для новых задач анализа.
+              Сейчас:{" "}
+              {formatNumber((editingPrompt ? promptDraft : prompt).length)}{" "}
+              символов.
             </p>
           </div>
           <div className="actions">
             {editingPrompt ? (
               <>
-                <button className="btn" onClick={() => { setPromptDraft(prompt); setEditingPrompt(false); }} disabled={savingPrompt}>
+                <button
+                  className="btn"
+                  onClick={() => {
+                    setPromptDraft(prompt);
+                    setEditingPrompt(false);
+                  }}
+                  disabled={savingPrompt}
+                >
                   Отмена
                 </button>
-                <button className="btn btn-primary" onClick={() => void savePrompt()} disabled={savingPrompt}>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => void savePrompt()}
+                  disabled={savingPrompt}
+                >
                   {savingPrompt ? "Сохранение..." : "Сохранить"}
                 </button>
               </>
@@ -520,7 +692,14 @@ export default function AlloyAnalysis() {
             {prompt || "Промпт загружается..."}
           </pre>
         )}
-        {promptMessage && <p className={promptMessage.startsWith("Ошибка") ? "error" : "muted"} style={{ marginTop: 10 }}>{promptMessage}</p>}
+        {promptMessage && (
+          <p
+            className={promptMessage.startsWith("Ошибка") ? "error" : "muted"}
+            style={{ marginTop: 10 }}
+          >
+            {promptMessage}
+          </p>
+        )}
       </div>
 
       {error && <p className="error">{error}</p>}
@@ -539,12 +718,16 @@ export default function AlloyAnalysis() {
               <strong>Статьи:</strong> {progressText}
             </div>
             <div>
-              <strong>Части текста:</strong> {processedChunks} / {totalChunks || "?"}
+              <strong>Части текста:</strong> {processedChunks} /{" "}
+              {totalChunks || "?"}
             </div>
             <div>
               <strong>Текущая статья:</strong>{" "}
               {progress.paper_id ? (
-                <Link className="action-link" to={`/papers/${progress.paper_id}`}>
+                <Link
+                  className="action-link"
+                  to={`/papers/${progress.paper_id}`}
+                >
                   #{progress.paper_id}
                 </Link>
               ) : (
@@ -552,7 +735,8 @@ export default function AlloyAnalysis() {
               )}
             </div>
             <div>
-              <strong>Текущая часть:</strong> {currentChunk || 0} / {articleChunks || "?"}
+              <strong>Текущая часть:</strong> {currentChunk || 0} /{" "}
+              {articleChunks || "?"}
             </div>
           </div>
           {progress.paper_title && (
@@ -560,7 +744,15 @@ export default function AlloyAnalysis() {
               {String(progress.paper_title)}
             </p>
           )}
-          <div style={{ marginTop: 12, height: 10, background: "var(--surface-2)", borderRadius: 999, overflow: "hidden" }}>
+          <div
+            style={{
+              marginTop: 12,
+              height: 10,
+              background: "var(--surface-2)",
+              borderRadius: 999,
+              overflow: "hidden",
+            }}
+          >
             <div
               style={{
                 width: `${Math.max(3, Math.min(100, progressPercent))}%`,
@@ -578,7 +770,10 @@ export default function AlloyAnalysis() {
 
       {taskStatus?.status === "FAILURE" && (
         <div className="panel">
-          <p className="error">Задача завершилась ошибкой. Подробности смотри в логах Celery worker.</p>
+          <p className="error">
+            Задача завершилась ошибкой. Подробности смотри в логах Celery
+            worker.
+          </p>
         </div>
       )}
 
@@ -597,7 +792,10 @@ export default function AlloyAnalysis() {
         </div>
         <div className="panel kpi-card">
           <h3>Ошибок</h3>
-          <div className="kpi" style={{ color: metrics.errors ? "#ef4444" : undefined }}>
+          <div
+            className="kpi"
+            style={{ color: metrics.errors ? "#ef4444" : undefined }}
+          >
             {formatNumber(metrics.errors)}
           </div>
         </div>
@@ -631,10 +829,15 @@ export default function AlloyAnalysis() {
                 <tr key={item.paper_id}>
                   <td>{item.paper_id}</td>
                   <td style={{ maxWidth: 520 }}>
-                    <Link className="action-link" to={`/papers/${item.paper_id}`}>
+                    <Link
+                      className="action-link"
+                      to={`/papers/${item.paper_id}`}
+                    >
                       Открыть
                     </Link>
-                    <div style={{ fontWeight: 700, marginTop: 8 }}>{item.paper_title}</div>
+                    <div style={{ fontWeight: 700, marginTop: 8 }}>
+                      {item.paper_title}
+                    </div>
                   </td>
                   <td>{item.source}</td>
                   <td>{formatNumber(item.text_length)}</td>
@@ -642,10 +845,22 @@ export default function AlloyAnalysis() {
                   <td>{item.items_count}</td>
                   <td style={{ fontSize: 12 }}>
                     <div className="muted">summary: {item.summary_path}</div>
-                    <div className="muted">chunks: {item.chunk_files?.length || 0}</div>
+                    <div className="muted">
+                      chunks: {item.chunk_files?.length || 0}
+                    </div>
                   </td>
-                  <td>{item.updated_at ? new Date(item.updated_at).toLocaleString() : "—"}</td>
-                  <td>{item.error ? <span className="error">{item.error}</span> : "Готово"}</td>
+                  <td>
+                    {item.updated_at
+                      ? new Date(item.updated_at).toLocaleString()
+                      : "—"}
+                  </td>
+                  <td>
+                    {item.error ? (
+                      <span className="error">{item.error}</span>
+                    ) : (
+                      "Готово"
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -661,7 +876,11 @@ export default function AlloyAnalysis() {
               <article
                 key={`cards-${item.paper_id}`}
                 className="panel"
-                style={{ boxShadow: "none", borderRadius: 20, borderColor: item.items_count ? "#bfd3ea" : "var(--border)" }}
+                style={{
+                  boxShadow: "none",
+                  borderRadius: 20,
+                  borderColor: item.items_count ? "#bfd3ea" : "var(--border)",
+                }}
               >
                 <div className="page-head" style={{ gap: 12 }}>
                   <div>
@@ -669,14 +888,21 @@ export default function AlloyAnalysis() {
                       #{item.paper_id} {item.paper_title}
                     </h3>
                     <p className="muted">
-                      {item.source} · {formatNumber(item.text_length)} символов · чанков: {item.chunks_total} · сплавов: {item.items_count}
+                      {item.source} · {formatNumber(item.text_length)} символов
+                      · чанков: {item.chunks_total} · сплавов:{" "}
+                      {item.items_count}
                     </p>
                   </div>
                   <div className="actions">
-                    <span className={`status ${item.items_count ? "active" : ""}`}>
+                    <span
+                      className={`status ${item.items_count ? "active" : ""}`}
+                    >
                       {item.items_count ? "Есть данные" : "Нет сплавов"}
                     </span>
-                    <Link className="action-link" to={`/papers/${item.paper_id}`}>
+                    <Link
+                      className="action-link"
+                      to={`/papers/${item.paper_id}`}
+                    >
                       Открыть статью
                     </Link>
                   </div>
@@ -690,7 +916,11 @@ export default function AlloyAnalysis() {
 
       {results.length > 0 && (
         <div className="panel">
-          <h3>{taskResult?.results?.length ? "Сводный JSON последней задачи" : "Сводный JSON сохранённых результатов"}</h3>
+          <h3>
+            {taskResult?.results?.length
+              ? "Сводный JSON последней задачи"
+              : "Сводный JSON сохранённых результатов"}
+          </h3>
           <pre
             className="markdown-body"
             style={{
@@ -702,7 +932,11 @@ export default function AlloyAnalysis() {
               fontFamily: "Consolas, Courier New, monospace",
             }}
           >
-            {JSON.stringify(taskResult?.results?.length ? taskResult : { results }, null, 2)}
+            {JSON.stringify(
+              taskResult?.results?.length ? taskResult : { results },
+              null,
+              2,
+            )}
           </pre>
         </div>
       )}

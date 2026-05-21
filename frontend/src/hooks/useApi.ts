@@ -16,7 +16,7 @@ export function useApi<T>(request: () => Promise<T>, deps: unknown[] = []) {
     return () => {
       mounted = false;
     };
-  }, deps); // eslint-disable-line react-hooks/exhaustive-deps
+  }, deps);
 
   return { data, loading, error };
 }

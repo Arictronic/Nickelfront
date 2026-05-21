@@ -1,5 +1,6 @@
 """API endpoints для аналитики и метрик."""
 
+import json
 import re
 from datetime import datetime
 
@@ -11,6 +12,74 @@ from app.db.models.paper import Paper as PaperModel
 from app.db.session import get_db
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
+
+
+_SCHEMA_HINT_COLUMNS = (
+    "parse_confidence",
+    "provenance",
+    "quality_flags",
+    "schema_version",
+)
+
+
+def _format_analytics_error(exc: Exception) -> str:
+    raw = str(exc)
+    lower = raw.lower()
+    if any(column in lower for column in _SCHEMA_HINT_COLUMNS) and (
+        "does not exist" in lower
+        or "undefinedcolumn" in lower
+        or "column" in lower
+    ):
+        return (
+            "Похоже, база данных не обновлена после патча: в таблице papers нет новых "
+            "колонок parser metadata. Запусти из корня проекта: run_migrations.bat "
+            "или python backend\\apply_migrations.py, затем перезапусти backend."
+        )
+    return raw
+
+
+def _raise_analytics_500(exc: Exception) -> None:
+    raise HTTPException(status_code=500, detail=_format_analytics_error(exc))
+
+
+def _as_list(value: object) -> list[object]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, (tuple, set)):
+        return list(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return parsed
+            if isinstance(parsed, str) and parsed.strip():
+                return [parsed.strip()]
+        except Exception:
+            pass
+        parts = [part.strip() for part in re.split(r"[;,]", text) if part.strip()]
+        return parts or [text]
+    return [value]
+
+
+def _has_text(value: object) -> bool:
+    return bool(str(value or "").strip())
+
+
+def _text_len(value: object) -> int:
+    return len(str(value or "").strip())
+
+
+def _has_embedding(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, (list, tuple, set, dict, str)):
+        return len(value) > 0
+    return bool(value)
 
 
 def _normalize_metric_item(value: object) -> str:
@@ -90,15 +159,15 @@ async def get_analytics_summary(
         quality_scores = []
         for paper in papers:
             score = 0
-            if paper.abstract:
+            if _has_text(paper.abstract):
                 score += 20
-            if paper.full_text:
+            if _has_text(paper.full_text):
                 score += 30
-            if paper.keywords:
+            if _as_list(paper.keywords):
                 score += 20
-            if paper.doi:
+            if _has_text(paper.doi):
                 score += 15
-            if paper.authors:
+            if _as_list(paper.authors):
                 score += 15
             quality_scores.append(min(100, score))
 
@@ -116,7 +185,7 @@ async def get_analytics_summary(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _raise_analytics_500(e)
 
 
 @router.get("/metrics/trend")
@@ -190,7 +259,7 @@ async def get_publications_trend(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _raise_analytics_500(e)
 
 
 @router.get("/metrics/top")
@@ -226,13 +295,11 @@ async def get_top_items(
         elif item_type == "authors":
             items = []
             for p in papers:
-                if p.authors and isinstance(p.authors, list):
-                    items.extend(p.authors)
+                items.extend(_as_list(p.authors))
         elif item_type == "keywords":
             items = []
             for p in papers:
-                if p.keywords and isinstance(p.keywords, list):
-                    items.extend(p.keywords)
+                items.extend(_as_list(p.keywords))
         else:
             raise HTTPException(status_code=400, detail=f"Неизвестный тип: {item_type}")
 
@@ -251,7 +318,7 @@ async def get_top_items(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _raise_analytics_500(e)
 
 
 @router.get("/metrics/keyword-stats")
@@ -272,7 +339,7 @@ async def get_keyword_stats(
         keyword_values: list[object] = []
         per_paper_counts: list[int] = []
         for paper in papers:
-            keywords = paper.keywords if isinstance(paper.keywords, list) else []
+            keywords = _as_list(paper.keywords)
             normalized = [_normalize_metric_item(item) for item in keywords]
             normalized = [item for item in normalized if item]
             keyword_values.extend(normalized)
@@ -305,7 +372,7 @@ async def get_keyword_stats(
             "generated_at": datetime.now().isoformat(),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _raise_analytics_500(e)
 
 
 @router.get("/metrics/source-distribution")
@@ -349,7 +416,7 @@ async def get_source_distribution(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _raise_analytics_500(e)
 
 
 @router.get("/metrics/quality-report")
@@ -401,30 +468,30 @@ async def get_quality_report(
         # Метрики качества
         total = len(papers)
 
-        with_abstract = sum(1 for p in papers if p.abstract and len(p.abstract) > 0)
-        with_full_text = sum(1 for p in papers if p.full_text and len(p.full_text) > 0)
-        with_keywords = sum(1 for p in papers if p.keywords and len(p.keywords) > 0)
-        with_doi = sum(1 for p in papers if p.doi and len(p.doi) > 0)
-        with_authors = sum(1 for p in papers if p.authors and len(p.authors) > 0)
-        with_embedding = sum(1 for p in papers if p.embedding and len(p.embedding) > 0)
+        with_abstract = sum(1 for p in papers if _has_text(p.abstract))
+        with_full_text = sum(1 for p in papers if _has_text(p.full_text))
+        with_keywords = sum(1 for p in papers if _as_list(p.keywords))
+        with_doi = sum(1 for p in papers if _has_text(p.doi))
+        with_authors = sum(1 for p in papers if _as_list(p.authors))
+        with_embedding = sum(1 for p in papers if _has_embedding(p.embedding))
 
         # Средние значения
-        avg_abstract_len = sum(len(p.abstract) for p in papers if p.abstract) / max(1, with_abstract)
-        avg_keywords = sum(len(p.keywords) for p in papers if p.keywords) / max(1, with_keywords)
+        avg_abstract_len = sum(_text_len(p.abstract) for p in papers if _has_text(p.abstract)) / max(1, with_abstract)
+        avg_keywords = sum(len(_as_list(p.keywords)) for p in papers if _as_list(p.keywords)) / max(1, with_keywords)
 
         # Оценка качества
         quality_scores = []
         for paper in papers:
             score = 0
-            if paper.abstract:
+            if _has_text(paper.abstract):
                 score += 20
-            if paper.full_text:
+            if _has_text(paper.full_text):
                 score += 30
-            if paper.keywords:
+            if _as_list(paper.keywords):
                 score += 20
-            if paper.doi:
+            if _has_text(paper.doi):
                 score += 15
-            if paper.authors:
+            if _as_list(paper.authors):
                 score += 15
             quality_scores.append(min(100, score))
 
@@ -453,4 +520,4 @@ async def get_quality_report(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _raise_analytics_500(e)

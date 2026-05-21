@@ -1,111 +1,78 @@
 #!/usr/bin/env python3
+"""Manual/external checks for Russian sources (CyberLeninka and eLibrary).
+
+These tests use live external sites, so they are marked as ``external`` and are skipped
+by the default pytest configuration. Run explicitly with: ``pytest -m external``.
 """
-Тестирование российских источников (CyberLeninka и eLibrary)
-"""
+
 import asyncio
 import json
+from pathlib import Path
+
+import pytest
+
+from parsers_pkg.source_config import load_source_runtime_config_with_metadata
 from parsers_pkg.source_executor import execute_source_search
+from parsers_pkg.sources import build_default_source_registry
+
+pytestmark = pytest.mark.external
+
+
+def _dump_paper(paper):
+    if hasattr(paper, "model_dump"):
+        return paper.model_dump(mode="json")
+    if hasattr(paper, "dict"):
+        return paper.dict()
+    return paper
+
+
+async def _run_source(source: str, query: str, limit: int = 5):
+    registry = build_default_source_registry()
+    metadata = registry.get(source)
+    runtime_config = load_source_runtime_config_with_metadata(source, metadata)
+    return await execute_source_search(
+        query=query,
+        source=source,
+        limit=limit,
+        runtime_config=runtime_config,
+    )
+
 
 async def test_cyberleninka():
-    """Тест CyberLeninka"""
-    print("\n" + "="*60)
-    print("ТЕСТ: CyberLeninka")
-    print("="*60)
-    
     query = "машинное обучение"
-    print(f"\nЗапрос: '{query}'")
-    print("Источник: cyberleninka")
-    print("Лимит: 5 статей\n")
-    
-    try:
-        results = await execute_source_search(
-            query=query,
-            source="cyberleninka",
-            limit=5
-        )
-        
-        print(f"✓ Найдено статей: {len(results)}")
-        
-        if results:
-            print("\nПример первой статьи:")
-            first = results[0]
-            print(f"  Название: {first.get('title', 'N/A')[:80]}...")
-            print(f"  Авторы: {', '.join(first.get('authors', []))[:60]}...")
-            print(f"  Год: {first.get('year', 'N/A')}")
-            print(f"  URL статьи: {first.get('article_url', 'N/A')}")
-            print(f"  PDF URL: {first.get('pdf_url', 'N/A')}")
-            
-            # Сохраняем результаты
-            with open('test_cyberleninka_results.json', 'w', encoding='utf-8') as f:
-                json.dump(results, f, ensure_ascii=False, indent=2)
-            print("\n✓ Результаты сохранены в test_cyberleninka_results.json")
-        else:
-            print("⚠ Статьи не найдены")
-            
-    except Exception as e:
-        print(f"✗ Ошибка: {e}")
-        import traceback
-        traceback.print_exc()
+    result = await _run_source("CyberLeninka", query=query, limit=5)
+    assert result.source == "CyberLeninka"
+    assert isinstance(result.papers, list)
+
+    Path("test_cyberleninka_results.json").write_text(
+        json.dumps([_dump_paper(p) for p in result.papers], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
 
 async def test_elibrary():
-    """Тест eLibrary"""
-    print("\n" + "="*60)
-    print("ТЕСТ: eLibrary")
-    print("="*60)
-    
     query = "искусственный интеллект"
-    print(f"\nЗапрос: '{query}'")
-    print("Источник: elibrary")
-    print("Лимит: 5 статей\n")
-    
-    try:
-        results = await execute_source_search(
-            query=query,
-            source="elibrary",
-            limit=5
-        )
-        
-        print(f"✓ Найдено статей: {len(results)}")
-        
-        if results:
-            print("\nПример первой статьи:")
-            first = results[0]
-            print(f"  Название: {first.get('title', 'N/A')[:80]}...")
-            print(f"  Авторы: {', '.join(first.get('authors', []))[:60]}...")
-            print(f"  Год: {first.get('year', 'N/A')}")
-            print(f"  URL статьи: {first.get('article_url', 'N/A')}")
-            print(f"  PDF URL: {first.get('pdf_url', 'N/A')}")
-            
-            # Сохраняем результаты
-            with open('test_elibrary_results.json', 'w', encoding='utf-8') as f:
-                json.dump(results, f, ensure_ascii=False, indent=2)
-            print("\n✓ Результаты сохранены в test_elibrary_results.json")
-        else:
-            print("⚠ Статьи не найдены")
-            
-    except Exception as e:
-        print(f"✗ Ошибка: {e}")
-        import traceback
-        traceback.print_exc()
+    result = await _run_source("eLibrary", query=query, limit=5)
+    assert result.source == "eLibrary"
+    assert isinstance(result.papers, list)
+
+    Path("test_elibrary_results.json").write_text(
+        json.dumps([_dump_paper(p) for p in result.papers], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
 
 async def main():
-    """Главная функция"""
-    print("\n" + "="*60)
-    print("ТЕСТИРОВАНИЕ РОССИЙСКИХ ИСТОЧНИКОВ")
-    print("="*60)
-    
-    # Тест CyberLeninka
-    await test_cyberleninka()
-    
-    # Небольшая пауза между тестами
-    await asyncio.sleep(2)
-    
-    # Тест eLibrary
-    await test_elibrary()
-    
-    print("\n" + "="*60)
-    print("ТЕСТИРОВАНИЕ ЗАВЕРШЕНО")
-    print("="*60 + "\n")
+    for source, query in [
+        ("CyberLeninka", "машинное обучение"),
+        ("eLibrary", "искусственный интеллект"),
+    ]:
+        result = await _run_source(source, query=query, limit=5)
+        print(f"{source}: raw={result.raw_count}, parsed={len(result.papers)}")
+        if result.papers:
+            first = _dump_paper(result.papers[0])
+            print(json.dumps(first, ensure_ascii=False, indent=2)[:2000])
+
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -16,6 +16,30 @@ from parsers_pkg.errors import (
 )
 
 
+def _first_core_text(value: Any) -> str | None:
+    """Extract the first useful text/url from CORE fields with drifted shapes."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = " ".join(value.split()).strip()
+        return text or None
+    if isinstance(value, (int, float)):
+        text = str(value).strip()
+        return text or None
+    if isinstance(value, dict):
+        for key in ("url", "downloadUrl", "fullTextUrl", "sourceFulltextUrl", "href", "value"):
+            candidate = _first_core_text(value.get(key))
+            if candidate:
+                return candidate
+        return None
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            candidate = _first_core_text(item)
+            if candidate:
+                return candidate
+    return None
+
+
 class COREClient(BaseAPIClient):
     """Client for CORE API v3."""
 
@@ -184,15 +208,17 @@ class COREClient(BaseAPIClient):
         article = await self.get_article(item_id)
 
         if article:
-            if article.get("downloadUrl"):
-                return article.get("downloadUrl")
+            download_url = _first_core_text(article.get("downloadUrl"))
+            if download_url:
+                return download_url
 
-            fulltext_urls = article.get("sourceFulltextUrls") or []
-            if isinstance(fulltext_urls, list) and fulltext_urls:
-                return fulltext_urls[0]
+            fulltext_url = _first_core_text(article.get("sourceFulltextUrls"))
+            if fulltext_url:
+                return fulltext_url
 
-            if article.get("fullText"):
-                return article.get("fullText")
+            full_text = _first_core_text(article.get("fullText"))
+            if full_text:
+                return full_text
 
         return None
 

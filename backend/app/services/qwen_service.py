@@ -107,13 +107,18 @@ class QwenService:
             else settings.QWEN_MAX_CONTINUES
         )
 
+        # Last created/used session is kept only for diagnostics/backward compatibility.
+        # It is NOT used as fallback for new messages: otherwise parallel chats can
+        # accidentally share one Qwen conversation.
         self._session_id: str | None = None
 
-        # Блокировка для потокобезопасности
-        self._lock = threading.RLock()
+        # Lock protects only local counters/history, never the whole Qwen request.
+        # Standalone qwen_service already serializes requests per session_id.
+        self._stats_lock = threading.RLock()
 
         # Статистика запросов
         self._request_history: deque = deque(maxlen=100)
+        self._active_requests = 0
         self._is_busy = False
 
         logger.info(
@@ -123,13 +128,17 @@ class QwenService:
 
     @property
     def is_available(self) -> bool:
-        """Проверяет доступность сервиса."""
-        try:
-            with httpx.Client(timeout=5.0, trust_env=False) as client:
-                response = client.get(f"{self.base_url}/health")
-                return response.status_code == 200
-        except Exception:
+        """Проверяет доступность standalone qwen_service.
+
+        Важно: HTTP 200 от /health ещё не значит, что Qwen реально готов.
+        Standalone service возвращает available=false, если нет QWEN_TOKEN или клиент не инициализирован.
+        """
+        health = self._request("GET", "/health", timeout=3.0)
+        if not health:
             return False
+        if "available" in health:
+            return bool(health.get("available"))
+        return str(health.get("status", "")).lower() == "ok"
 
     @property
     def session_id(self) -> str | None:
@@ -141,24 +150,18 @@ class QwenService:
         """Установка ID сессии."""
         self._session_id = value
 
-    def _request(
+    def _request_with_error(
         self,
         method: str,
         endpoint: str,
         json_data: dict[str, Any] | None = None,
         timeout: float = 120.0,
-    ) -> dict[str, Any] | None:
-        """
-        Внутренний метод для HTTP запросов к Qwen Service.
-
-        Args:
-            method: HTTP метод.
-            endpoint: Endpoint (например, /sessions).
-            json_data: JSON данные для тела запроса.
-            timeout: Таймаут запроса.
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """HTTP request to qwen_service with an explicit error type.
 
         Returns:
-            JSON ответ или None при ошибке.
+            (payload, None) on success, or (None, error_type) on failure.
+            error_type is one of: timeout, http, unknown.
         """
         url = f"{self.base_url}{endpoint}"
         headers = {"Content-Type": "application/json"}
@@ -174,17 +177,57 @@ class QwenService:
                     json=json_data,
                 )
                 response.raise_for_status()
-                return response.json()
+                return response.json(), None
 
         except httpx.TimeoutException as e:
             logger.error(f"Timeout запроса к {endpoint}: {e}")
-            return None
+            return None, "timeout"
         except httpx.HTTPError as e:
             logger.error(f"HTTP ошибка запроса к {endpoint}: {e}")
-            return None
+            return None, "http"
         except Exception as e:
             logger.error(f"Ошибка запроса к {endpoint}: {e}")
-            return None
+            return None, "unknown"
+
+    def _request(
+        self,
+        method: str,
+        endpoint: str,
+        json_data: dict[str, Any] | None = None,
+        timeout: float = 120.0,
+    ) -> dict[str, Any] | None:
+        """Backward-compatible wrapper for non-message endpoints."""
+        result, _error_type = self._request_with_error(
+            method=method,
+            endpoint=endpoint,
+            json_data=json_data,
+            timeout=timeout,
+        )
+        return result
+
+    def _chat_timeout(self, timeout: float | None) -> float:
+        """Resolve one backend->qwen_service chat timeout."""
+        if timeout is not None and timeout > 0:
+            return float(timeout)
+        return float(getattr(settings, "QWEN_CHAT_TIMEOUT_SECONDS", 300.0) or 300.0)
+
+    def _retry_on_timeout_enabled(self) -> bool:
+        return bool(getattr(settings, "QWEN_CHAT_RETRY_ON_TIMEOUT", True))
+
+    def _mark_request_started(self, *, message_len: int, session_id: str) -> None:
+        with self._stats_lock:
+            self._active_requests += 1
+            self._is_busy = self._active_requests > 0
+            self._request_history.append({
+                "time": datetime.now(),
+                "message_len": message_len,
+                "session_id": session_id,
+            })
+
+    def _mark_request_finished(self) -> None:
+        with self._stats_lock:
+            self._active_requests = max(0, self._active_requests - 1)
+            self._is_busy = self._active_requests > 0
 
     def create_session(self) -> str | None:
         """
@@ -270,125 +313,203 @@ class QwenService:
         search_enabled: bool | None = None,
         file_ids: list[str] | None = None,
         auto_continue: bool | None = None,
-        timeout: float = 120.0,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """
         Отправить сообщение и получить ответ через HTTP API.
 
-        Args:
-            message: Текст сообщения.
-            session_id: ID сессии (создастся новая если не указан).
-            thinking_enabled: Режим мышления.
-            search_enabled: Поиск в интернете.
-            file_ids: Список ID файлов для ссылки.
-            auto_continue: Авто-продолжение ответов.
-            timeout: Максимальное время ожидания в секундах.
-
-        Returns:
-            Словарь с результатом:
-            - response: текст ответа
-            - thinking: текст размышлений
-            - message_id: ID сообщения
-            - continue_count: количество продолжений
-            - can_continue: можно ли продолжить
+        Важно для параллельных чатов:
+        - backend больше не держит глобальный lock на весь запрос;
+        - если session_id не передан, всегда создаётся новая Qwen-сессия;
+        - сохранённый self._session_id не используется как fallback для нового чата;
+        - одинаковый session_id сериализуется уже внутри standalone qwen_service;
+        - при timeout можно один раз создать новую сессию и повторить prompt.
         """
-        # Блокировка для потокобезопасности
-        with self._lock:
-            self._is_busy = True
+        effective_timeout = self._chat_timeout(timeout)
+        retry_on_timeout = self._retry_on_timeout_enabled()
+        created_for_request = session_id is None
 
-            try:
-                # Установка сессии
-                sid = session_id or self._session_id
-                if not sid:
-                    sid = self.create_session()
-                    if not sid:
-                        return {
-                            "error": "Не удалось создать сессию",
-                            "response": "",
-                            "thinking": "",
-                        }
-
-                # Параметры
-                thinking = (
-                    thinking_enabled
-                    if thinking_enabled is not None
-                    else self.thinking_enabled
-                )
-                search = search_enabled if search_enabled is not None else self.search_enabled
-                do_auto_continue = (
-                    auto_continue
-                    if auto_continue is not None
-                    else self.auto_continue_enabled
-                )
-
-                logger.info(
-                    f"Отправка сообщения: session={sid[-6:] if sid else 'new'}, "
-                    f"thinking={thinking}, search={search}"
-                )
-
-                # Запись в историю запросов
-                self._request_history.append({
-                    "time": datetime.now(),
-                    "message_len": len(message),
-                    "session_id": sid,
-                })
-
-                # Отправка запроса к Qwen Service
-                json_data = {
-                    "session_id": sid,
-                    "message": message,
-                    "thinking_enabled": thinking,
-                    "search_enabled": search,
-                    "file_ids": file_ids or [],
-                    "auto_continue": do_auto_continue,  # Передаём в сервис
-                }
-
-                result = self._request("POST", "/messages", json_data=json_data, timeout=timeout)
-
-                if result:
-                    if not result.get("message_id") and result.get("last_message_id"):
-                        result["message_id"] = result.get("last_message_id")
-                    self._session_id = sid
-
-                    # Локальное авто-продолжение (если сервис не сделал сам)
-                    continue_count = result.get("continue_count", 0)
-                    can_continue = result.get("can_continue", False)
-                    response_text = result.get("response", "")
-
-                    # Если сервис не сделал авто-продолжение, но оно включено и можно продолжить
-                    if do_auto_continue and continue_count == 0 and can_continue:
-                        message_id = result.get("message_id", 0)
-                        add_count, add_text = self._auto_continue(sid, message_id, thinking)
-
-                        if add_count > 0:
-                            continue_count = add_count
-                            response_text = (response_text + "\n\n" + add_text).strip()
-                            can_continue = False  # После локального продолжения считаем завершённым
-                            result["auto_continue_performed"] = True
-
-                    result["continue_count"] = continue_count
-                    result["response"] = response_text
-                    result["can_continue"] = can_continue
-
-                    logger.info(
-                        f"Ответ получен: len={len(response_text)}, continues={continue_count}"
-                    )
-
-                return result or {
-                    "error": "Ошибка запроса к Qwen Service",
-                    "response": "",
-                    "thinking": "",
-                }
-
-            except Exception as e:
-                logger.error(f"Ошибка отправки сообщения: {e}", exc_info=True)
+        sid = session_id
+        if not sid:
+            sid = self.create_session()
+            if not sid:
                 return {
-                    "error": str(e),
+                    "error": "Не удалось создать сессию",
                     "response": "",
                     "thinking": "",
+                    "message_id": 0,
+                    "continue_count": 0,
+                    "can_continue": False,
                 }
-            finally:
-                self._is_busy = False
+
+        result = self._send_message_once(
+            message=message,
+            sid=sid,
+            thinking_enabled=thinking_enabled,
+            search_enabled=search_enabled,
+            file_ids=file_ids,
+            auto_continue=auto_continue,
+            timeout=effective_timeout,
+        )
+
+        if (
+            retry_on_timeout
+            and result.get("_request_error_type") == "timeout"
+        ):
+            old_sid = sid
+            new_sid = self.create_session()
+            if new_sid:
+                logger.warning(
+                    "Qwen request timed out for session %s; retrying once in fresh session %s",
+                    old_sid[-6:] if old_sid else "none",
+                    new_sid[-6:],
+                )
+                retry_result = self._send_message_once(
+                    message=message,
+                    sid=new_sid,
+                    thinking_enabled=thinking_enabled,
+                    search_enabled=search_enabled,
+                    file_ids=file_ids,
+                    auto_continue=auto_continue,
+                    timeout=effective_timeout,
+                )
+                retry_result["recreated_session"] = True
+                retry_result["previous_session_id"] = old_sid
+                retry_result["session_recreated_reason"] = "timeout"
+                # If retry also failed, return its explicit failure so frontend sees the
+                # new session_id and error instead of hanging on the old one.
+                result = retry_result
+            else:
+                result["session_id"] = old_sid
+                result["recreated_session"] = False
+                result["session_recreated_reason"] = "timeout_new_session_failed"
+
+        # Do not keep a global chat fallback for future unrelated messages.
+        # Keep only diagnostics/backward-compatible session_id property.
+        if result.get("session_id"):
+            self._session_id = str(result["session_id"])
+        elif created_for_request:
+            self._session_id = sid
+
+        result.pop("_request_error_type", None)
+        return result
+
+    def _send_message_once(
+        self,
+        *,
+        message: str,
+        sid: str,
+        thinking_enabled: bool | None,
+        search_enabled: bool | None,
+        file_ids: list[str] | None,
+        auto_continue: bool | None,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """Send one HTTP request to standalone qwen_service without global serialization."""
+        self._mark_request_started(message_len=len(message), session_id=sid)
+        try:
+            thinking = (
+                thinking_enabled
+                if thinking_enabled is not None
+                else self.thinking_enabled
+            )
+            search = search_enabled if search_enabled is not None else self.search_enabled
+            do_auto_continue = (
+                auto_continue
+                if auto_continue is not None
+                else self.auto_continue_enabled
+            )
+
+            logger.info(
+                f"Отправка сообщения: session={sid[-6:] if sid else 'new'}, "
+                f"thinking={thinking}, search={search}, timeout={timeout}"
+            )
+
+            json_data = {
+                "session_id": sid,
+                "message": message,
+                "thinking_enabled": thinking,
+                "search_enabled": search,
+                "file_ids": file_ids or [],
+                "auto_continue": do_auto_continue,
+            }
+
+            result, error_type = self._request_with_error(
+                "POST",
+                "/messages",
+                json_data=json_data,
+                timeout=timeout,
+            )
+
+            if not result:
+                return {
+                    "error": "Timeout запроса к Qwen Service" if error_type == "timeout" else "Ошибка запроса к Qwen Service",
+                    "response": "",
+                    "thinking": "",
+                    "session_id": sid,
+                    "message_id": 0,
+                    "continue_count": 0,
+                    "can_continue": False,
+                    "_request_error_type": error_type,
+                }
+
+            error_text = str(result.get("error") or "").strip()
+            if error_text:
+                logger.warning(
+                    "Qwen service returned error for session %s: %s",
+                    sid[-6:] if sid else "new",
+                    error_text,
+                )
+                result.setdefault("session_id", sid)
+                result.setdefault("response", "")
+                result.setdefault("thinking", "")
+                result.setdefault("message_id", 0)
+                result.setdefault("continue_count", 0)
+                result.setdefault("can_continue", False)
+                return result
+
+            result.setdefault("session_id", sid)
+            if not result.get("message_id") and result.get("last_message_id"):
+                result["message_id"] = result.get("last_message_id")
+
+            continue_count = result.get("continue_count", 0)
+            can_continue = result.get("can_continue", False)
+            response_text = result.get("response", "")
+
+            # Локальное авто-продолжение оставлено как legacy fallback, если standalone
+            # qwen_service почему-то не сделал auto_continue сам.
+            if do_auto_continue and continue_count == 0 and can_continue:
+                message_id = result.get("message_id", 0)
+                add_count, add_text = self._auto_continue(sid, message_id, bool(thinking))
+
+                if add_count > 0:
+                    continue_count = add_count
+                    response_text = (response_text + "\n\n" + add_text).strip()
+                    can_continue = False
+                    result["auto_continue_performed"] = True
+
+            result["continue_count"] = continue_count
+            result["response"] = response_text
+            result["can_continue"] = can_continue
+
+            logger.info(
+                f"Ответ получен: session={sid[-6:]}, len={len(response_text)}, continues={continue_count}"
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"Ошибка отправки сообщения: {e}", exc_info=True)
+            return {
+                "error": str(e),
+                "response": "",
+                "thinking": "",
+                "session_id": sid,
+                "message_id": 0,
+                "continue_count": 0,
+                "can_continue": False,
+            }
+        finally:
+            self._mark_request_finished()
 
     def _should_continue(self, response: str) -> bool:
         """
@@ -546,18 +667,38 @@ class QwenService:
         }
 
     def get_config(self) -> dict[str, Any]:
-        """
-        Получить текущую конфигурацию.
+        """Получить текущую конфигурацию из standalone qwen_service.
 
-        Returns:
-            Словарь с конфигурацией.
+        Раньше backend отдавал только локально сохранённые значения, поэтому UI мог
+        показывать устаревшую конфигурацию. Теперь источник истины — /config qwen_service.
         """
+        remote = self._request("GET", "/config", timeout=5.0) or {}
+
+        if remote.get("model"):
+            self.model = str(remote.get("model"))
+        if "thinking_enabled" in remote:
+            self.thinking_enabled = bool(remote.get("thinking_enabled"))
+        if "search_enabled" in remote:
+            self.search_enabled = bool(remote.get("search_enabled"))
+        if "auto_continue_enabled" in remote:
+            self.auto_continue_enabled = bool(remote.get("auto_continue_enabled"))
+        if "max_continues" in remote:
+            try:
+                self.max_continues = int(remote.get("max_continues"))
+            except (TypeError, ValueError):
+                pass
+
         return {
-            "model": self.model,
-            "thinking_enabled": self.thinking_enabled,
-            "search_enabled": self.search_enabled,
-            "auto_continue_enabled": self.auto_continue_enabled,
-            "max_continues": self.max_continues,
+            "model": remote.get("model", self.model),
+            "thinking_enabled": remote.get("thinking_enabled", self.thinking_enabled),
+            "search_enabled": remote.get("search_enabled", self.search_enabled),
+            "auto_continue_enabled": remote.get("auto_continue_enabled", self.auto_continue_enabled),
+            "max_continues": remote.get("max_continues", self.max_continues),
+            "stream_retries": remote.get("stream_retries"),
+            "history_recovery_attempts": remote.get("history_recovery_attempts"),
+            "history_recovery_interval_sec": remote.get("history_recovery_interval_sec"),
+            "has_token": remote.get("has_token"),
+            "has_api_key": remote.get("has_api_key"),
             "is_available": self.is_available,
             "base_url": self.base_url,
         }
@@ -570,17 +711,18 @@ class QwenService:
             Словарь со статистикой.
         """
         now = datetime.now()
-        recent_requests = sum(
-            1 for req in self._request_history
-            if (now - req["time"]).total_seconds() < 60
-        )
-
-        return {
-            "is_busy": self._is_busy,
-            "requests_last_minute": recent_requests,
-            "total_requests": len(self._request_history),
-            "session_id": self._session_id,
-        }
+        with self._stats_lock:
+            recent_requests = sum(
+                1 for req in self._request_history
+                if (now - req["time"]).total_seconds() < 60
+            )
+            return {
+                "is_busy": self._is_busy,
+                "active_requests": self._active_requests,
+                "requests_last_minute": recent_requests,
+                "total_requests": len(self._request_history),
+                "session_id": self._session_id,
+            }
 
     def is_busy(self) -> bool:
         """
@@ -589,7 +731,8 @@ class QwenService:
         Returns:
             True если сервис обрабатывает запрос.
         """
-        return self._is_busy
+        with self._stats_lock:
+            return self._active_requests > 0
 
     def update_config(
         self,
@@ -598,32 +741,48 @@ class QwenService:
         search_enabled: bool | None = None,
         auto_continue_enabled: bool | None = None,
         max_continues: int | None = None,
-    ):
-        """
-        Обновить конфигурацию.
-
-        Args:
-            model: Новая модель.
-            thinking_enabled: Режим мышления.
-            search_enabled: Поиск.
-            auto_continue_enabled: Авто-продолжение.
-            max_continues: Макс. продолжений.
-        """
-        if model:
-            self.model = model
+        stream_retries: int | None = None,
+        history_recovery_attempts: int | None = None,
+        history_recovery_interval_sec: float | None = None,
+    ) -> dict[str, Any]:
+        """Обновить конфигурацию standalone qwen_service через POST /config."""
+        payload: dict[str, Any] = {}
+        if model is not None:
+            payload["model"] = model
         if thinking_enabled is not None:
-            self.thinking_enabled = thinking_enabled
+            payload["thinking_enabled"] = thinking_enabled
         if search_enabled is not None:
-            self.search_enabled = search_enabled
+            payload["search_enabled"] = search_enabled
         if auto_continue_enabled is not None:
-            self.auto_continue_enabled = auto_continue_enabled
+            payload["auto_continue_enabled"] = auto_continue_enabled
         if max_continues is not None:
-            self.max_continues = max(1, min(20, max_continues))
+            payload["max_continues"] = max(1, min(20, int(max_continues)))
+        if stream_retries is not None:
+            payload["stream_retries"] = max(0, min(10, int(stream_retries)))
+        if history_recovery_attempts is not None:
+            payload["history_recovery_attempts"] = max(1, min(60, int(history_recovery_attempts)))
+        if history_recovery_interval_sec is not None:
+            payload["history_recovery_interval_sec"] = max(0.2, min(30.0, float(history_recovery_interval_sec)))
 
-        logger.info(
-            f"Конфигурация обновлена: model={self.model}, "
-            f"thinking={self.thinking_enabled}, search={self.search_enabled}"
-        )
+        if payload:
+            result = self._request("POST", "/config", json_data=payload, timeout=10.0)
+            if not result:
+                logger.warning("Failed to update standalone qwen_service config; keeping local fallback values")
+            else:
+                logger.info("Standalone qwen_service config updated: %s", {k: v for k, v in payload.items() if k != "token"})
+
+        # Keep local mirror in sync for fast reads and legacy code paths.
+        updated = self.get_config()
+        self.model = str(updated.get("model") or self.model)
+        self.thinking_enabled = bool(updated.get("thinking_enabled", self.thinking_enabled))
+        self.search_enabled = bool(updated.get("search_enabled", self.search_enabled))
+        self.auto_continue_enabled = bool(updated.get("auto_continue_enabled", self.auto_continue_enabled))
+        try:
+            self.max_continues = int(updated.get("max_continues", self.max_continues))
+        except (TypeError, ValueError):
+            pass
+
+        return updated
 
 
 # Глобальный экземпляр

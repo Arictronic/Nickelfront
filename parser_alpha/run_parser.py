@@ -64,6 +64,20 @@ def _paper_to_dict(paper: Any) -> dict[str, Any]:
     return dict(paper)
 
 
+
+
+def _diagnostic_event_dicts(diagnostics: dict[str, Any] | None) -> list[dict[str, Any]]:
+    events = diagnostics.get("events", []) if isinstance(diagnostics, dict) else []
+    if not isinstance(events, list):
+        return []
+    return [item for item in events if isinstance(item, dict)]
+
+
+def _diagnostic_list_field(diagnostics: dict[str, Any] | None, field: str) -> list[Any]:
+    value = diagnostics.get(field, []) if isinstance(diagnostics, dict) else []
+    return value if isinstance(value, list) else []
+
+
 @dataclass(frozen=True)
 class ParseAttemptResult:
     source: str
@@ -113,7 +127,7 @@ def _classify_attempt_status(attempt: ParseAttemptResult) -> str:
         return "failed"
 
     degraded = bool(attempt.source_health.get("degraded", False))
-    reasons = [str(item).lower() for item in attempt.diagnostics.get("degraded_reasons", [])]
+    reasons = [str(item).lower() for item in _diagnostic_list_field(attempt.diagnostics, "degraded_reasons")]
     if any("api" in reason and "key" in reason for reason in reasons):
         return "api_key_required"
     if any("rate" in reason for reason in reasons):
@@ -221,15 +235,7 @@ def _merge_records_by_dedupe(records: list[dict[str, Any]], limit: int) -> list[
             deduplicator.add_paper(record)
             merged.append(record)
         else:
-            existing = next(
-                (
-                    item
-                    for item in deduplicator.existing_papers
-                    if (item.get("doi") and item.get("doi") == record.get("doi"))
-                    or (item.get("source_id") and item.get("source_id") == record.get("source_id"))
-                ),
-                None,
-            )
+            existing = deduplicator.find_duplicate_record(record)
             if existing is not None:
                 merged_record = deduplicator.merge_records(record, existing)
                 existing.update(merged_record.record)
@@ -571,9 +577,9 @@ async def run_parse(
                 "recorded_at": datetime.now().isoformat(),
                 "raw_samples": attempt.raw_samples[: max(1, fixture_sample_size)],
                 "diagnostics_summary": {
-                    "degraded": attempt.diagnostics.get("degraded", False),
-                    "degraded_reasons": attempt.diagnostics.get("degraded_reasons", []),
-                    "events_count": len(attempt.diagnostics.get("events", [])),
+                    "degraded": bool(attempt.diagnostics.get("degraded", False)) if isinstance(attempt.diagnostics, dict) else False,
+                    "degraded_reasons": _diagnostic_list_field(attempt.diagnostics, "degraded_reasons"),
+                    "events_count": len(_diagnostic_event_dicts(attempt.diagnostics)),
                 },
             }
             fixture_path.write_text(json.dumps(fixture_payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -644,7 +650,7 @@ async def run_parse(
     parse_errors = sum(
         1
         for attempt in attempts
-        for event in attempt.diagnostics.get("events", [])
+        for event in _diagnostic_event_dicts(attempt.diagnostics)
         if event.get("stage") == "parse" and event.get("severity") == "error"
     )
     drift_count = sum(int(attempt.source_health.get("drift_detected_count", 0)) for attempt in attempts)

@@ -10,6 +10,7 @@ import {
   deleteCeleryTask,
   getSharedParseJobs,
   deleteSharedParseJob,
+  type CeleryTaskStatus,
 } from "../api/papers";
 import { PAPER_SOURCES, Paper, PaperSource } from "../types/paper";
 import { Link } from "react-router-dom";
@@ -33,8 +34,8 @@ type ParseJob = {
   initialCount: number;
   lastObservedCount: number;
   lastCountChangeAt: number;
-  status: "in_progress" | "completed" | "cancelled";
-  celeryStatus?: any;
+  status: "in_progress" | "completed" | "cancelled" | "failed" | "expired";
+  celeryStatus?: CeleryTaskStatus;
 };
 
 type AnalyticsSummary = {
@@ -69,50 +70,79 @@ type QualityReport = {
   };
 };
 
-const LS_KEY = "parseJobs.v6";
-const LEGACY_LS_KEYS = ["parseJobs.v5", "parseJobs.v4", "parseJobs.v3", "parseJobs.v2", "parseJobs.v1"];
-const LS_RESET_MARK = "parseJobs.reset.v3";
+const LS_KEY = "parseJobs";
+const LEGACY_LS_KEYS = ["parseJobs.v6", "parseJobs.v5", "parseJobs.v4", "parseJobs.v3", "parseJobs.v2", "parseJobs.v1", "parseJobs.reset.v3"];
+const STALE_PENDING_TASK_MS = 30 * 60_000;
 
-function clearAllParseJobKeys() {
-  const toDelete: string[] = [];
-  for (let i = 0; i < localStorage.length; i += 1) {
-    const key = localStorage.key(i);
-    if (key && key.startsWith("parseJobs.")) {
-      toDelete.push(key);
-    }
+function clearLegacyParseJobKeys() {
+  for (const key of LEGACY_LS_KEYS) {
+    localStorage.removeItem(key);
   }
-  toDelete.forEach((key) => localStorage.removeItem(key));
+}
+
+function clearParseJobStorage() {
+  clearLegacyParseJobKeys();
+  localStorage.removeItem(LS_KEY);
+}
+
+function isValidParseJob(job: unknown): job is ParseJob {
+  const maybeJob = job as Partial<ParseJob> | null | undefined;
+  return typeof maybeJob?.jobId === "string" && maybeJob.jobId.trim().length > 0;
+}
+
+function normalizeJobs(jobs: unknown): ParseJob[] {
+  if (!Array.isArray(jobs)) return [];
+  return jobs
+    .filter(isValidParseJob)
+    .map((job) => ({
+      ...job,
+      jobId: String(job.jobId),
+      source: job.source as PaperSource | "all",
+      status: (["in_progress", "completed", "cancelled", "failed", "expired"].includes(String(job.status))
+        ? job.status
+        : "in_progress") as ParseJob["status"],
+    }));
+}
+
+function isExpiredPendingTask(job: ParseJob, now: number): boolean {
+  return job.status === "in_progress" && now - job.lastCountChangeAt > STALE_PENDING_TASK_MS && job.lastObservedCount <= job.initialCount;
 }
 
 function loadJobs(): ParseJob[] {
   try {
-    if (!localStorage.getItem(LS_RESET_MARK)) {
-      clearAllParseJobKeys();
-      localStorage.setItem(LS_RESET_MARK, "1");
-    }
-    for (const key of LEGACY_LS_KEYS) localStorage.removeItem(key);
+    // Старые версионные ключи не используем: после runtime-cleanup они могут
+    // содержать task_id, которых уже нет в Redis/Celery.
+    clearLegacyParseJobKeys();
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return [];
-    return JSON.parse(raw) as ParseJob[];
+    return normalizeJobs(JSON.parse(raw));
   } catch {
+    clearParseJobStorage();
     return [];
   }
 }
 
 function saveJobs(jobs: ParseJob[]) {
-  localStorage.setItem(LS_KEY, JSON.stringify(jobs));
+  localStorage.setItem(LS_KEY, JSON.stringify(normalizeJobs(jobs)));
 }
 
 function mergeJobs(localJobs: ParseJob[], sharedJobs: ParseJob[]): ParseJob[] {
   const byId = new Map<string, ParseJob>();
-  for (const job of [...sharedJobs, ...localJobs]) {
-    byId.set(job.jobId, {
-      ...job,
-      source: job.source as PaperSource | "all",
-      status: job.status as ParseJob["status"],
-    });
+  for (const job of normalizeJobs(localJobs)) {
+    byId.set(job.jobId, job);
+  }
+  // Backend/shared history is fresher than browser localStorage.
+  for (const job of normalizeJobs(sharedJobs)) {
+    byId.set(job.jobId, job);
   }
   return Array.from(byId.values()).sort((a, b) => b.startedAt - a.startedAt).slice(0, 50);
+}
+
+
+function normalizeParseLimit(value: unknown) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 1;
+  return Math.max(1, Math.min(100, Math.floor(parsed)));
 }
 
 function normalizeQualityReport(data: any): QualityReport | null {
@@ -148,9 +178,11 @@ export default function Dashboard() {
   const [source, setSource] = useState<PaperSource | "all">("arXiv");
   const [limit, setLimit] = useState(25);
   const [parsingError, setParsingError] = useState<string | null>(null);
+  const [startingParse, setStartingParse] = useState(false);
 
   const [updatedAt, setUpdatedAt] = useState(new Date());
   const jobsRef = useRef<ParseJob[]>(jobs);
+  const pollingRef = useRef(false);
 
   useEffect(() => {
     jobsRef.current = jobs;
@@ -166,14 +198,15 @@ export default function Dashboard() {
 
   const todayString = useMemo(() => new Date().toISOString().slice(0, 10), []);
   const todayPapers = useMemo(
-    () => latest.filter((p) => (p.publicationDate ?? "").slice(0, 10) === todayString).length,
+    () =>
+      latest.filter((p) => (p.createdAt ?? p.publicationDate ?? "").slice(0, 10) === todayString).length,
     [latest, todayString]
   );
 
   const fetchPage = async () => {
     const [countRes, latestRes, summaryRes, trendRes, journalsRes, keywordsRes, authorsRes, sourceRes, qualityRes] = await Promise.allSettled([
       getPapersCount("all"),
-      getPapersList({ limit: 300, offset: 0, source: "all" }),
+      getPapersList({ limit: 100, offset: 0, source: "all" }),
       apiClient.get<AnalyticsSummary>("/analytics/metrics/summary"),
       apiClient.get<{ trend: TrendData[] }>("/analytics/metrics/trend?group_by=month&limit=12"),
       apiClient.get<{ items: TopItem[] }>("/analytics/metrics/top?item_type=journals&limit=10"),
@@ -194,26 +227,49 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
+    let cancelled = false;
+
     fetchPage().catch(() => {
       // initial load errors - just keep empty UI
     });
-    getSharedParseJobs(50)
-      .then((sharedJobs) => {
+
+    Promise.allSettled([getPapersCount("all"), getSharedParseJobs(50)])
+      .then(([countRes, sharedJobsRes]) => {
+        if (cancelled) return;
+
+        const total = countRes.status === "fulfilled" ? countRes.value : null;
+        const sharedJobs = sharedJobsRes.status === "fulfilled" ? normalizeJobs(sharedJobsRes.value) : [];
+
+        // После runtime cleanup backend удаляет data/parse_jobs.json и papers.
+        // В этом состоянии локальная browser-история устарела: не надо опрашивать
+        // старые task_id и создавать видимость "живых" задач.
+        if (total === 0 && sharedJobs.length === 0) {
+          clearParseJobStorage();
+          jobsRef.current = [];
+          setJobs([]);
+          return;
+        }
+
         setJobs((current) => {
-          const merged = mergeJobs(current, sharedJobs as ParseJob[]);
+          const merged = mergeJobs(current, sharedJobs);
+          jobsRef.current = merged;
           saveJobs(merged);
           return merged;
         });
       })
       .catch(() => null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Реальное время: берем статус из Celery API, иначе fallback на рост papers count.
   useEffect(() => {
     const interval = window.setInterval(async () => {
       const currentJobs = jobsRef.current;
-      if (currentJobs.length === 0) return;
+      if (!currentJobs.some((job) => job.status === "in_progress") || pollingRef.current) return;
+      pollingRef.current = true;
 
       try {
         const updatedJobs = await Promise.all(
@@ -226,7 +282,9 @@ export default function Dashboard() {
             try {
               const celeryStatus = await getCeleryTaskStatus(job.jobId);
               const now = Date.now();
-              const isCompleted = celeryStatus.status === "SUCCESS" || celeryStatus.status === "FAILURE";
+              const isSuccess = celeryStatus.status === "SUCCESS";
+              const isFailure = celeryStatus.status === "FAILURE";
+              const isCompleted = isSuccess || isFailure;
               const isRevoked = celeryStatus.status === "REVOKED";
               const savedCount = celeryStatus.saved_count || celeryStatus.total_saved || celeryStatus.result?.saved_count || celeryStatus.result?.total_saved || 0;
 
@@ -236,13 +294,14 @@ export default function Dashboard() {
                 const lastCountChangeAt = changed ? now : job.lastCountChangeAt;
                 const stableMs = 60_000;
                 const shouldComplete = now - lastCountChangeAt > stableMs && current > job.initialCount;
+                const expired = !shouldComplete && isExpiredPendingTask({ ...job, lastObservedCount: current, lastCountChangeAt }, now);
 
                 const next: ParseJob = {
                   ...job,
                   celeryStatus,
                   lastObservedCount: current,
                   lastCountChangeAt,
-                  status: shouldComplete ? "completed" : "in_progress",
+                  status: shouldComplete ? "completed" : expired ? "expired" : "in_progress",
                 };
 
                 return next;
@@ -253,7 +312,7 @@ export default function Dashboard() {
                 celeryStatus,
                 lastObservedCount: savedCount > 0 ? savedCount : job.lastObservedCount,
                 lastCountChangeAt: isCompleted ? now : job.lastCountChangeAt,
-                status: isRevoked ? "cancelled" : isCompleted ? "completed" : "in_progress",
+                status: isRevoked ? "cancelled" : isFailure ? "failed" : isSuccess ? "completed" : "in_progress",
               };
 
               return next;
@@ -271,6 +330,8 @@ export default function Dashboard() {
               const stableMs = 60_000;
               if (now - next.lastCountChangeAt > stableMs && current > next.initialCount) {
                 next.status = "completed";
+              } else if (isExpiredPendingTask(next, now)) {
+                next.status = "expired";
               }
 
               return next;
@@ -278,10 +339,23 @@ export default function Dashboard() {
           })
         );
 
+        const previousById = new Map(currentJobs.map((job) => [job.jobId, job.status]));
+        const hasNewlyFinishedJobs = updatedJobs.some((job) => {
+          const previousStatus = previousById.get(job.jobId);
+          return previousStatus === "in_progress" && ["completed", "cancelled", "failed", "expired"].includes(job.status);
+        });
+
+        jobsRef.current = updatedJobs;
         setJobs(updatedJobs);
         saveJobs(updatedJobs);
+
+        if (hasNewlyFinishedJobs) {
+          await fetchPage().catch(() => null);
+        }
       } catch {
         // ignore polling errors
+      } finally {
+        pollingRef.current = false;
       }
     }, 5000);
 
@@ -301,7 +375,7 @@ export default function Dashboard() {
     () =>
       qualityReport
         ? Object.entries(qualityReport.completeness ?? {}).map(([key, data]) => ({
-            name: COMPLETENESS_LABELS_RU[key] ?? key.replace("with_", "").replaceAll("_", " "),
+            name: COMPLETENESS_LABELS_RU[key] ?? key.replace("with_", "").replace(/_/g, " "),
             percent: data.percent,
           }))
         : [],
@@ -315,18 +389,22 @@ export default function Dashboard() {
   }, [qualityData]);
 
   const startParsing = async () => {
+    if (startingParse) return;
     setParsingError(null);
     const normalizedQuery = query.trim();
     if (!normalizedQuery) {
       setParsingError("Поле поискового запроса обязательно");
       return;
     }
+    setStartingParse(true);
     try {
+      const normalizedLimit = normalizeParseLimit(limit);
+      setLimit(normalizedLimit);
       const currentCount = await getPapersCount(source);
       let job: ParseJob;
       if (source === "all") {
         const res = await parseAll({
-          limitPerQuery: limit,
+          limitPerQuery: normalizedLimit,
           source: "all",
           query: normalizedQuery,
         });
@@ -341,7 +419,7 @@ export default function Dashboard() {
           status: "in_progress",
         };
       } else {
-        const res = await parsePapers({ query: normalizedQuery, limit, source });
+        const res = await parsePapers({ query: normalizedQuery, limit: normalizedLimit, source });
         job = {
           jobId: String(res.task_id),
           startedAt: Date.now(),
@@ -356,11 +434,14 @@ export default function Dashboard() {
 
       setJobs((prev: ParseJob[]): ParseJob[] => {
         const nextJobs: ParseJob[] = [job, ...prev].slice(0, 30);
+        jobsRef.current = nextJobs;
         saveJobs(nextJobs);
         return nextJobs;
       });
     } catch (e) {
       setParsingError((e as Error).message);
+    } finally {
+      setStartingParse(false);
     }
   };
 
@@ -379,6 +460,7 @@ export default function Dashboard() {
             status: "cancelled",
             celeryStatus: {
               ...(job.celeryStatus || {}),
+              task_id: job.jobId,
               status: "REVOKED",
               state: "REVOKED",
             },
@@ -398,9 +480,7 @@ export default function Dashboard() {
     }
 
     try {
-      // Вызываем API для удаления флага отмены (опционально)
-      await deleteCeleryTask(jobId);
-      await deleteSharedParseJob(jobId).catch(() => null);
+      await Promise.allSettled([deleteCeleryTask(jobId), deleteSharedParseJob(jobId)]);
       setJobs((prev: ParseJob[]): ParseJob[] => {
         const nextJobs: ParseJob[] = prev.filter((job) => job.jobId !== jobId);
         saveJobs(nextJobs);
@@ -416,8 +496,8 @@ export default function Dashboard() {
       <div className="page-head">
         <h2>Главная</h2>
         <div className="actions">
-          <button className="btn btn-primary" onClick={startParsing}>
-            Запустить парсинг статей
+          <button className="btn btn-primary" onClick={startParsing} disabled={startingParse}>
+            {startingParse ? "Запуск..." : "Запустить парсинг статей"}
           </button>
         </div>
       </div>
@@ -440,7 +520,7 @@ export default function Dashboard() {
             min={1}
             max={100}
             value={limit}
-            onChange={(e) => setLimit(Number(e.target.value))}
+            onChange={(e) => setLimit(normalizeParseLimit(e.target.value))}
             style={{ width: 120 }}
           />
         </div>
@@ -662,6 +742,7 @@ export default function Dashboard() {
               {jobs.slice(0, 10).map((j) => {
                 const progress = (() => {
                   if (j.status === "completed") return 100;
+                  if (j.status === "failed" || j.status === "expired") return 0;
                   if (j.celeryStatus) {
                     const current = j.celeryStatus.current || j.celeryStatus.result?.current || 0;
                     const total = j.celeryStatus.total || j.celeryStatus.result?.total || 0;
@@ -674,7 +755,9 @@ export default function Dashboard() {
 
                 const statusText = (() => {
                   if (j.status === "completed") return "✓ Завершено";
+                  if (j.status === "failed") return "✕ Ошибка";
                   if (j.status === "cancelled") return "Отменено";
+                  if (j.status === "expired") return "Истёк / не найден";
 
                   if (j.celeryStatus) {
                     const status = j.celeryStatus.status;
@@ -705,7 +788,7 @@ export default function Dashboard() {
                     <td>
                       <span
                         className={`status ${
-                          j.status === "completed" || j.celeryStatus?.status === "SUCCESS" ? "active" : ""
+                          j.status === "completed" || j.celeryStatus?.status === "SUCCESS" ? "active" : j.status === "failed" || j.celeryStatus?.status === "FAILURE" ? "failed" : ""
                         }`}
                       >
                         {statusText}

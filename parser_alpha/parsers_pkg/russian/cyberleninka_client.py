@@ -6,6 +6,7 @@ import asyncio
 import html
 import re
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 from loguru import logger
 from bs4 import BeautifulSoup
@@ -103,6 +104,44 @@ class CyberLeninkaClient(BaseAPIClient):
 
         raise SourceUnavailableError(source=self.SOURCE_NAME, message="Max retries exceeded")
 
+
+
+    @staticmethod
+    def _coerce_string_list(value: Any, *, split_commas: bool = True) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            text = " ".join(value.split()).strip()
+            if not text:
+                return []
+            pattern = r"[;,]" if split_commas else r"[;\n]+"
+            return [part.strip() for part in re.split(pattern, text) if part.strip()] or [text]
+        if isinstance(value, dict):
+            for key in ("name", "fullName", "displayName", "authorName", "value", "title", "text"):
+                if key in value:
+                    extracted = CyberLeninkaClient._coerce_string_list(value.get(key), split_commas=split_commas)
+                    if extracted:
+                        return extracted
+            result: list[str] = []
+            for item in value.values():
+                result.extend(CyberLeninkaClient._coerce_string_list(item, split_commas=split_commas))
+            return list(dict.fromkeys(result))
+        if isinstance(value, (list, tuple, set)):
+            result: list[str] = []
+            for item in value:
+                result.extend(CyberLeninkaClient._coerce_string_list(item, split_commas=split_commas))
+            seen: set[str] = set()
+            deduped: list[str] = []
+            for item in result:
+                key = item.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(item)
+            return deduped
+        text = " ".join(str(value).split()).strip()
+        return [text] if text else []
+
     @staticmethod
     def _clean_markup(text: str | None) -> str | None:
         if not text:
@@ -153,20 +192,31 @@ class CyberLeninkaClient(BaseAPIClient):
 
     def _parse_api_results(self, data: dict[str, Any], limit: int) -> list[dict[str, Any]]:
         """Parse /api/search JSON response into normalized records."""
+        if not isinstance(data, dict):
+            return []
         articles = data.get("articles") or []
+        if isinstance(articles, dict):
+            articles = [articles]
+        if not isinstance(articles, list):
+            return []
         results: list[dict[str, Any]] = []
 
         for article in articles[:limit]:
+            if not isinstance(article, dict):
+                continue
             try:
                 article_path = str(article.get("link") or "").strip()
                 if not article_path:
                     continue
 
-                article_url = f"{self.BASE_URL}{article_path}" if article_path.startswith("/") else article_path
-                source_id = article_path.strip("/")
+                article_url = urljoin(f"{self.BASE_URL}/", article_path)
+                parsed_article_url = urlparse(article_url)
+                if "cyberleninka.ru" not in parsed_article_url.netloc.lower():
+                    continue
+                source_id = (parsed_article_url.path or article_path).strip("/")
 
                 title = self._clean_markup(article.get("name")) or "Без названия"
-                authors = [str(a).strip() for a in (article.get("authors") or []) if str(a).strip()]
+                authors = self._coerce_string_list(article.get("authors"), split_commas=False)
                 abstract = self._clean_markup(article.get("annotation"))
                 journal = self._clean_markup(article.get("journal"))
 
@@ -176,8 +226,8 @@ class CyberLeninkaClient(BaseAPIClient):
                     published_date = f"{year}-01-01T00:00:00"
 
                 pdf_url = None
-                if article_path.startswith("/article/"):
-                    pdf_url = f"{self.BASE_URL}{article_path}/pdf"
+                if source_id.startswith("article/"):
+                    pdf_url = f"{self.BASE_URL}/{source_id}/pdf"
 
                 doi = None
                 ocr_parts = article.get("ocr") or []

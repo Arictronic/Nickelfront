@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -13,13 +14,36 @@ sys.path.insert(0, str(ROOT_DIR / "shared"))
 from app.core.config import settings  # noqa: E402
 from app.core.logging import setup_logging  # noqa: E402
 
-setup_logging(service_name="celery_worker")
 
-celery_app = Celery(
-    "worker",
-    broker=settings.CELERY_BROKER_URL,
-    backend=settings.CELERY_RESULT_BACKEND,
-    include=[
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _worker_service_name() -> str:
+    explicit = (os.getenv("NICKELFRONT_SERVICE_NAME") or "").strip()
+    if explicit:
+        return explicit
+    if _env_bool("QWEN_GATEWAY_WORKER"):
+        return "qwen_worker"
+    return "celery_worker"
+
+
+IS_QWEN_GATEWAY_WORKER = _env_bool("QWEN_GATEWAY_WORKER")
+SERVICE_NAME = _worker_service_name()
+setup_logging(service_name=SERVICE_NAME)
+
+# Qwen gateway workers should not import parser/content/RAG task modules.
+# This keeps their startup clean and avoids misleading logs such as PDFParser
+# initialization in a worker that only consumes queue=qwen.
+if IS_QWEN_GATEWAY_WORKER:
+    TASK_MODULES = [
+        "app.tasks.qwen_tasks",
+    ]
+else:
+    TASK_MODULES = [
         "app.tasks.tasks",
         "app.tasks.parse_tasks",
         "app.tasks.content_tasks",
@@ -27,7 +51,13 @@ celery_app = Celery(
         "app.tasks.qwen_tasks",
         # Legacy compatibility task name; internally uses the shared qwen gateway.
         "app.tasks.translation_tasks",
-    ],
+    ]
+
+celery_app = Celery(
+    "worker",
+    broker=settings.CELERY_BROKER_URL,
+    backend=settings.CELERY_RESULT_BACKEND,
+    include=TASK_MODULES,
 )
 
 # Celery settings
@@ -44,6 +74,10 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_time_limit=3600,  # 1 hour hard limit
     task_soft_time_limit=3300,  # 55 minutes soft limit
+    # Keep Celery's own `Task ... succeeded in ...: <result>` log compact.
+    # Qwen/content tasks can return large text payloads; full results still stay in
+    # Redis for the waiting caller, but worker logs should not dump page prompts.
+    resultrepr_maxsize=512,
 
     # Flower monitoring
     task_send_task_events=True,
@@ -55,15 +89,32 @@ celery_app.conf.update(
     task_routes={
         "app.tasks.qwen.*": {"queue": settings.QWEN_QUEUE_NAME},
     },
+)
 
+logger.info(
+    "Celery app configured: service={}, qwen_gateway={}, modules={}, broker={}, result_backend={}",
+    SERVICE_NAME,
+    IS_QWEN_GATEWAY_WORKER,
+    TASK_MODULES,
+    settings.CELERY_BROKER_URL,
+    settings.CELERY_RESULT_BACKEND,
 )
 
 
+def _short_task_id(task_id: str | None) -> str:
+    if not task_id:
+        return "unknown"
+    return str(task_id)[:8]
+
+
 @task_prerun.connect
-def task_prerun_handler(task_id, task, *args, **kwargs):
-    logger.info(f"Задача {task.name}[{task_id}] началась")
+def task_prerun_handler(task_id=None, task=None, *args, **kwargs):
+    task_name = getattr(task, "name", "unknown")
+    logger.info("Celery task started: name={} id={}", task_name, _short_task_id(task_id))
 
 
 @task_postrun.connect
-def task_postrun_handler(task_id, task, *args, **kwargs):
-    logger.info(f"Задача {task.name}[{task_id}] завершена")
+def task_postrun_handler(task_id=None, task=None, *args, **kwargs):
+    task_name = getattr(task, "name", "unknown")
+    state = kwargs.get("state") or "unknown"
+    logger.info("Celery task finished: name={} id={} state={}", task_name, _short_task_id(task_id), state)

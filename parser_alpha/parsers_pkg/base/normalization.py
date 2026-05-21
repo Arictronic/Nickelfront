@@ -8,9 +8,62 @@ from urllib.parse import quote
 
 _DOI_PATTERN = re.compile(r"^10\.\d{4,9}/[-._;()/:A-Za-z0-9]+$")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+_TEXT_SCALAR_KEYS = (
+    "value",
+    "text",
+    "content",
+    "title",
+    "name",
+    "display_name",
+    "displayName",
+    "fullName",
+    "authorName",
+    "url",
+    "URL",
+    "href",
+    "id",
+    "doi",
+    "date",
+    "publishedDate",
+    "publication_date",
+    "year",
+)
 
 
-def clean_text(text: str | None) -> str | None:
+def _coerce_text_scalar(value: object | None) -> object | None:
+    """Unwrap common scalar API payload shapes before text/date normalization.
+
+    Several sources sometimes return small objects like {"value": "..."} or
+    one-item lists for fields that should be strings.  Stringifying those objects
+    produces Python reprs in records and breaks DOI/URL/date parsing, so unwrap
+    semantic keys first and use the first non-empty nested value.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float)):
+        return value
+    if isinstance(value, dict):
+        for key in _TEXT_SCALAR_KEYS:
+            if key in value:
+                candidate = _coerce_text_scalar(value.get(key))
+                if candidate not in (None, ""):
+                    return candidate
+        for item in value.values():
+            candidate = _coerce_text_scalar(item)
+            if candidate not in (None, ""):
+                return candidate
+        return None
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            candidate = _coerce_text_scalar(item)
+            if candidate not in (None, ""):
+                return candidate
+        return None
+    return value
+
+
+def clean_text(text: object | None) -> str | None:
+    text = _coerce_text_scalar(text)
     if text is None:
         return None
 
@@ -35,13 +88,52 @@ def clean_text(text: str | None) -> str | None:
     return normalized or None
 
 
-def normalize_authors(authors: list[str] | None) -> list[str]:
+_TEXT_OBJECT_KEYS = (
+    "name",
+    "fullName",
+    "displayName",
+    "display_name",
+    "authorName",
+    "value",
+    "text",
+    "title",
+    "label",
+    "term",
+)
+
+
+def _coerce_text_items(value: object | None) -> list[object]:
+    """Flatten list-like text fields without turning dicts into Python reprs."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = [part for part in re.split(r"[;\n]+", value) if part.strip()]
+        return items or [value]
+    if isinstance(value, dict):
+        for key in _TEXT_OBJECT_KEYS:
+            if key in value:
+                extracted = _coerce_text_items(value.get(key))
+                if extracted:
+                    return extracted
+        output: list[object] = []
+        for item in value.values():
+            output.extend(_coerce_text_items(item))
+        return output
+    if isinstance(value, (list, tuple, set)):
+        output: list[object] = []
+        for item in value:
+            output.extend(_coerce_text_items(item))
+        return output
+    return [value]
+
+
+def normalize_authors(authors: object | None) -> list[str]:
     if not authors:
         return []
 
     normalized: list[str] = []
     seen: set[str] = set()
-    for author in authors:
+    for author in _coerce_text_items(authors):
         cleaned = clean_text(author)
         if not cleaned:
             continue
@@ -71,8 +163,15 @@ def normalize_doi(value: str | None) -> str | None:
     if not cleaned:
         return None
 
-    cleaned = cleaned.replace("https://doi.org/", "").replace("http://doi.org/", "")
     cleaned = cleaned.strip()
+    parsed = urlparse(cleaned)
+    if parsed.scheme in {"http", "https"} and parsed.netloc.lower() in {"doi.org", "dx.doi.org"}:
+        cleaned = parsed.path.lstrip("/")
+    else:
+        cleaned = re.sub(r"^doi:\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", cleaned, flags=re.IGNORECASE)
+
+    cleaned = cleaned.strip().strip(".;, ")
     if not _DOI_PATTERN.match(cleaned):
         return None
     return cleaned.lower()
@@ -113,8 +212,14 @@ def derive_article_url(
     if normalized_source == "europepmc":
         if sid.startswith("PMC:"):
             pmc_id = sid.split(":", 1)[1]
-            return f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmc_id}/"
-        return sid if sid.startswith("http") else f"https://europepmc.org/article/{quote(sid)}"
+            return f"https://www.ncbi.nlm.nih.gov/pmc/articles/{quote(pmc_id, safe="")}/"
+        if sid.startswith("http://") or sid.startswith("https://"):
+            return sid
+        if ":" in sid:
+            source_db, article_id = sid.split(":", 1)
+            if source_db.strip() and article_id.strip():
+                return f"https://europepmc.org/article/{quote(source_db.strip(), safe="")}/{quote(article_id.strip(), safe="")}"
+        return f"https://europepmc.org/article/{quote(sid, safe="")}"
 
     if normalized_source == "crossref":
         return None
@@ -134,17 +239,18 @@ def derive_article_url(
     if normalized_source == "patentscope":
         if sid.startswith("http://") or sid.startswith("https://"):
             return sid
-        return f"https://patentscope.wipo.int/search/en/detail.jsf?docId={quote(sid)}"
+        return f"https://patentscope.wipo.int/search/en/detail.jsf?docId={quote(sid, safe="")}"
 
     if normalized_source == "rospatent":
         if sid.startswith("http://") or sid.startswith("https://"):
             return sid
-        return f"https://searchplatform.rospatent.gov.ru/doc/{quote(sid)}"
+        return f"https://searchplatform.rospatent.gov.ru/doc/{quote(sid, safe="")}"
 
     return None
 
 
 def normalize_datetime(value: datetime | str | None) -> datetime | None:
+    value = _coerce_text_scalar(value)
     if value is None:
         return None
 

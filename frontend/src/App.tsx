@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, type ReactNode } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import * as authApi from "./api/auth";
 import Layout from "./components/layout/Layout";
@@ -17,16 +17,43 @@ import Register from "./pages/Register";
 import Landing from "./pages/Landing";
 import { useAuthStore } from "./store/authStore";
 import ErrorBoundary from "./components/ErrorBoundary";
+import { ToastProvider } from "./components/ui/Toast";
+
+
+function StaticInfoPage({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="page" style={{ maxWidth: 900, margin: "0 auto", padding: 24 }}>
+      <div className="panel">
+        <h2>{title}</h2>
+        <div style={{ lineHeight: 1.65 }}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function SessionCheckingNotice() {
+  return (
+    <div className="page" style={{ padding: 24 }}>
+      <div className="panel">Проверка сессии...</div>
+    </div>
+  );
+}
 
 function ProtectedRoute({ children }: { children: JSX.Element }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isSessionChecking = useAuthStore((s) => s.isSessionChecking);
+
+  if (isSessionChecking) return <SessionCheckingNotice />;
   return isAuthenticated ? children : <Navigate to="/login" replace />;
 }
 
 function AdminRoute({ children }: { children: JSX.Element }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isSessionChecking = useAuthStore((s) => s.isSessionChecking);
   const user = useAuthStore((s) => s.user);
   const isAdmin = !!user && user.is_admin;
+
+  if (isSessionChecking) return <SessionCheckingNotice />;
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
@@ -42,7 +69,30 @@ function RootRedirect() {
 
 function AuthOnlyRoute({ children }: { children: JSX.Element }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isSessionChecking = useAuthStore((s) => s.isSessionChecking);
+
+  if (isSessionChecking) return <SessionCheckingNotice />;
   return isAuthenticated ? <Navigate to="/dashboard" replace /> : children;
+}
+
+function PageBoundary({ name, children }: { name: string; children: ReactNode }) {
+  return <ErrorBoundary name={name}>{children}</ErrorBoundary>;
+}
+
+function ProtectedPage({ name, children }: { name: string; children: JSX.Element }) {
+  return (
+    <ProtectedRoute>
+      <PageBoundary name={name}>{children}</PageBoundary>
+    </ProtectedRoute>
+  );
+}
+
+function AdminPage({ name, children }: { name: string; children: JSX.Element }) {
+  return (
+    <AdminRoute>
+      <PageBoundary name={name}>{children}</PageBoundary>
+    </AdminRoute>
+  );
 }
 
 function SessionBootstrap() {
@@ -51,17 +101,20 @@ function SessionBootstrap() {
   const setUser = useAuthStore((s) => s.setUser);
   const setAuthenticated = useAuthStore((s) => s.setAuthenticated);
   const setSessionChecking = useAuthStore((s) => s.setSessionChecking);
+  const setSessionError = useAuthStore((s) => s.setSessionError);
 
   useEffect(() => {
     if (!token && !refreshToken) {
       setSessionChecking(false);
       setAuthenticated(false);
       setUser(null);
+      setSessionError(null);
       return;
     }
 
     let active = true;
     setSessionChecking(true);
+    setSessionError(null);
 
     authApi
       .getCurrentUser()
@@ -69,11 +122,28 @@ function SessionBootstrap() {
         if (!active) return;
         setUser(user);
         setAuthenticated(true);
+        setSessionError(null);
       })
-      .catch(() => {
+      .catch((error) => {
         if (!active) return;
+        const status = error?.response?.status;
+
+        // Backend cleanup removes refresh_tokens. Old browser tokens then become stale.
+        // Clear auth only for explicit auth errors. Network/proxy/backend errors should not
+        // erase the user session just because the backend is still starting.
+        if (status === 401 || status === 403) {
+          localStorage.removeItem("auth_token");
+          localStorage.removeItem("refresh_token");
+          setUser(null);
+          setAuthenticated(false);
+          setSessionError(null);
+          return;
+        }
+
+        console.warn("Session check failed without auth status", error);
         setUser(null);
         setAuthenticated(!!token || !!refreshToken);
+        setSessionError("backend_unavailable");
       })
       .finally(() => {
         if (!active) return;
@@ -83,14 +153,14 @@ function SessionBootstrap() {
     return () => {
       active = false;
     };
-  }, [token, refreshToken, setUser, setAuthenticated, setSessionChecking]);
+  }, [token, refreshToken, setUser, setAuthenticated, setSessionChecking, setSessionError]);
 
   return null;
 }
 
 export default function App() {
   return (
-    <>
+    <ToastProvider>
       <SessionBootstrap />
       <Routes>
         <Route path="/" element={<Landing />} />
@@ -98,112 +168,60 @@ export default function App() {
           path="/login"
           element={
             <AuthOnlyRoute>
-              <Login />
+              <PageBoundary name="Вход">
+                <Login />
+              </PageBoundary>
             </AuthOnlyRoute>
+          }
+        />
+
+        <Route
+          path="/terms"
+          element={
+            <PageBoundary name="Условия использования">
+              <StaticInfoPage title="Условия использования">
+                <p>Nickelfront используется как исследовательская и учебная система для работы со статьями, патентами и отчётами.</p>
+                <p>Не загружайте секретные ключи, закрытые документы и персональные данные без необходимости. Администратор проекта отвечает за доступ пользователей и сохранность данных.</p>
+              </StaticInfoPage>
+            </PageBoundary>
+          }
+        />
+        <Route
+          path="/privacy"
+          element={
+            <PageBoundary name="Политика конфиденциальности">
+              <StaticInfoPage title="Политика конфиденциальности">
+                <p>Данные проекта хранятся в локальной базе Nickelfront и используются для поиска, анализа, RAG, отчётов и фоновой обработки.</p>
+                <p>Не публикуйте токены, пароли, API-ключи и приватные документы. При попадании секретов в архив, git или чат их нужно заменить.</p>
+              </StaticInfoPage>
+            </PageBoundary>
           }
         />
         <Route
           path="/register"
           element={
             <AuthOnlyRoute>
-              <Register />
+              <PageBoundary name="Регистрация">
+                <Register />
+              </PageBoundary>
             </AuthOnlyRoute>
           }
         />
         <Route element={<Layout />}>
-          <Route
-            path="/dashboard"
-            element={
-              <ProtectedRoute>
-                <Dashboard />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/papers"
-            element={
-              <ProtectedRoute>
-                <Patents />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/papers/:id"
-            element={
-              <ProtectedRoute>
-                <PatentDetail />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/papers/:id/report"
-            element={
-              <ProtectedRoute>
-                <PaperReport />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/vector-search"
-            element={
-              <ProtectedRoute>
-                <Navigate to="/search" replace />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/metrics"
-            element={
-              <ProtectedRoute>
-                <Metrics />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/celery"
-            element={
-              <AdminRoute>
-                <CeleryMonitoring />
-              </AdminRoute>
-            }
-          />
-          <Route
-            path="/search"
-            element={
-              <ProtectedRoute>
-                <Analytics />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/analysis"
-            element={
-              <ProtectedRoute>
-                <AlloyAnalysis />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/jobs"
-            element={
-              <ProtectedRoute>
-                <WorkerStatus />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/database"
-            element={
-              <AdminRoute>
-                <ErrorBoundary name="База данных">
-                  <Database />
-                </ErrorBoundary>
-              </AdminRoute>
-            }
-          />
+          <Route path="/dashboard" element={<ProtectedPage name="Главная"><Dashboard /></ProtectedPage>} />
+          <Route path="/papers" element={<ProtectedPage name="Статьи"><Patents /></ProtectedPage>} />
+          <Route path="/papers/:id" element={<ProtectedPage name="Карточка статьи"><PatentDetail /></ProtectedPage>} />
+          <Route path="/papers/:id/report" element={<ProtectedPage name="Отчёт по статье"><PaperReport /></ProtectedPage>} />
+          <Route path="/vector-search" element={<ProtectedPage name="Векторный поиск"><Navigate to="/search" replace /></ProtectedPage>} />
+          <Route path="/metrics" element={<ProtectedPage name="Метрики и Аналитика"><Metrics /></ProtectedPage>} />
+          <Route path="/celery" element={<AdminPage name="Мониторинг Celery"><CeleryMonitoring /></AdminPage>} />
+          <Route path="/search" element={<ProtectedPage name="Поиск"><Analytics /></ProtectedPage>} />
+          <Route path="/analysis" element={<ProtectedPage name="Анализ сплавов"><AlloyAnalysis /></ProtectedPage>} />
+          <Route path="/jobs" element={<ProtectedPage name="Статус парсинга"><WorkerStatus /></ProtectedPage>} />
+          <Route path="/database" element={<AdminPage name="База данных"><Database /></AdminPage>} />
         </Route>
         <Route path="*" element={<RootRedirect />} />
       </Routes>
-    </>
+    </ToastProvider>
   );
 }

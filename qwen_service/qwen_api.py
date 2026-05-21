@@ -31,6 +31,22 @@ class QwenChatInProgressError(QwenProviderError):
 class QwenInternalStreamError(QwenProviderError):
     """Raised when provider reports internal stream error."""
 
+
+def _env_float(name: str, default: float, *, min_value: float | None = None, max_value: float | None = None) -> float:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        value = default
+    else:
+        try:
+            value = float(str(raw).strip())
+        except (TypeError, ValueError):
+            value = default
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
 # ============================================================================
 # Data Classes (replacing Domain.chat.ports)
 # ============================================================================
@@ -258,10 +274,29 @@ class QwenTransport:
         return headers
 
     def _extract_data(self, response_json: dict[str, Any]) -> Any:
+        """Extract provider payload or raise an explicit provider error.
+
+        Qwen may return HTTP 200 with a JSON envelope such as
+        ``{"success": false, "data": {"code": "...", "details": "..."}}``.
+        Treating that as normal data makes backend endpoints look successful
+        while returning empty sessions/models/history. Convert it to a real
+        provider error so callers can surface the reason.
+        """
         if isinstance(response_json, dict):
             if response_json.get("success") is False:
-                err = response_json.get("data") or {}
-                self._log(f"Qwen API error: {err}")
+                err = response_json.get("data") or response_json.get("error") or {}
+                if isinstance(err, dict):
+                    code = str(err.get("code") or "").strip()
+                    details = str(err.get("details") or err.get("message") or "").strip()
+                    message = details or code or "Qwen provider returned success=false"
+                else:
+                    message = str(err or "Qwen provider returned success=false").strip()
+                self._log(f"Qwen API error: {message}")
+                raise QwenProviderError(message)
+            if "error" in response_json and response_json.get("error"):
+                message = str(response_json.get("error") or "Qwen provider returned error").strip()
+                self._log(f"Qwen API error: {message}")
+                raise QwenProviderError(message)
             if "data" in response_json:
                 return response_json.get("data")
         return response_json
@@ -322,9 +357,8 @@ class QwenTransport:
         """Get current user info"""
         url = "https://chat.qwen.ai/api/user"
         resp = self.session.get(url, timeout=30)
-        if resp.status_code == 200:
-            return resp.json()
-        return {}
+        self._raise_for_bad_response(resp, operation="get_user_info")
+        return resp.json()
 
     def validate_token(self) -> bool:
         """Validate authentication token"""
@@ -342,18 +376,19 @@ class QwenTransport:
             "project_id": "",
         }
         resp = self.session.post(self.CHATS_NEW_URL, json=payload, timeout=30)
-        if resp.status_code == 200:
-            data = self._extract_data(resp.json())
-            session_id = data.get("id") if isinstance(data, dict) else None
-            if session_id:
-                self.update_referer(session_id)
-                return session_id
+        self._raise_for_bad_response(resp, operation="create_session")
+        data = self._extract_data(resp.json())
+        session_id = data.get("id") if isinstance(data, dict) else None
+        if session_id:
+            self.update_referer(session_id)
+            return session_id
         return None
 
     def delete_session(self, session_id: str) -> bool:
         """Delete chat session"""
         url = f"{self.CHATS_URL}/{session_id}"
         resp = self.session.delete(url, timeout=30)
+        self._raise_for_bad_response(resp, operation="delete_session")
         return resp.status_code == 200
 
     def update_session_title(self, session_id: str, title: str) -> bool:
@@ -361,6 +396,7 @@ class QwenTransport:
         url = f"{self.CHATS_URL}/{session_id}"
         payload = {"title": title}
         resp = self.session.put(url, json=payload, timeout=30)
+        self._raise_for_bad_response(resp, operation="update_session_title")
         return resp.status_code == 200
 
     def fetch_sessions_page(self, page: int = 1, exclude_project: bool = True) -> list[dict]:
@@ -369,34 +405,33 @@ class QwenTransport:
         if exclude_project:
             params["exclude_project"] = "true"
         resp = self.session.get(f"{self.CHATS_URL}/", params=params, timeout=30)
-        if resp.status_code == 200:
-            data = self._extract_data(resp.json())
-            if isinstance(data, dict):
-                items = data.get("items")
-                if isinstance(items, list):
-                    return items
-            if isinstance(data, list):
-                return data
+        self._raise_for_bad_response(resp, operation="fetch_sessions")
+        data = self._extract_data(resp.json())
+        if isinstance(data, dict):
+            items = data.get("items")
+            if isinstance(items, list):
+                return items
+        if isinstance(data, list):
+            return data
         return []
 
     def fetch_chat(self, session_id: str) -> dict:
         """Fetch chat history"""
         url = f"{self.CHATS_URL}/{session_id}"
         resp = self.session.get(url, timeout=30)
-        if resp.status_code == 200:
-            data = self._extract_data(resp.json())
-            if isinstance(data, dict):
-                return data
+        self._raise_for_bad_response(resp, operation="fetch_chat")
+        data = self._extract_data(resp.json())
+        if isinstance(data, dict):
+            return data
         return {}
 
     def fetch_models(self) -> list[dict]:
         """Fetch available models"""
         url = "https://chat.qwen.ai/api/models"
         resp = self.session.get(url, timeout=30)
-        if resp.status_code == 200:
-            data = resp.json()
-            return data.get("models") or []
-        return []
+        self._raise_for_bad_response(resp, operation="fetch_models")
+        data = resp.json()
+        return data.get("models") or []
 
     def send_stream(
         self,
@@ -471,8 +506,8 @@ class QwenAPI:
         self.last_message_id: int | None = None
         self.last_response_meta: dict[str, Any] = {}
 
-        connect_timeout = float(os.getenv("QWEN_CONNECT_TIMEOUT", "30"))
-        stream_read_timeout = float(os.getenv("QWEN_STREAM_READ_TIMEOUT", "300"))
+        connect_timeout = _env_float("QWEN_CONNECT_TIMEOUT", 30.0, min_value=1.0, max_value=300.0)
+        stream_read_timeout = _env_float("QWEN_STREAM_READ_TIMEOUT", 300.0, min_value=30.0, max_value=3600.0)
 
         self.transport = QwenTransport(
             token=token,
@@ -731,6 +766,7 @@ class QwenAPI:
     def continue_message(
         self,
         message_id: int,
+        on_parts: Callable[[str, str], None] | None = None,
         on_complete_parts: Callable[[str, str], None] | None = None,
         on_meta: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
@@ -761,6 +797,7 @@ class QwenAPI:
                 )
 
             callbacks = StreamCallbacks(
+                on_parts=on_parts,
                 on_complete_parts=on_complete_parts,
                 on_meta=on_meta,
             )

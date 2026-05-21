@@ -86,15 +86,19 @@ def _clean_arxiv_id(raw: str) -> str:
     value = (raw or "").strip()
     if not value:
         return ""
+
     value = value.replace("http://", "https://")
     if "arxiv.org/abs/" in value:
         value = value.split("arxiv.org/abs/", 1)[1]
     elif "arxiv.org/pdf/" in value:
         value = value.split("arxiv.org/pdf/", 1)[1]
-    if value.startswith("arXiv:"):
-        value = value[6:]
-    value = value.split("/")[-1]
-    value = value.replace(".pdf", "")
+
+    if value.lower().startswith("arxiv:"):
+        value = value.split(":", 1)[1]
+
+    value = value.split("?", 1)[0].split("#", 1)[0].strip("/")
+    value = value.removesuffix(".pdf")
+    value = re.sub(r"v\d+$", "", value)
     return value
 
 

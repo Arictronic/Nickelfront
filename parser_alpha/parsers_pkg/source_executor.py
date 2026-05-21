@@ -51,6 +51,52 @@ async def _close_resource(resource: Any) -> None:
         await result
 
 
+
+
+def _safe_event_dicts(diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
+    events = diagnostics.get("events", []) if isinstance(diagnostics, dict) else []
+    if not isinstance(events, list):
+        return []
+    return [item for item in events if isinstance(item, dict)]
+
+
+def _coerce_raw_list(raw: Any) -> list[Any]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, tuple):
+        return list(raw)
+    return [raw]
+
+
+
+
+def _coerce_raw_records(raw: Any) -> list[dict[str, Any]]:
+    """Return only dict records safe to feed into parser implementations.
+
+    Some clients or tests may drift from the expected list[dict] contract and
+    return a single object, tuple, None, or even a scalar error payload.  Feeding
+    those values directly into parser loops can make the whole source fail on
+    ``item.get`` or iterate dictionary keys instead of records.
+    """
+    return [item for item in _coerce_raw_list(raw) if isinstance(item, dict)]
+
+
+async def _parse_with_parser(parser: Any, raw: Any) -> list[Any]:
+    return await parser.parse_search_results(_coerce_raw_records(raw))
+
+def _apply_retry_config(client: Any, retry_config: RetryConfig) -> None:
+    """Apply runtime retry settings to both old and new client implementations."""
+    setattr(client, "_retry_config", retry_config)
+    if hasattr(client, "MAX_RETRIES"):
+        setattr(client, "MAX_RETRIES", retry_config.max_retries)
+    if hasattr(client, "RETRY_BACKOFF_BASE"):
+        setattr(client, "RETRY_BACKOFF_BASE", retry_config.backoff_base)
+    if hasattr(client, "RETRY_BASE_DELAY"):
+        setattr(client, "RETRY_BASE_DELAY", retry_config.base_delay)
+
+
 async def _execute_source(
     source: str,
     query: str,
@@ -67,35 +113,35 @@ async def _execute_source(
 
     if source == "arXiv":
         artifacts.client = ArxivClient(timeout=runtime_config.timeout, rate_limit=True)
-        artifacts.client._retry_config = retry_config
+        _apply_retry_config(artifacts.client, retry_config)
         artifacts.parser = ArxivParser()
         raw = await artifacts.client.search(query=query, limit=limit)
-        papers = await artifacts.parser.parse_search_results(raw)
+        papers = await _parse_with_parser(artifacts.parser, raw)
         return raw, papers
 
     if source == "CORE":
         artifacts.client = COREClient(timeout=runtime_config.timeout)
-        artifacts.client._retry_config = retry_config
+        _apply_retry_config(artifacts.client, retry_config)
         artifacts.parser = COREParser()
         raw = await artifacts.client.search(query=query, limit=limit, full_text_only=False)
-        papers = await artifacts.parser.parse_search_results(raw)
+        papers = await _parse_with_parser(artifacts.parser, raw)
         return raw, papers
 
     if source == "CyberLeninka":
         artifacts.client = CyberLeninkaClient(timeout=runtime_config.timeout)
-        artifacts.client._retry_config = retry_config
+        _apply_retry_config(artifacts.client, retry_config)
         artifacts.parser = CyberLeninkaParser()
         raw = await artifacts.client.search(query=query, limit=limit)
-        papers = await artifacts.parser.parse_search_results(raw)
+        papers = await _parse_with_parser(artifacts.parser, raw)
         return raw, papers
 
     if source in AVAILABLE_EXTERNAL_SOURCES:
         client_cls = AVAILABLE_EXTERNAL_SOURCES[source]
         artifacts.client = client_cls(timeout=runtime_config.timeout)
-        artifacts.client._retry_config = retry_config
+        _apply_retry_config(artifacts.client, retry_config)
         artifacts.parser = ExternalParser(source=source)
         raw = await artifacts.client.search(query=query, limit=limit)
-        papers = await artifacts.parser.parse_search_results(raw)
+        papers = await _parse_with_parser(artifacts.parser, raw)
         return raw, papers
 
     raise MisconfigurationError(
@@ -133,7 +179,9 @@ async def execute_source_search(
             if hasattr(parser_diagnostics, "as_dict"):
                 diagnostics = parser_diagnostics.as_dict()
 
-        raw_count = len(raw)
+        raw_items = _coerce_raw_list(raw)
+        diagnostic_events = _safe_event_dicts(diagnostics)
+        raw_count = len(raw_items)
         parsed_count = len(papers)
         source_health = {
             "success_rate": round((parsed_count / raw_count), 3) if raw_count else 0.0,
@@ -142,7 +190,7 @@ async def execute_source_search(
                 (
                     sum(
                         1
-                        for item in diagnostics.get("events", [])
+                        for item in diagnostic_events
                         if item.get("stage") == "parse" and item.get("severity") == "error"
                     )
                     / max(1, raw_count)
@@ -151,12 +199,12 @@ async def execute_source_search(
             ),
             "drift_detected_count": sum(
                 1
-                for item in diagnostics.get("events", [])
+                for item in diagnostic_events
                 if "drift" in str(item.get("reason", "")).lower()
             ),
             "warnings_count": sum(
                 1
-                for item in diagnostics.get("events", [])
+                for item in diagnostic_events
                 if item.get("severity") == "warning"
             ),
             "degraded": bool(diagnostics.get("degraded", False)),
@@ -167,7 +215,7 @@ async def execute_source_search(
             raw_count=raw_count,
             diagnostics=diagnostics,
             source_health=source_health,
-            raw_samples=raw[: max(1, sample_limit)],
+            raw_samples=[item for item in raw_items[: max(1, sample_limit)] if isinstance(item, dict)],
         )
     finally:
         await _close_resource(artifacts.parser)

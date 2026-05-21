@@ -1,24 +1,11 @@
-"""
-Qwen Service - Мини-сервис для работы с Qwen API
-Запускается как отдельный HTTP сервер с REST API
-Полностью автономный - без зависимостей от основного проекта
-
-Конфигурация загружается из .env файла (в корне проекта):
-- QWEN_SERVICE_HOST - хост (по умолчанию 127.0.0.1)
-- QWEN_SERVICE_PORT - порт (по умолчанию 8767)
-- QWEN_TOKEN - токен Qwen API
-- QWEN_API_KEY - API ключ для защиты сервиса
-- QWEN_MODEL - модель (по умолчанию qwen-coder)
-- QWEN_THINKING_ENABLED - режим мышления (по умолчанию true)
-- QWEN_SEARCH_ENABLED - поиск в интернете (по умолчанию true)
-- QWEN_AUTO_CONTINUE_ENABLED - авто-продолжение (по умолчанию true)
-- QWEN_MAX_CONTINUES - макс. количество продолжений (по умолчанию 5)
-"""
+"""Qwen Service: standalone REST API wrapper around Qwen provider client."""
 
 import logging
 import os
 import sys
 import time
+from contextlib import nullcontext
+from contextvars import ContextVar
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from threading import RLock
@@ -68,24 +55,72 @@ except Exception:
     RequestsConnectionError = Exception  # type: ignore[assignment]
     ReadTimeout = Exception  # type: ignore[assignment]
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = str(raw).strip().lower()
+    if value in {"1", "true", "yes", "on", "вкл"}:
+        return True
+    if value in {"0", "false", "no", "off", "выкл"}:
+        return False
+    logging.warning("Invalid boolean env %s=%r; using default %s", name, raw, default)
+    return default
+
+
+def _env_int(name: str, default: int, *, min_value: int | None = None, max_value: int | None = None) -> int:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        value = default
+    else:
+        try:
+            value = int(str(raw).strip())
+        except (TypeError, ValueError):
+            logging.warning("Invalid integer env %s=%r; using default %s", name, raw, default)
+            value = default
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
+
+def _env_float(name: str, default: float, *, min_value: float | None = None, max_value: float | None = None) -> float:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        value = default
+    else:
+        try:
+            value = float(str(raw).strip())
+        except (TypeError, ValueError):
+            logging.warning("Invalid float env %s=%r; using default %s", name, raw, default)
+            value = default
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
+
 # Настройки из переменных окружения
 DEFAULT_HOST = os.getenv("QWEN_SERVICE_HOST", "127.0.0.1")
-DEFAULT_PORT = int(os.getenv("QWEN_SERVICE_PORT", "8767"))
-DEFAULT_MODEL = os.getenv("QWEN_MODEL", "qwen3.6-plus")
-DEFAULT_THINKING_ENABLED = os.getenv("QWEN_THINKING_ENABLED", "true").lower() in ("true", "1", "yes", "вкл")
-DEFAULT_SEARCH_ENABLED = os.getenv("QWEN_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes", "вкл")
-DEFAULT_AUTO_CONTINUE_ENABLED = os.getenv("QWEN_AUTO_CONTINUE_ENABLED", "true").lower() in ("true", "1", "yes", "вкл")
-DEFAULT_MAX_CONTINUES = int(os.getenv("QWEN_MAX_CONTINUES", "5"))
-DEFAULT_STREAM_RETRIES = int(os.getenv("QWEN_STREAM_RETRIES", "2"))
-DEFAULT_HISTORY_RECOVERY_ATTEMPTS = int(os.getenv("QWEN_HISTORY_RECOVERY_ATTEMPTS", "15"))
-DEFAULT_HISTORY_RECOVERY_INTERVAL_SEC = float(os.getenv("QWEN_HISTORY_RECOVERY_INTERVAL_SEC", "2"))
+DEFAULT_PORT = _env_int("QWEN_SERVICE_PORT", 8767, min_value=1, max_value=65535)
+DEFAULT_MODEL = (os.getenv("QWEN_MODEL", "qwen3.6-plus") or "qwen3.6-plus").strip() or "qwen3.6-plus"
+DEFAULT_THINKING_ENABLED = _env_bool("QWEN_THINKING_ENABLED", True)
+DEFAULT_SEARCH_ENABLED = _env_bool("QWEN_SEARCH_ENABLED", True)
+DEFAULT_AUTO_CONTINUE_ENABLED = _env_bool("QWEN_AUTO_CONTINUE_ENABLED", True)
+DEFAULT_MAX_CONTINUES = _env_int("QWEN_MAX_CONTINUES", 5, min_value=1, max_value=20)
+DEFAULT_STREAM_RETRIES = _env_int("QWEN_STREAM_RETRIES", 2, min_value=0, max_value=10)
+DEFAULT_HISTORY_RECOVERY_ATTEMPTS = _env_int("QWEN_HISTORY_RECOVERY_ATTEMPTS", 3, min_value=1, max_value=60)
+DEFAULT_HISTORY_RECOVERY_INTERVAL_SEC = _env_float("QWEN_HISTORY_RECOVERY_INTERVAL_SEC", 1.0, min_value=0.2, max_value=30.0)
 
 # Конфигурация в памяти
 config = {
     "host": DEFAULT_HOST,
     "port": DEFAULT_PORT,
-    "token": os.getenv("QWEN_TOKEN", ""),
-    "api_key": os.getenv("QWEN_API_KEY", ""),
+    "token": (os.getenv("QWEN_TOKEN", "") or "").strip(),
+    "api_key": (os.getenv("QWEN_API_KEY", "") or "").strip(),
     "model": DEFAULT_MODEL,
     "thinking_enabled": DEFAULT_THINKING_ENABLED,
     "search_enabled": DEFAULT_SEARCH_ENABLED,
@@ -104,14 +139,16 @@ def setup_qwen_logging() -> Path:
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_file = logs_dir / "qwen_service.log"
 
-    level_name = os.getenv("LOG_LEVEL", "DEBUG").upper()
+    level_name = os.getenv("NICKELFRONT_LOG_LEVEL", os.getenv("LOG_LEVEL", "DEBUG")).upper()
     level = getattr(logging, level_name, logging.INFO)
 
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
     root_logger.setLevel(level)
 
-    formatter = logging.Formatter("%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d - %(message)s")
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)-8s | qwen_service | pid=%(process)d | %(name)s:%(lineno)d - %(message)s"
+    )
 
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setLevel(level)
@@ -128,7 +165,8 @@ def setup_qwen_logging() -> Path:
 
     root_logger.addHandler(stream_handler)
     root_logger.addHandler(file_handler)
-    logging.info("Logging initialized for qwen_service -> %s", log_file)
+    logging.getLogger("uvicorn.access").setLevel(max(level, logging.INFO))
+    logging.info("Logging initialized: service=qwen_service file=%s", log_file)
     return log_file
 
 
@@ -136,7 +174,14 @@ setup_qwen_logging()
 
 
 def save_config(current_config: dict[str, Any]) -> None:
-    """Persist runtime config into .env."""
+    """Persist runtime config into .env.
+
+    Keep all mutable runtime settings in sync with .env so a qwen_service
+    restart does not silently roll back tuning changed through /config.
+    """
+    if not env_path.exists():
+        env_path.touch()
+
     set_key(str(env_path), "QWEN_TOKEN", str(current_config.get("token", "")))
     set_key(str(env_path), "QWEN_API_KEY", str(current_config.get("api_key", "")))
     set_key(str(env_path), "QWEN_MODEL", str(current_config.get("model", DEFAULT_MODEL)))
@@ -148,20 +193,79 @@ def save_config(current_config: dict[str, Any]) -> None:
         str(current_config.get("auto_continue_enabled", DEFAULT_AUTO_CONTINUE_ENABLED)).lower(),
     )
     set_key(str(env_path), "QWEN_MAX_CONTINUES", str(current_config.get("max_continues", DEFAULT_MAX_CONTINUES)))
+    set_key(str(env_path), "QWEN_STREAM_RETRIES", str(current_config.get("stream_retries", DEFAULT_STREAM_RETRIES)))
+    set_key(
+        str(env_path),
+        "QWEN_HISTORY_RECOVERY_ATTEMPTS",
+        str(current_config.get("history_recovery_attempts", DEFAULT_HISTORY_RECOVERY_ATTEMPTS)),
+    )
+    set_key(
+        str(env_path),
+        "QWEN_HISTORY_RECOVERY_INTERVAL_SEC",
+        str(current_config.get("history_recovery_interval_sec", DEFAULT_HISTORY_RECOVERY_INTERVAL_SEC)),
+    )
 
 # Инициализация API
-qwen_token = config.get("token", "")
-qwen_api: QwenAPI | None = None
+qwen_token = str(config.get("token", "") or "").strip()
 
-if qwen_token:
-    qwen_api = QwenAPI(
-        token=qwen_token,
+# One QwenAPI instance is stateful: it owns requests.Session, Referer header,
+# session_id, last_message_id and local<->remote message-id maps. To support
+# parallel Qwen chats safely, qwen_service keeps a separate QwenAPI client per
+# chat session. Requests inside the same chat are serialized with a per-session
+# lock; different chat sessions can run in parallel up to the Celery qwen worker
+# count/provider limit.
+_control_qwen_api: QwenAPI | None = None
+_session_qwen_clients: dict[str, QwenAPI] = {}
+_session_locks: dict[str, RLock] = {}
+_qwen_registry_lock = RLock()
+qwen_request_lock = RLock()  # control/config endpoints only, not /messages
+_current_qwen_client: ContextVar[QwenAPI | None] = ContextVar("current_qwen_client", default=None)
+
+
+def _new_qwen_api() -> QwenAPI | None:
+    token = str(config.get("token", "") or "").strip()
+    if not token:
+        return None
+    return QwenAPI(
+        token=token,
         logger=lambda msg: logging.info(msg),
         default_model=str(config.get("model", DEFAULT_MODEL)),
     )
-    logging.info("Qwen API инициализирован: токен найден")
+
+
+def _ensure_control_qwen_api() -> QwenAPI | None:
+    global _control_qwen_api
+    if _control_qwen_api is None and str(config.get("token", "") or "").strip():
+        _control_qwen_api = _new_qwen_api()
+    return _control_qwen_api
+
+
+class _QwenApiProxy:
+    """Compatibility proxy for existing code that references global qwen_api."""
+
+    def _target(self) -> QwenAPI:
+        client = _current_qwen_client.get() or _ensure_control_qwen_api()
+        if client is None:
+            raise QwenProviderError("Qwen API is not initialized")
+        return client
+
+    def __bool__(self) -> bool:
+        return _current_qwen_client.get() is not None or _ensure_control_qwen_api() is not None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._target(), name, value)
+
+
+qwen_api = _QwenApiProxy()
+
+if qwen_token:
+    _control_qwen_api = _new_qwen_api()
+    logging.info("Qwen API initialized: token found")
 else:
-    logging.warning("Qwen токен не найден в .env!")
+    logging.warning("Qwen token not found in .env!")
 
 # Хранилище сессий в памяти
 active_sessions: dict[str, dict[str, Any]] = {}
@@ -169,22 +273,54 @@ active_sessions: dict[str, dict[str, Any]] = {}
 # Трекинг авто-продолжений: session_id -> {message_ids: set, count: int, last_message_id: int}
 auto_continue_tracker: dict[str, dict[str, Any]] = {}
 
-# The standalone Qwen client keeps mutable state (session_id, last_message_id,
-# requests.Session and continuation tracker). Multiple gateway workers may call this
-# service concurrently, so serialize provider calls to avoid mixed sessions and
-# `chat is in progress` races. FastAPI endpoints run this locked work in a thread
-# pool so /health and /config remain responsive while Qwen is processing.
-qwen_request_lock = RLock()
+
+def _get_session_lock(session_id: str) -> RLock:
+    with _qwen_registry_lock:
+        return _session_locks.setdefault(session_id, RLock())
+
+
+def _get_session_qwen_api(session_id: str) -> QwenAPI:
+    with _qwen_registry_lock:
+        client = _session_qwen_clients.get(session_id)
+        if client is None:
+            client = _new_qwen_api()
+            if client is None:
+                raise QwenProviderError("Qwen API is not initialized")
+            client.session_id = session_id
+            _session_qwen_clients[session_id] = client
+        return client
+
+
+def _register_session_qwen_api(session_id: str, client: QwenAPI) -> None:
+    with _qwen_registry_lock:
+        client.session_id = session_id
+        _session_qwen_clients[session_id] = client
+        _session_locks.setdefault(session_id, RLock())
+
+
+def _drop_session_qwen_api(session_id: str) -> None:
+    with _qwen_registry_lock:
+        _session_qwen_clients.pop(session_id, None)
+        _session_locks.pop(session_id, None)
+        auto_continue_tracker.pop(session_id, None)
+
+
+def _set_model_for_all_clients(model: str) -> None:
+    with _qwen_registry_lock:
+        if _control_qwen_api is not None:
+            _control_qwen_api.set_model(model)
+        for client in _session_qwen_clients.values():
+            client.set_model(model)
 
 
 def _call_qwen_locked(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Run any qwen_api operation under the shared provider lock."""
+    """Run control/list/config qwen_api operations under a small control lock."""
     with qwen_request_lock:
         return fn(*args, **kwargs)
 
 
 async def _run_qwen_locked(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Run a locked qwen_api operation without blocking the FastAPI event loop."""
+    """Run a control qwen_api operation without blocking the FastAPI event loop."""
     return await run_in_threadpool(_call_qwen_locked, fn, *args, **kwargs)
 
 
@@ -205,13 +341,61 @@ security = HTTPBearer(auto_error=False)
 
 
 def verify_token(credentials: HTTPAuthorizationCredentials | None = Security(security)) -> bool:
-    """Проверка API токена"""
+    """Documentation updated."""
     api_key = config.get("api_key", "")
     if not api_key:
         return True  # Если ключ не установлен, разрешаем все запросы
     if credentials is None:
         return False
     return credentials.credentials == api_key
+
+
+def _require_service_token(credentials: HTTPAuthorizationCredentials | None) -> None:
+    """Guard mutable qwen_service endpoints with the configured API key."""
+    if not verify_token(credentials):
+        raise HTTPException(status_code=401, detail="Неверный API ключ")
+
+
+def _public_config_payload() -> dict[str, Any]:
+    return {
+        "model": config.get("model", DEFAULT_MODEL),
+        "thinking_enabled": config.get("thinking_enabled", DEFAULT_THINKING_ENABLED),
+        "search_enabled": config.get("search_enabled", DEFAULT_SEARCH_ENABLED),
+        "auto_continue_enabled": config.get("auto_continue_enabled", DEFAULT_AUTO_CONTINUE_ENABLED),
+        "max_continues": config.get("max_continues", DEFAULT_MAX_CONTINUES),
+        "stream_retries": config.get("stream_retries", DEFAULT_STREAM_RETRIES),
+        "history_recovery_attempts": config.get("history_recovery_attempts", DEFAULT_HISTORY_RECOVERY_ATTEMPTS),
+        "history_recovery_interval_sec": config.get("history_recovery_interval_sec", DEFAULT_HISTORY_RECOVERY_INTERVAL_SEC),
+        "has_token": bool(config.get("token")),
+        "has_api_key": bool(config.get("api_key")),
+    }
+
+
+def _apply_runtime_config_update(update: "RuntimeConfigUpdate") -> dict[str, Any]:
+    """Apply partial runtime config without resetting omitted fields to defaults."""
+    if update.model is not None:
+        model = str(update.model or "").strip()
+        if model:
+            config["model"] = model
+    if update.thinking_enabled is not None:
+        config["thinking_enabled"] = bool(update.thinking_enabled)
+    if update.search_enabled is not None:
+        config["search_enabled"] = bool(update.search_enabled)
+    if update.auto_continue_enabled is not None:
+        config["auto_continue_enabled"] = bool(update.auto_continue_enabled)
+    if update.max_continues is not None:
+        config["max_continues"] = max(1, min(20, int(update.max_continues)))
+    if update.stream_retries is not None:
+        config["stream_retries"] = max(0, min(10, int(update.stream_retries)))
+    if update.history_recovery_attempts is not None:
+        config["history_recovery_attempts"] = max(1, min(60, int(update.history_recovery_attempts)))
+    if update.history_recovery_interval_sec is not None:
+        config["history_recovery_interval_sec"] = max(0.2, min(30.0, float(update.history_recovery_interval_sec)))
+
+    save_config(config)
+    if update.model is not None:
+        _set_model_for_all_clients(str(config.get("model", DEFAULT_MODEL)))
+    return _public_config_payload()
 
 
 # Модели данных
@@ -247,6 +431,17 @@ class ModelConfig(BaseModel):
     max_continues: int = DEFAULT_MAX_CONTINUES
 
 
+class RuntimeConfigUpdate(BaseModel):
+    model: str | None = None
+    thinking_enabled: bool | None = None
+    search_enabled: bool | None = None
+    auto_continue_enabled: bool | None = None
+    max_continues: int | None = None
+    stream_retries: int | None = None
+    history_recovery_attempts: int | None = None
+    history_recovery_interval_sec: float | None = None
+
+
 class TokenConfig(BaseModel):
     token: str
 
@@ -256,7 +451,7 @@ class APIKeyConfig(BaseModel):
 
 
 def _can_auto_continue(session_id: str) -> bool:
-    """Проверка возможности авто-продолжения"""
+    """Documentation updated."""
     if not config.get("auto_continue_enabled", DEFAULT_AUTO_CONTINUE_ENABLED):
         return False
 
@@ -268,7 +463,7 @@ def _can_auto_continue(session_id: str) -> bool:
 
 
 def _track_continuation(session_id: str, message_id: int):
-    """Отслеживание продолжения"""
+    """Documentation updated."""
     if session_id not in auto_continue_tracker:
         auto_continue_tracker[session_id] = {
             "message_ids": set(),
@@ -285,7 +480,7 @@ def _track_continuation(session_id: str, message_id: int):
 
 
 def _reset_continuation_tracker(session_id: str):
-    """Сброс трекера для новой сессии"""
+    """Documentation updated."""
     auto_continue_tracker[session_id] = {
         "message_ids": set(),
         "count": 0,
@@ -344,14 +539,18 @@ def _extract_latest_assistant_parts(
     return "", "", 0
 
 
-def _pick_fallback_model(current_model: str) -> str | None:
+def _pick_fallback_model(current_model: str, *, tried_models: set[str] | None = None) -> str | None:
     """
-    Pick next model when provider returns `Model not found`.
-    Priority:
-    1) models from provider /models response
-    2) static safe fallback list
+    Pick the next model when provider returns `Model not found`.
+
+    Keep track of already attempted models for the current request. Without that
+    guard a bad provider model list or a stale static fallback list can cycle
+    forever, for example qwen3.6-plus -> qwen3.5-plus -> qwen3.6-plus.
     """
     normalized_current = (current_model or "").strip().lower()
+    tried = {item.strip().lower() for item in (tried_models or set()) if item and item.strip()}
+    if normalized_current:
+        tried.add(normalized_current)
 
     provider_candidates: list[str] = []
     if qwen_api:
@@ -362,7 +561,8 @@ def _pick_fallback_model(current_model: str) -> str | None:
                 mid = str(m.get("id") or m.get("name") or "").strip()
                 if mid:
                     provider_candidates.append(mid)
-        except Exception:
+        except Exception as exc:
+            logging.warning("Failed to fetch provider model fallback list: %s", exc)
             provider_candidates = []
 
     static_candidates = ["qwen3.6-plus", "qwen3.5-plus", "qwen-plus", "qwen-max"]
@@ -379,7 +579,7 @@ def _pick_fallback_model(current_model: str) -> str | None:
         ordered.append(c)
 
     for candidate in ordered:
-        if candidate.lower() != normalized_current:
+        if candidate.lower() not in tried:
             return candidate
     return None
 
@@ -479,6 +679,9 @@ def _send_message_sync(
     )
 
     max_retries = max(0, int(config.get("stream_retries", DEFAULT_STREAM_RETRIES)))
+    attempted_model_fallbacks: set[str] = {str(config.get("model", DEFAULT_MODEL)).strip().lower()}
+    max_model_fallback_switches = 4
+    model_fallback_switches = 0
     attempt = 0
 
     while True:
@@ -543,20 +746,32 @@ def _send_message_sync(
 
             if "model not found" in err_text:
                 current_model = str(config.get("model", DEFAULT_MODEL))
-                fallback_model = _pick_fallback_model(current_model=current_model)
-                if fallback_model and fallback_model != current_model:
+                attempted_model_fallbacks.add(current_model.strip().lower())
+                fallback_model = _pick_fallback_model(
+                    current_model=current_model,
+                    tried_models=attempted_model_fallbacks,
+                )
+                if fallback_model and fallback_model != current_model and model_fallback_switches < max_model_fallback_switches:
+                    model_fallback_switches += 1
+                    attempted_model_fallbacks.add(fallback_model.strip().lower())
                     config["model"] = fallback_model
                     save_config(config)
-                    if qwen_api:
-                        qwen_api.set_model(fallback_model)
+                    _set_model_for_all_clients(fallback_model)
                     logging.warning(
-                        "Model '%s' is unavailable; switched to '%s' and retrying send (session=%s)",
+                        "Model '%s' is unavailable; switched to '%s' and retrying send (session=%s, fallback=%s/%s)",
                         current_model,
                         fallback_model,
                         session_id[-6:],
+                        model_fallback_switches,
+                        max_model_fallback_switches,
                     )
                     time.sleep(0.5)
                     continue
+                logging.error(
+                    "No usable Qwen fallback model left after provider model error: current=%s tried=%s",
+                    current_model,
+                    sorted(attempted_model_fallbacks),
+                )
 
             recovered_thinking, recovered_response, recovered_message_id = _recover_response_from_history(
                 session_id=session_id,
@@ -617,6 +832,22 @@ def _send_message_sync(
             logging.error(f"Error during message send: {e}")
             raise
 
+    if not response_text.strip():
+        recovered_thinking, recovered_response, recovered_message_id = _recover_response_from_history(
+            session_id=session_id,
+            min_message_id=max(0, message_id),
+        )
+        if recovered_response.strip():
+            thinking_text = recovered_thinking or thinking_text
+            response_text = recovered_response
+            if recovered_message_id > 0:
+                message_id = recovered_message_id
+                qwen_api.last_message_id = recovered_message_id
+            can_continue = False
+
+    if not response_text.strip() and message_id <= 0:
+        raise QwenProviderError("Qwen provider returned an empty response without message_id")
+
     return thinking_text, response_text, message_id, can_continue
 
 
@@ -638,7 +869,7 @@ def _continue_message_sync(
     can_continue = False
     chunks_count = 0
 
-    def on_complete_parts(thinking: str, response: str):
+    def on_parts(thinking: str, response: str):
         nonlocal thinking_text, response_text, last_activity, chunks_count
         thinking_text = thinking
         response_text = response
@@ -648,6 +879,12 @@ def _continue_message_sync(
         elapsed = last_activity - start_time
         if int(elapsed) % 15 == 0 and elapsed > 0:
             logging.info(f"  -> Continuing stream... {int(elapsed)}s, {chunks_count} chunks")
+
+    def on_complete_parts(thinking: str, response: str):
+        nonlocal thinking_text, response_text, last_activity
+        thinking_text = thinking
+        response_text = response
+        last_activity = time.time()
 
     def on_meta(meta: dict[str, Any]):
         nonlocal new_message_id, can_continue
@@ -668,6 +905,7 @@ def _continue_message_sync(
         try:
             qwen_api.continue_message(
                 message_id=message_id,
+                on_parts=on_parts,
                 on_complete_parts=on_complete_parts,
                 on_meta=on_meta,
             )
@@ -775,12 +1013,15 @@ def _continue_message_sync(
             logging.error(f"Error during continue: {e}")
             raise
 
+    if not response_text.strip() and new_message_id <= 0:
+        raise QwenProviderError("Qwen provider returned an empty continue response without message_id")
+
     return thinking_text, response_text, new_message_id, can_continue
 
 
 @app.get("/health")
 async def health_check():
-    """Проверка здоровья сервиса."""
+    """Documentation updated."""
     available = bool(qwen_api and config.get("token"))
     return {
         "status": "ok" if available else "error",
@@ -792,24 +1033,25 @@ async def health_check():
 
 @app.get("/config")
 async def get_config():
-    """Получение текущей конфигурации"""
-    return {
-        "model": config.get("model", DEFAULT_MODEL),
-        "thinking_enabled": config.get("thinking_enabled", DEFAULT_THINKING_ENABLED),
-        "search_enabled": config.get("search_enabled", DEFAULT_SEARCH_ENABLED),
-        "auto_continue_enabled": config.get("auto_continue_enabled", DEFAULT_AUTO_CONTINUE_ENABLED),
-        "max_continues": config.get("max_continues", DEFAULT_MAX_CONTINUES),
-        "stream_retries": config.get("stream_retries", DEFAULT_STREAM_RETRIES),
-        "history_recovery_attempts": config.get("history_recovery_attempts", DEFAULT_HISTORY_RECOVERY_ATTEMPTS),
-        "history_recovery_interval_sec": config.get("history_recovery_interval_sec", DEFAULT_HISTORY_RECOVERY_INTERVAL_SEC),
-        "has_token": bool(config.get("token")),
-        "has_api_key": bool(config.get("api_key")),
-    }
+    """Documentation updated."""
+    return _public_config_payload()
+
+
+@app.post("/config")
+async def update_config(
+    update: RuntimeConfigUpdate,
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
+):
+    """Partial runtime config update used by backend QwenServiceClient.update_config()."""
+    _require_service_token(credentials)
+    with qwen_request_lock:
+        updated = _apply_runtime_config_update(update)
+    return {"status": "ok", **updated}
 
 
 @app.get("/config/auto_continue")
 async def get_auto_continue_config():
-    """Получение настроек авто-продолжения"""
+    """Documentation updated."""
     return {
         "enabled": config.get("auto_continue_enabled", DEFAULT_AUTO_CONTINUE_ENABLED),
         "max_continues": config.get("max_continues", DEFAULT_MAX_CONTINUES),
@@ -817,74 +1059,86 @@ async def get_auto_continue_config():
 
 
 @app.post("/config/auto_continue")
-async def set_auto_continue_config(enabled: bool, max_continues: int | None = None):
-    """Настройка авто-продолжения"""
-    config["auto_continue_enabled"] = bool(enabled)
-    if max_continues is not None:
-        config["max_continues"] = max(1, min(20, int(max_continues)))
-    save_config(config)
-    return {"status": "ok", "enabled": config["auto_continue_enabled"], "max_continues": config["max_continues"]}
+async def set_auto_continue_config(
+    enabled: bool,
+    max_continues: int | None = None,
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
+):
+    """Documentation updated."""
+    _require_service_token(credentials)
+    update = RuntimeConfigUpdate(auto_continue_enabled=enabled, max_continues=max_continues)
+    with qwen_request_lock:
+        updated = _apply_runtime_config_update(update)
+    return {"status": "ok", "enabled": updated["auto_continue_enabled"], "max_continues": updated["max_continues"]}
 
 
 @app.post("/config/token")
-async def set_token(token_config: TokenConfig):
-    """Установка токена Qwen."""
-    global qwen_api
+async def set_token(
+    token_config: TokenConfig,
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
+):
+    """Documentation updated."""
+    _require_service_token(credentials)
+    global _control_qwen_api
+    token = (token_config.token or "").strip()
     with qwen_request_lock:
-        config["token"] = token_config.token
+        config["token"] = token
         save_config(config)
+        with _qwen_registry_lock:
+            _session_qwen_clients.clear()
+            _session_locks.clear()
+            auto_continue_tracker.clear()
+            _control_qwen_api = _new_qwen_api() if token else None
 
-        # Переинициализация API
-        qwen_api = QwenAPI(
-            token=token_config.token,
-            logger=lambda msg: logging.info(msg),
-            default_model=str(config.get("model", DEFAULT_MODEL)),
-        )
-
-    return {"status": "ok", "message": "Токен установлен"}
+    return {"status": "ok", "message": "Токен установлен" if token else "Токен очищен", "available": bool(qwen_api)}
 
 
 @app.post("/config/api_key")
-async def set_api_key(api_key_config: APIKeyConfig):
-    """Установка API ключа для защиты сервиса"""
-    config["api_key"] = api_key_config.api_key
+async def set_api_key(
+    api_key_config: APIKeyConfig,
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
+):
+    """Documentation updated."""
+    _require_service_token(credentials)
+    config["api_key"] = (api_key_config.api_key or "").strip()
     save_config(config)
     return {"status": "ok", "message": "API ключ установлен"}
 
 
 @app.get("/config/model")
 async def get_model():
-    """Получение текущей модели"""
+    """Documentation updated."""
     return {"model": config.get("model", DEFAULT_MODEL)}
 
 
 @app.post("/config/model")
-async def set_model(model_config: ModelConfig):
-    """Настройка модели и параметров."""
+async def set_model(
+    model_config: ModelConfig,
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
+):
+    """Documentation updated."""
+    _require_service_token(credentials)
+    update = RuntimeConfigUpdate(
+        model=model_config.model,
+        thinking_enabled=model_config.thinking_enabled,
+        search_enabled=model_config.search_enabled,
+        auto_continue_enabled=model_config.auto_continue_enabled,
+        max_continues=model_config.max_continues,
+    )
     with qwen_request_lock:
-        config["model"] = model_config.model
-        config["thinking_enabled"] = model_config.thinking_enabled
-        config["search_enabled"] = model_config.search_enabled
-        if hasattr(model_config, "auto_continue_enabled"):
-            config["auto_continue_enabled"] = model_config.auto_continue_enabled
-        if hasattr(model_config, "max_continues"):
-            config["max_continues"] = model_config.max_continues
-        save_config(config)
+        updated = _apply_runtime_config_update(update)
 
-        if qwen_api:
-            qwen_api.set_model(model_config.model)
-
-    return {"status": "ok", "model": model_config.model}
+    return {"status": "ok", "model": updated["model"]}
 
 
 @app.get("/models")
 async def list_models(credentials: HTTPAuthorizationCredentials | None = Security(security)):
-    """Получение списка доступных моделей"""
+    """Documentation updated."""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
 
     if not qwen_api:
-        raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
+        raise HTTPException(status_code=503, detail="Qwen API ?? ???????????????")
 
     try:
         models = await _run_qwen_locked(qwen_api.fetch_models)
@@ -898,15 +1152,19 @@ async def create_session(
     request: CreateSessionRequest | None = None,
     credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
-    """Создание новой сессии чата"""
+    """Documentation updated."""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
 
     if not qwen_api:
-        raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
+        raise HTTPException(status_code=503, detail="Qwen API ?? ???????????????")
 
     try:
-        session_id = await _run_qwen_locked(qwen_api.create_session)
+        client = _new_qwen_api()
+        if client is None:
+            raise HTTPException(status_code=503, detail="Qwen API ?? ???????????????")
+
+        session_id = await run_in_threadpool(client.create_session)
         logging.info(f"create_session returned: {session_id}")
         if not session_id:
             logging.error("create_session returned None")
@@ -915,15 +1173,17 @@ async def create_session(
         title = (request.title.strip() if request and request.title else "") or "Новый чат"
         if request and request.title:
             try:
-                await _run_qwen_locked(qwen_api.update_session_title, session_id, title)
+                await run_in_threadpool(client.update_session_title, session_id, title)
             except Exception as rename_exc:
                 logging.warning("Failed to set session title for %s: %s", session_id, rename_exc)
 
-        active_sessions[session_id] = {
-            "session_id": session_id,
-            "title": title,
-            "created_at": str(Path(__file__).stat().st_mtime),
-        }
+        _register_session_qwen_api(session_id, client)
+        with _qwen_registry_lock:
+            active_sessions[session_id] = {
+                "session_id": session_id,
+                "title": title,
+                "created_at": str(Path(__file__).stat().st_mtime),
+            }
 
         return {"session_id": session_id, "title": title}
     except HTTPException:
@@ -937,12 +1197,12 @@ async def create_session(
 async def list_sessions(
     credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
-    """Получение списка сессий"""
+    """Documentation updated."""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
 
     if not qwen_api:
-        raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
+        raise HTTPException(status_code=503, detail="Qwen API ?? ???????????????")
 
     try:
         sessions, _ = await _run_qwen_locked(qwen_api.fetch_sessions_page)
@@ -956,19 +1216,27 @@ async def get_session(
     session_id: str,
     credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
-    """Получение информации о сессии"""
+    """Documentation updated."""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
 
     if not qwen_api:
-        raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
+        raise HTTPException(status_code=503, detail="Qwen API ?? ???????????????")
 
     try:
-        def _get_history() -> tuple[dict[str, Any], list[dict[str, Any]]]:
-            qwen_api.session_id = session_id
-            return qwen_api.fetch_history(session_id)
+        client = _get_session_qwen_api(session_id)
+        session_lock = _get_session_lock(session_id)
 
-        history, messages = await _run_qwen_locked(_get_history)
+        def _get_history() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            with session_lock:
+                token = _current_qwen_client.set(client)
+                try:
+                    client.session_id = session_id
+                    return client.fetch_history(session_id)
+                finally:
+                    _current_qwen_client.reset(token)
+
+        history, messages = await run_in_threadpool(_get_history)
         return {"session_id": session_id, "history": history, "messages": messages}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -979,17 +1247,26 @@ async def delete_session(
     session_id: str,
     credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
-    """Удаление сессии"""
+    """Documentation updated."""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
 
     if not qwen_api:
-        raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
+        raise HTTPException(status_code=503, detail="Qwen API ?? ???????????????")
 
     try:
-        success = await _run_qwen_locked(qwen_api.delete_session, session_id)
-        if success and session_id in active_sessions:
-            del active_sessions[session_id]
+        client = _get_session_qwen_api(session_id)
+        session_lock = _get_session_lock(session_id)
+
+        def _delete() -> bool:
+            with session_lock:
+                return bool(client.delete_session(session_id))
+
+        success = await run_in_threadpool(_delete)
+        if success:
+            with _qwen_registry_lock:
+                active_sessions.pop(session_id, None)
+            _drop_session_qwen_api(session_id)
         return {"status": "ok", "deleted": success}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1001,18 +1278,27 @@ async def rename_session(
     title_data: dict[str, str],
     credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
-    """Переименование сессии"""
+    """Documentation updated."""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
 
     if not qwen_api:
-        raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
+        raise HTTPException(status_code=503, detail="Qwen API ?? ???????????????")
 
     title = title_data.get("title", "Новый чат")
     try:
-        success = await _run_qwen_locked(qwen_api.update_session_title, session_id, title)
-        if success and session_id in active_sessions:
-            active_sessions[session_id]["title"] = title
+        client = _get_session_qwen_api(session_id)
+        session_lock = _get_session_lock(session_id)
+
+        def _rename() -> bool:
+            with session_lock:
+                return bool(client.update_session_title(session_id, title))
+
+        success = await run_in_threadpool(_rename)
+        if success:
+            with _qwen_registry_lock:
+                if session_id in active_sessions:
+                    active_sessions[session_id]["title"] = title
         return {"status": "ok", "title": title}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1020,9 +1306,9 @@ async def rename_session(
 
 
 def _send_message_impl(request: SendMessageRequest) -> dict[str, Any]:
-    """Synchronous implementation of /messages protected by qwen_request_lock."""
+    """Synchronous implementation of /messages. Caller holds the per-session lock."""
     try:
-        with qwen_request_lock:
+        with nullcontext():
             # Сброс трекера для нового сообщения (не для продолжения)
             _reset_continuation_tracker(request.session_id)
 
@@ -1158,14 +1444,58 @@ async def send_message(
     request: SendMessageRequest,
     credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
-    """Отправка сообщения в чат с поддержкой авто-продолжения"""
+    """Send one chat message under a per-session lock.
+
+    Different session_id values run in parallel. Only messages inside the same
+    session wait for each other, so Qwen provider context/parent ids do not mix.
+    """
     if not verify_token(credentials):
-        raise HTTPException(status_code=401, detail="Неверный API ключ")
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
     if not qwen_api:
-        raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
+        raise HTTPException(status_code=503, detail="Qwen API is not initialized")
 
-    return await run_in_threadpool(_send_message_impl, request)
+    started = time.monotonic()
+    session_tail = request.session_id[-8:]
+    logging.info(
+        "Qwen message received: session=%s chars=%s thinking=%s search=%s auto_continue=%s files=%s",
+        session_tail,
+        len(request.message or ""),
+        request.thinking_enabled,
+        request.search_enabled,
+        request.auto_continue,
+        len(request.file_ids or []),
+    )
+
+    session_lock = _get_session_lock(request.session_id)
+    client = _get_session_qwen_api(request.session_id)
+
+    def _run_for_session() -> dict[str, Any]:
+        with session_lock:
+            token = _current_qwen_client.set(client)
+            try:
+                client.session_id = request.session_id
+                return _send_message_impl(request)
+            finally:
+                _current_qwen_client.reset(token)
+
+    try:
+        result = await run_in_threadpool(_run_for_session)
+        elapsed = time.monotonic() - started
+        logging.info(
+            "Qwen message finished: session=%s elapsed=%.2fs response_chars=%s thinking_chars=%s message_id=%s can_continue=%s",
+            session_tail,
+            elapsed,
+            len(str(result.get("response") or "")),
+            len(str(result.get("thinking") or "")),
+            result.get("message_id") or result.get("last_message_id"),
+            result.get("can_continue"),
+        )
+        return result
+    except Exception:
+        elapsed = time.monotonic() - started
+        logging.exception("Qwen message failed: session=%s elapsed=%.2fs", session_tail, elapsed)
+        raise
 
 
 
@@ -1173,9 +1503,9 @@ def _continue_message_impl(
     request: ContinueMessageRequest,
     auto_continue: bool | None = None,
 ) -> dict[str, Any]:
-    """Synchronous implementation of /messages/continue protected by qwen_request_lock."""
+    """Synchronous implementation of /messages/continue. Caller holds the per-session lock."""
     try:
-        with qwen_request_lock:
+        with nullcontext():
             # Определение параметра авто-продолжения
             do_auto_continue = auto_continue
             if do_auto_continue is None:
@@ -1292,14 +1622,26 @@ async def continue_message(
     auto_continue: bool | None = None,
     credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
-    """Продолжение ответа с поддержкой авто-продолжения"""
+    """Documentation updated."""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
 
     if not qwen_api:
-        raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
+        raise HTTPException(status_code=503, detail="Qwen API ?? ???????????????")
 
-    return await run_in_threadpool(_continue_message_impl, request, auto_continue)
+    session_lock = _get_session_lock(request.session_id)
+    client = _get_session_qwen_api(request.session_id)
+
+    def _run_for_session() -> dict[str, Any]:
+        with session_lock:
+            token = _current_qwen_client.set(client)
+            try:
+                client.session_id = request.session_id
+                return _continue_message_impl(request, auto_continue)
+            finally:
+                _current_qwen_client.reset(token)
+
+    return await run_in_threadpool(_run_for_session)
 
 
 @app.post("/files/upload")
@@ -1307,12 +1649,12 @@ async def upload_file(
     file_path_data: dict[str, str],
     credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
-    """Загрузка файла"""
+    """Documentation updated."""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
 
     if not qwen_api:
-        raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
+        raise HTTPException(status_code=503, detail="Qwen API ?? ???????????????")
 
     file_path = file_path_data.get("file_path", "")
     if not file_path:
@@ -1340,12 +1682,12 @@ async def get_file(
     file_id: str,
     credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
-    """Получение информации о файле"""
+    """Documentation updated."""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
 
     if not qwen_api:
-        raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
+        raise HTTPException(status_code=503, detail="Qwen API ?? ???????????????")
 
     if not hasattr(qwen_api, "fetch_files"):
         raise HTTPException(
@@ -1368,12 +1710,12 @@ async def get_file(
 async def get_user_info(
     credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
-    """Получение информации о пользователе"""
+    """Documentation updated."""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
 
     if not qwen_api:
-        raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
+        raise HTTPException(status_code=503, detail="Qwen API ?? ???????????????")
 
     try:
         user_info = await _run_qwen_locked(qwen_api.get_user_info)
@@ -1383,7 +1725,7 @@ async def get_user_info(
 
 
 def main():
-    """Точка входа для запуска сервиса"""
+    """Documentation updated."""
     # Настройка логирования
     logging.basicConfig(
         level=logging.INFO,
@@ -1393,15 +1735,15 @@ def main():
     host = config.get("host", DEFAULT_HOST)
     port = config.get("port", DEFAULT_PORT)
 
-    logging.info(f"Запуск Qwen Service на {host}:{port}")
-    logging.info(f"Модель по умолчанию: {config.get('model', DEFAULT_MODEL)}")
-    logging.info(f"Режим мышления: {config.get('thinking_enabled', DEFAULT_THINKING_ENABLED)}")
-    logging.info(f"Поиск в интернете: {config.get('search_enabled', DEFAULT_SEARCH_ENABLED)}")
-    logging.info(f"Авто-продолжение: {config.get('auto_continue_enabled', DEFAULT_AUTO_CONTINUE_ENABLED)} (макс. {config.get('max_continues', DEFAULT_MAX_CONTINUES)})")
+    logging.info(f"Starting Qwen Service on {host}:{port}")
+    logging.info(f"Default model: {config.get('model', DEFAULT_MODEL)}")
+    logging.info(f"Thinking enabled: {config.get('thinking_enabled', DEFAULT_THINKING_ENABLED)}")
+    logging.info(f"Web search enabled: {config.get('search_enabled', DEFAULT_SEARCH_ENABLED)}")
+    logging.info(f"Auto-continue: {config.get('auto_continue_enabled', DEFAULT_AUTO_CONTINUE_ENABLED)} (max {config.get('max_continues', DEFAULT_MAX_CONTINUES)})")
 
     if not config.get("token"):
-        logging.warning("⚠️  ВНИМАНИЕ: Токен Qwen не установлен!")
-        logging.warning("Запустите POST /config/token для установки токена")
+        logging.warning("WARNING: Qwen token is not set!")
+        logging.warning("Run POST /config/token to set the token")
 
     uvicorn.run(app, host=host, port=port)
 

@@ -15,5 +15,14 @@ if exist .venv\Scripts\activate.bat (
   exit /b 1
 )
 
+if /I not "%SKIP_BACKEND_MIGRATIONS%"=="1" (
+  echo Applying Alembic migrations...
+  python backend\apply_migrations.py
+  if errorlevel 1 (
+    echo Alembic migrations failed. Backend will not start.
+    exit /b 1
+  )
+)
+
 python backend\start_server.py
 endlocal

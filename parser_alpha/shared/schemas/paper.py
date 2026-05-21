@@ -2,7 +2,168 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+
+
+
+def _coerce_json_list(value: object, *, split_commas: bool = True) -> list:
+    """Coerce legacy DB/parser values to a JSON-list friendly shape.
+
+    API clients sometimes return authors/keywords as objects such as
+    {"name": "Alice Smith"}.  Treat those as text payloads, not as Python
+    repr strings like "{'name': 'Alice Smith'}".
+    """
+    import json
+    import re
+
+    semantic_keys = (
+        "name",
+        "fullName",
+        "displayName",
+        "display_name",
+        "authorName",
+        "value",
+        "text",
+        "title",
+        "label",
+        "term",
+        "subject",
+    )
+
+    def dedupe(items: list[str]) -> list[str]:
+        seen: set[str] = set()
+        output: list[str] = []
+        for item in items:
+            text = str(item).strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(text)
+        return output
+
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        for key in semantic_keys:
+            if key in value:
+                extracted = _coerce_json_list(value.get(key), split_commas=split_commas)
+                if extracted:
+                    return extracted
+        output: list[str] = []
+        for item in value.values():
+            output.extend(_coerce_json_list(item, split_commas=split_commas))
+        return dedupe(output)
+    if isinstance(value, (list, tuple, set)):
+        output: list[str] = []
+        for item in value:
+            output.extend(_coerce_json_list(item, split_commas=split_commas))
+        return dedupe(output)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, (list, tuple, set, dict)):
+                return _coerce_json_list(parsed, split_commas=split_commas)
+            if isinstance(parsed, str) and parsed.strip():
+                return [parsed.strip()]
+        except Exception:
+            pass
+        pattern = r"[;,\n]+" if split_commas else r"[;\n]+"
+        parts = [part.strip() for part in re.split(pattern, text) if part.strip()]
+        return parts or [text]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _coerce_text_scalar(value: object, *, default: str | None = None) -> str | None:
+    """Unwrap scalar API/legacy fields without storing Python repr strings."""
+    import html
+    import re
+
+    semantic_keys = (
+        "value",
+        "text",
+        "content",
+        "title",
+        "name",
+        "display_name",
+        "displayName",
+        "fullName",
+        "authorName",
+        "url",
+        "URL",
+        "href",
+        "id",
+        "doi",
+        "date",
+        "publishedDate",
+        "publication_date",
+        "year",
+    )
+
+    def unwrap(item: object) -> object | None:
+        if item is None:
+            return None
+        if isinstance(item, (str, int, float)):
+            return item
+        if isinstance(item, dict):
+            for key in semantic_keys:
+                if key in item:
+                    candidate = unwrap(item.get(key))
+                    if candidate not in (None, ""):
+                        return candidate
+            for nested in item.values():
+                candidate = unwrap(nested)
+                if candidate not in (None, ""):
+                    return candidate
+            return None
+        if isinstance(item, (list, tuple, set)):
+            for nested in item:
+                candidate = unwrap(nested)
+                if candidate not in (None, ""):
+                    return candidate
+            return None
+        return item
+
+    unwrapped = unwrap(value)
+    if unwrapped is None:
+        return default
+    text = html.unescape(str(unwrapped))
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = " ".join(text.split()).strip()
+    return text or default
+
+
+def _coerce_json_dict(value: object) -> dict:
+    """Coerce legacy/NULL metadata values to a dict."""
+    import json
+
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            key_text = _coerce_text_scalar(key)
+            item_text = _coerce_text_scalar(item)
+            if key_text and item_text:
+                result[key_text] = item_text
+        return result
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return _coerce_json_dict(parsed)
+        except Exception:
+            return {}
+    return {}
 
 
 class PaperBase(BaseModel):
@@ -32,6 +193,62 @@ class PaperBase(BaseModel):
     quality_flags: list[str] = Field(default_factory=list, description="Quality/degradation flags from parser pipeline")
     schema_version: str | None = Field(default="2.0", description="Normalized record schema version")
 
+    @field_validator(
+        "title",
+        "journal",
+        "doi",
+        "abstract",
+        "full_text",
+        "source",
+        "source_id",
+        "url",
+        "pdf_url",
+        "pdf_local_path",
+        "processing_status",
+        "content_task_id",
+        "processing_error",
+        "summary_ru",
+        "analysis_ru",
+        "translation_ru",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_scalar_text_fields(cls, value, info: ValidationInfo):
+        if info.field_name in {"title", "source"} and isinstance(value, str) and value.strip() == "":
+            return ""
+        return _coerce_text_scalar(value)
+
+    @field_validator("authors", "keywords", "quality_flags", mode="before")
+    @classmethod
+    def _normalize_list_fields(cls, value, info: ValidationInfo):
+        # Author names commonly contain commas ("Smith, John"). Split authors
+        # only on stronger delimiters, while keywords/quality flags still accept
+        # comma-separated legacy strings.
+        return _coerce_json_list(value, split_commas=info.field_name != "authors")
+
+    @field_validator("provenance", mode="before")
+    @classmethod
+    def _normalize_provenance(cls, value):
+        return _coerce_json_dict(value)
+
+    @field_validator("parse_confidence", mode="before")
+    @classmethod
+    def _normalize_parse_confidence(cls, value):
+        if value in (None, ""):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if number > 1 and number <= 100:
+            number = number / 100
+        return max(0.0, min(1.0, number))
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _normalize_schema_version(cls, value):
+        return _coerce_text_scalar(value, default="2.0") or "2.0"
+
 
 class PaperCreate(PaperBase):
     """Схема для создания статьи."""
@@ -46,8 +263,7 @@ class Paper(PaperBase):
     created_at: datetime | None = Field(None, description="Дата добавления в БД")
     updated_at: datetime | None = Field(None, description="Дата обновления")
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PaperSearchRequest(BaseModel):

@@ -100,12 +100,17 @@ class QueryTranslator:
 
         cached = self.cache.get(raw, source_lang=source_lang, target_lang=target)
         if cached and cached.translated_text:
-            return self._result(raw, cached.translated_text, source_lang, target, f"cache:{cached.engine}", "cache_hit")
+            cached_text = QwenTranslationAdapter._clean_translation_output(cached.translated_text)
+            if QwenTranslationAdapter._is_usable_translation(raw, cached_text, target_lang=target):
+                return self._result(raw, cached_text, source_lang, target, f"cache:{cached.engine}", "cache_hit")
+            logger.warning("Cached query translation rejected and purged for '{}': engine={}", raw, cached.engine)
+            self.cache.delete(raw, source_lang=source_lang, target_lang=target)
 
         if self._google_translator_cls is not None:
             try:
                 translated = self._translate_cached_local(raw, source_lang, target)
-                if translated and translated != raw:
+                translated = QwenTranslationAdapter._clean_translation_output(translated)
+                if QwenTranslationAdapter._is_usable_translation(raw, translated, target_lang=target):
                     self.cache.set(
                         original_text=raw,
                         translated_text=translated,
@@ -119,7 +124,8 @@ class QueryTranslator:
 
         if self.qwen_enabled:
             translated = self.qwen.translate(raw, target_lang=target, source_lang=source_lang)
-            if translated and translated != raw:
+            if QwenTranslationAdapter._is_usable_translation(raw, translated or "", target_lang=target):
+                assert translated is not None
                 self.cache.set(
                     original_text=raw,
                     translated_text=translated,

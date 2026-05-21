@@ -10,7 +10,13 @@ Modules:
 
 from .base_client import BaseAPIClient
 from .base_parser import BaseParser
-from .deduplication import DeduplicationResult, Deduplicator, MergedRecord, check_duplicate
+from .deduplication import (
+    DeduplicationResult,
+    Deduplicator,
+    MergedRecord,
+    check_duplicate,
+    normalize_patent_identifier,
+)
 from .normalization import (
     clean_text,
     derive_article_url,
@@ -36,6 +42,7 @@ __all__ = [
     "DeduplicationResult",
     "MergedRecord",
     "check_duplicate",
+    "normalize_patent_identifier",
     "clean_text",
     "derive_article_url",
     "normalize_authors",

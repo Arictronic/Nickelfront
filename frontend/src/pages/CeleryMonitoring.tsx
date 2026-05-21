@@ -82,6 +82,7 @@ export default function CeleryMonitoring() {
   const [stoppingQueues, setStoppingQueues] = useState(false);
   const [recoverMessage, setRecoverMessage] = useState<string | null>(null);
   const [queueStopMessage, setQueueStopMessage] = useState<string | null>(null);
+  const [recoverLimit, setRecoverLimit] = useState(500);
 
   const [status, setStatus] = useState<CeleryStatus | null>(null);
   const [workers, setWorkers] = useState<WorkerInfo[]>([]);
@@ -175,12 +176,25 @@ export default function CeleryMonitoring() {
     setRefreshing(false);
   };
 
+  const normalizeRecoverLimit = (value: unknown) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return 100;
+    return Math.max(1, Math.min(5000, Math.floor(parsed)));
+  };
+
   const recoverPaperStatuses = async () => {
-    if (!window.confirm("Поставить все статьи в очередь повторной обработки статусов (PDF + AI)?")) return;
+    const normalizedLimit = normalizeRecoverLimit(recoverLimit);
+    setRecoverLimit(normalizedLimit);
+    if (
+      !window.confirm(
+        `Поставить в очередь повторную обработку максимум ${normalizedLimit} статей? Это загрузит celery/qwen очереди.`
+      )
+    )
+      return;
     setRecovering(true);
     setRecoverMessage(null);
     try {
-      const res = await reprocessAllPapers({ limit: 5000 });
+      const res = await reprocessAllPapers({ limit: normalizedLimit });
       setRecoverMessage(`Поставлено в очередь: ${res.queued}`);
       await refreshAll();
     } catch (e: any) {
@@ -193,7 +207,7 @@ export default function CeleryMonitoring() {
   const stopQueues = async () => {
     if (
       !window.confirm(
-        "Остановить очереди Celery? Активные/ожидающие задачи будут отменены, а сообщения в очереди очищены."
+        "Остановить ВСЕ очереди Celery? Будут затронуты обычная celery-очередь и qwen-очередь. Активные/ожидающие задачи будут отменены, а сообщения в очередях очищены."
       )
     ) {
       return;
@@ -308,6 +322,19 @@ export default function CeleryMonitoring() {
           <button className="btn btn-danger" onClick={() => void stopQueues()} disabled={stoppingQueues}>
             {stoppingQueues ? "Остановка..." : "Остановить очереди"}
           </button>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span className="muted">лимит:</span>
+            <input
+              className="input"
+              type="number"
+              min={1}
+              max={5000}
+              value={recoverLimit}
+              onChange={(e) => setRecoverLimit(normalizeRecoverLimit(e.target.value))}
+              style={{ width: 96 }}
+              disabled={recovering}
+            />
+          </label>
           <button className="btn btn-primary" onClick={() => void recoverPaperStatuses()} disabled={recovering}>
             {recovering ? "Восстановление..." : "Восстановить статусы статей"}
           </button>

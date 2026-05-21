@@ -17,10 +17,26 @@ from app.services.qwen_client import QwenServiceClient
 from app.tasks.celery_app import celery_app
 
 
+def _qwen_queue_rate_limit() -> str | None:
+    """Return Celery rate_limit for Qwen gateway tasks.
+
+    For parallel Qwen workers the hard limiter should be the number of qwen worker
+    processes, not an accidental 300/h throttle. Set QWEN_QUEUE_TASK_RATE_LIMIT to
+    off/none/0/empty to disable Celery rate limiting.
+    """
+    raw = settings.QWEN_QUEUE_TASK_RATE_LIMIT
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value or value.lower() in {"0", "off", "none", "false", "no", "unlimited"}:
+        return None
+    return value
+
+
 @celery_app.task(
     bind=True,
     name="app.tasks.qwen.send_message",
-    rate_limit=settings.QWEN_QUEUE_TASK_RATE_LIMIT,
+    rate_limit=_qwen_queue_rate_limit(),
     acks_late=True,
     soft_time_limit=int(max(60, settings.QWEN_QUEUE_TIMEOUT + 30)),
     time_limit=int(max(90, settings.QWEN_QUEUE_TIMEOUT + 90)),
@@ -57,6 +73,18 @@ def qwen_send_message_task(
         auto_continue=auto_continue,
         timeout=timeout,
     )
+
+    # qwen_service returns the original prompt in the `message` field. For PDF/page
+    # processing this can be tens of thousands of characters and then Celery stores it
+    # in Redis result backend and prints part of it in `Task ... succeeded` logs. The
+    # caller only needs the generated response/thinking/session ids, so keep only a
+    # small diagnostic preview instead of the full prompt.
+    if isinstance(result, dict):
+        original_prompt = result.pop("message", None)
+        if isinstance(original_prompt, str):
+            result["prompt_preview"] = original_prompt[:240]
+            result["prompt_length"] = len(original_prompt)
+
     result.setdefault("task_id", task_id)
     result.setdefault("purpose", purpose)
     return result

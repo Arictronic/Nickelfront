@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any
+from urllib.parse import parse_qs, unquote, urlparse
 
 from parsers_pkg.base.normalization import clean_text, normalize_doi
 
@@ -18,6 +19,9 @@ SOURCE_TRUST = {
     "OpenAlex": 0.85,
     "Crossref": 0.9,
     "EuropePMC": 0.9,
+    "Rospatent": 0.85,
+    "PATENTSCOPE": 0.85,
+    "FreePatent": 0.65,
 }
 
 PATENT_SOURCES = {
@@ -25,6 +29,44 @@ PATENT_SOURCES = {
     "patentscope",
     "rospatent",
 }
+
+
+def normalize_patent_identifier(value: Any, source: str | None = None) -> str | None:
+    """Return a canonical patent identifier for cross-source deduplication.
+
+    Patent sources expose the same document in different shapes, for example
+    ``patents/1234567`` from FreePatent, ``RU1234567C1`` from Rospatent, or
+    ``...?docId=WO2020123456`` from PATENTSCOPE. The normalizer keeps country
+    and kind codes when present and adds the Russian ``RU`` prefix only for
+    numeric IDs from Russian patent sources.
+    """
+    raw = clean_text(str(value) if value is not None else None)
+    if not raw:
+        return None
+
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.netloc:
+        query = parse_qs(parsed.query)
+        for key in ("docId", "id", "number"):
+            values = query.get(key) or query.get(key.lower())
+            if values:
+                raw = values[0]
+                break
+        else:
+            path_parts = [part for part in parsed.path.split("/") if part]
+            raw = path_parts[-1] if path_parts else raw
+
+    raw = unquote(str(raw)).strip()
+    raw = re.sub(r"^(?:patents?|patent|doc|docs)/+", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"[\s_./\-]+", "", raw).upper()
+    raw = re.sub(r"[^A-Z0-9]", "", raw)
+    if not raw:
+        return None
+
+    normalized_source = (source or "").strip().lower()
+    if raw.isdigit() and normalized_source in {"freepatent", "rospatent"} and len(raw) >= 5:
+        return f"RU{raw}"
+    return raw
 
 
 def is_patent_record(paper: dict[str, Any]) -> bool:
@@ -71,6 +113,7 @@ class Deduplicator:
         title: str,
         doi: str | None = None,
         source_id: str | None = None,
+        url: str | None = None,
         abstract: str | None = None,
         publication_year: int | None = None,
         source: str | None = None,
@@ -82,7 +125,7 @@ class Deduplicator:
                 return result
 
         if source_id:
-            result = self._check_by_source_id(source_id)
+            result = self._check_by_source_id(source_id, source=source, journal=journal, url=url)
             if result.is_duplicate:
                 return result
 
@@ -121,12 +164,67 @@ class Deduplicator:
             title=paper.get("title", ""),
             doi=paper.get("doi"),
             source_id=paper.get("source_id"),
+            url=paper.get("url"),
             abstract=paper.get("abstract"),
             publication_year=publication_year,
             source=paper.get("source"),
             journal=paper.get("journal"),
         )
         return result.is_duplicate, result.reason
+
+    def find_duplicate_record(self, paper: dict[str, Any]) -> dict[str, Any] | None:
+        """Return the existing record that would be considered a duplicate."""
+        doi = normalize_doi(str(paper.get("doi") or ""))
+        if doi:
+            for existing in self.existing_papers:
+                if normalize_doi(str(existing.get("doi") or "")) == doi:
+                    return existing
+
+        source_id = str(paper.get("source_id") or "").strip()
+        if source_id:
+            incoming_patent_key = None
+            if is_patent_record(paper):
+                incoming_patent_key = normalize_patent_identifier(source_id, source=paper.get("source"))
+                incoming_patent_key = incoming_patent_key or normalize_patent_identifier(
+                    paper.get("url"),
+                    source=paper.get("source"),
+                )
+            for existing in self.existing_papers:
+                existing_source_id = str(existing.get("source_id") or "").strip()
+                if existing_source_id and existing_source_id == source_id:
+                    return existing
+                if incoming_patent_key and is_patent_record(existing):
+                    existing_patent_key = normalize_patent_identifier(
+                        existing_source_id or existing.get("url"),
+                        source=existing.get("source"),
+                    )
+                    if existing_patent_key and existing_patent_key == incoming_patent_key:
+                        return existing
+
+        if is_patent_record(paper):
+            return None
+
+        publication_year = None
+        publication_date = paper.get("publication_date")
+        if hasattr(publication_date, "year"):
+            publication_year = publication_date.year
+        elif isinstance(publication_date, str) and len(publication_date) >= 4 and publication_date[:4].isdigit():
+            publication_year = int(publication_date[:4])
+
+        best = self._best_title_year_match(str(paper.get("title") or ""), publication_year)
+        if best and best[1] >= TITLE_YEAR_SIMILARITY_THRESHOLD:
+            return best[0]
+
+        best = self._best_title_match(str(paper.get("title") or ""))
+        if best and best[1] >= TITLE_SIMILARITY_THRESHOLD:
+            return best[0]
+
+        abstract = str(paper.get("abstract") or "")
+        if abstract:
+            best = self._best_content_match(str(paper.get("title") or ""), abstract)
+            if best and best[1] >= 0.75:
+                return best[0]
+        return None
 
     def add_paper(self, paper: dict[str, Any]) -> None:
         self.add_existing_paper(paper)
@@ -190,8 +288,21 @@ class Deduplicator:
 
         return DeduplicationResult(is_duplicate=False, confidence=0.0, reason="DOI not found in existing papers")
 
-    def _check_by_source_id(self, source_id: str) -> DeduplicationResult:
+    def _check_by_source_id(
+        self,
+        source_id: str,
+        *,
+        source: str | None = None,
+        journal: str | None = None,
+        url: str | None = None,
+    ) -> DeduplicationResult:
         source_id = str(source_id).strip()
+        incoming_is_patent = is_patent_record({"source": source, "journal": journal})
+        incoming_patent_key = normalize_patent_identifier(source_id, source=source) if incoming_is_patent else None
+        incoming_patent_key = incoming_patent_key or (
+            normalize_patent_identifier(url, source=source) if incoming_is_patent and url else None
+        )
+
         for paper in self.existing_papers:
             existing_source_id = str(paper.get("source_id", "")).strip()
             if existing_source_id and existing_source_id == source_id:
@@ -201,15 +312,28 @@ class Deduplicator:
                     reason="Exact source_id match",
                     matched_existing_id=paper.get("id"),
                 )
+
+            if incoming_patent_key and is_patent_record(paper):
+                existing_patent_key = normalize_patent_identifier(
+                    existing_source_id or paper.get("url"),
+                    source=paper.get("source"),
+                )
+                if existing_patent_key and existing_patent_key == incoming_patent_key:
+                    return DeduplicationResult(
+                        is_duplicate=True,
+                        confidence=0.98,
+                        reason="Canonical patent source_id match",
+                        matched_existing_id=paper.get("id"),
+                    )
+
         return DeduplicationResult(is_duplicate=False, confidence=0.0, reason="Source ID not found in existing papers")
 
-    def _check_by_title_and_year(self, title: str, publication_year: int | None) -> DeduplicationResult:
+    def _best_title_year_match(self, title: str, publication_year: int | None) -> tuple[dict[str, Any], float] | None:
         if not title or publication_year is None:
-            return DeduplicationResult(is_duplicate=False, confidence=0.0, reason="No title/year for duplicate check")
+            return None
 
         best_confidence = 0.0
         best_match: dict[str, Any] | None = None
-
         for paper in self.existing_papers:
             if is_patent_record(paper):
                 continue
@@ -232,6 +356,18 @@ class Deduplicator:
                 best_confidence = confidence
                 best_match = paper
 
+        if best_match is None:
+            return None
+        return best_match, best_confidence
+
+    def _check_by_title_and_year(self, title: str, publication_year: int | None) -> DeduplicationResult:
+        if not title or publication_year is None:
+            return DeduplicationResult(is_duplicate=False, confidence=0.0, reason="No title/year for duplicate check")
+
+        best = self._best_title_year_match(title, publication_year)
+        best_confidence = best[1] if best else 0.0
+        best_match = best[0] if best else None
+
         if best_confidence >= TITLE_YEAR_SIMILARITY_THRESHOLD:
             return DeduplicationResult(
                 is_duplicate=True,
@@ -246,13 +382,12 @@ class Deduplicator:
             reason=f"Title+year similarity below threshold: {best_confidence:.2f}",
         )
 
-    def _check_by_title_similarity(self, title: str) -> DeduplicationResult:
+    def _best_title_match(self, title: str) -> tuple[dict[str, Any], float] | None:
         if not title or not self.existing_papers:
-            return DeduplicationResult(is_duplicate=False, confidence=0.0, reason="No title or existing papers")
+            return None
 
         best_match = None
         best_confidence = 0.0
-
         for paper in self.existing_papers:
             if is_patent_record(paper):
                 continue
@@ -264,6 +399,18 @@ class Deduplicator:
             if confidence > best_confidence:
                 best_confidence = confidence
                 best_match = paper
+
+        if best_match is None:
+            return None
+        return best_match, best_confidence
+
+    def _check_by_title_similarity(self, title: str) -> DeduplicationResult:
+        if not title or not self.existing_papers:
+            return DeduplicationResult(is_duplicate=False, confidence=0.0, reason="No title or existing papers")
+
+        best = self._best_title_match(title)
+        best_confidence = best[1] if best else 0.0
+        best_match = best[0] if best else None
 
         if best_confidence >= TITLE_SIMILARITY_THRESHOLD:
             return DeduplicationResult(
@@ -279,13 +426,12 @@ class Deduplicator:
             reason=f"Title similarity below threshold: {best_confidence:.2f}",
         )
 
-    def _check_by_content_similarity(self, title: str, abstract: str) -> DeduplicationResult:
+    def _best_content_match(self, title: str, abstract: str) -> tuple[dict[str, Any], float] | None:
         if not title or not abstract or not self.existing_papers:
-            return DeduplicationResult(is_duplicate=False, confidence=0.0, reason="No content or existing papers")
+            return None
 
         best_match = None
         best_confidence = 0.0
-
         for paper in self.existing_papers:
             if is_patent_record(paper):
                 continue
@@ -301,6 +447,18 @@ class Deduplicator:
             if confidence > best_confidence:
                 best_confidence = confidence
                 best_match = paper
+
+        if best_match is None:
+            return None
+        return best_match, best_confidence
+
+    def _check_by_content_similarity(self, title: str, abstract: str) -> DeduplicationResult:
+        if not title or not abstract or not self.existing_papers:
+            return DeduplicationResult(is_duplicate=False, confidence=0.0, reason="No content or existing papers")
+
+        best = self._best_content_match(title, abstract)
+        best_confidence = best[1] if best else 0.0
+        best_match = best[0] if best else None
 
         if best_confidence >= 0.75:
             return DeduplicationResult(
@@ -348,6 +506,16 @@ def check_duplicate(
     publication_year: int | None = None,
     source: str | None = None,
     journal: str | None = None,
+    url: str | None = None,
 ) -> DeduplicationResult:
     deduplicator = Deduplicator(existing_papers)
-    return deduplicator.check_duplicate(title, doi, source_id, abstract, publication_year, source, journal)
+    return deduplicator.check_duplicate(
+        title=title,
+        doi=doi,
+        source_id=source_id,
+        url=url,
+        abstract=abstract,
+        publication_year=publication_year,
+        source=source,
+        journal=journal,
+    )

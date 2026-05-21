@@ -12,6 +12,42 @@ from parsers_pkg.base import BaseParser
 from shared.schemas.paper import Paper
 
 
+def _coerce_string_list(value: Any, *, split_commas: bool = True) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = " ".join(value.split()).strip()
+        if not text:
+            return []
+        pattern = r"[;,]" if split_commas else r"[;\n]+"
+        return [part.strip() for part in re.split(pattern, text) if part.strip()] or [text]
+    if isinstance(value, dict):
+        for key in ("name", "fullName", "displayName", "authorName", "value", "title", "text"):
+            if key in value:
+                extracted = _coerce_string_list(value.get(key), split_commas=split_commas)
+                if extracted:
+                    return extracted
+        result: list[str] = []
+        for item in value.values():
+            result.extend(_coerce_string_list(item, split_commas=split_commas))
+        return list(dict.fromkeys(result))
+    if isinstance(value, (list, tuple, set)):
+        result: list[str] = []
+        for item in value:
+            result.extend(_coerce_string_list(item, split_commas=split_commas))
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for item in result:
+            key = item.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
+    text = " ".join(str(value).split()).strip()
+    return [text] if text else []
+
+
 class CyberLeninkaParser(BaseParser):
     """Парсер для статей из CyberLeninka."""
     
@@ -62,13 +98,13 @@ class CyberLeninkaParser(BaseParser):
             
             return Paper(
                 title=item.get("title") or "Без названия",
-                authors=[a for a in (item.get("authors") or []) if a],
+                authors=_coerce_string_list(item.get("authors"), split_commas=False),
                 publication_date=publication_date,
                 journal=item.get("journal"),
                 doi=item.get("doi"),
                 abstract=item.get("abstract"),
                 full_text=None,
-                keywords=[k for k in (item.get("keywords") or []) if k],
+                keywords=_coerce_string_list(item.get("keywords")),
                 source=self.source,
                 source_id=item.get("source_id"),
                 url=item.get("url"),
@@ -87,13 +123,13 @@ class CyberLeninkaParser(BaseParser):
         
         return self.normalize_paper(Paper(
             title=metadata.get("title") or "Без названия",
-            authors=metadata.get("authors", []),
+            authors=_coerce_string_list(metadata.get("authors"), split_commas=False),
             publication_date=metadata.get("publication_date") or metadata.get("published_date"),
             journal=metadata.get("journal"),
             doi=metadata.get("doi"),
             abstract=metadata.get("abstract"),
             full_text=text,
-            keywords=metadata.get("keywords", []),
+            keywords=_coerce_string_list(metadata.get("keywords")),
             source=metadata.get("source", self.source),
             source_id=metadata.get("source_id"),
             url=metadata.get("url"),

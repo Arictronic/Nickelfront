@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.api.v1.endpoints.error_helpers import format_paper_db_error
 from app.db.models.paper import Paper as PaperModel
 from app.db.session import get_db
 from app.services.parse_job_history import add_parse_job
@@ -35,7 +36,6 @@ router = APIRouter(prefix="/papers", tags=["papers"])
 _PAPERS_COUNT_TTL_SECONDS = 5.0
 _papers_count_cache: dict[str, tuple[int, float]] = {}
 _PDF_PROXY_TIMEOUT = httpx.Timeout(connect=4.0, read=45.0, write=10.0, pool=4.0)
-
 
 def _count_cache_key(source: str | None) -> str:
     return source or "__all__"
@@ -92,12 +92,16 @@ async def search_papers(
 ):
     """Поиск статей в локальной базе данных."""
     paper_service = PaperService(db)
-    papers = await paper_service.search(
-        query=request.query,
-        limit=request.limit,
-        sources=request.sources,
-        full_text_only=request.full_text_only,
-    )
+    try:
+        papers = await paper_service.search(
+            query=request.query,
+            limit=request.limit,
+            sources=request.sources,
+            full_text_only=request.full_text_only,
+        )
+    except Exception as exc:
+        logger.exception("Failed to search papers")
+        raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
 
     return PaperSearchResponse(
         papers=papers,
@@ -116,7 +120,11 @@ async def get_papers(
 ):
     """Получить список всех статей."""
     paper_service = PaperService(db)
-    return await paper_service.get_all(limit=limit, offset=offset, source=source)
+    try:
+        return await paper_service.get_all(limit=limit, offset=offset, source=source)
+    except Exception as exc:
+        logger.exception("Failed to list papers")
+        raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
 
 
 @router.get("/count")
@@ -270,7 +278,11 @@ async def start_parsing_all(
 async def get_paper(paper_id: int, db: AsyncSession = Depends(get_db)):
     """Получить статью по ID."""
     paper_service = PaperService(db)
-    paper = await paper_service.get_by_id(paper_id)
+    try:
+        paper = await paper_service.get_by_id(paper_id)
+    except Exception as exc:
+        logger.exception("Failed to load paper {}", paper_id)
+        raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
 
     if not paper:
         raise HTTPException(status_code=404, detail="Статья не найдена")
@@ -281,7 +293,11 @@ async def get_paper(paper_id: int, db: AsyncSession = Depends(get_db)):
 @router.get("/id/{paper_id}/pdf")
 async def get_paper_pdf(paper_id: int, db: AsyncSession = Depends(get_db)):
     """Получить PDF статьи: локальный файл или редирект на внешний URL."""
-    paper = await PaperService(db).get_by_id(paper_id)
+    try:
+        paper = await PaperService(db).get_by_id(paper_id)
+    except Exception as exc:
+        logger.exception("Failed to load paper PDF metadata {}", paper_id)
+        raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
     if not paper:
         raise HTTPException(status_code=404, detail="Статья не найдена")
 
@@ -340,7 +356,11 @@ async def reprocess_paper_content(
 ):
     """Поставить статью в очередь на повторную PDF+AI обработку."""
     paper_service = PaperService(db)
-    paper = await paper_service.get_by_id(paper_id)
+    try:
+        paper = await paper_service.get_by_id(paper_id)
+    except Exception as exc:
+        logger.exception("Failed to load paper for reprocess {}", paper_id)
+        raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
     if not paper:
         raise HTTPException(status_code=404, detail="Статья не найдена")
 
@@ -368,7 +388,11 @@ async def reprocess_all_papers(
 ):
     """Поставить в очередь постобработку набора существующих статей."""
     paper_service = PaperService(db)
-    papers = await paper_service.get_all(limit=limit, offset=0, source=source)
+    try:
+        papers = await paper_service.get_all(limit=limit, offset=0, source=source)
+    except Exception as exc:
+        logger.exception("Failed to load papers for reprocess-all")
+        raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
 
     queued = 0
     task_ids: list[str] = []
@@ -394,7 +418,11 @@ async def delete_paper(
 ):
     """Удалить статью."""
     paper_service = PaperService(db)
-    deleted = await paper_service.delete_paper(paper_id)
+    try:
+        deleted = await paper_service.delete_paper(paper_id)
+    except Exception as exc:
+        logger.exception("Failed to delete paper {}", paper_id)
+        raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
 
     if not deleted:
         raise HTTPException(status_code=404, detail="Статья не найдена")

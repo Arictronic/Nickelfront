@@ -8,6 +8,7 @@ interface AuthState {
   isAuthenticated: boolean;
   isLoading: boolean;
   isSessionChecking: boolean;
+  sessionError: string | null;
   login: (user: User, token: string, refreshToken: string) => void;
   logout: () => void;
   setToken: (token: string) => void;
@@ -15,6 +16,7 @@ interface AuthState {
   setUser: (user: User | null) => void;
   setAuthenticated: (value: boolean) => void;
   setSessionChecking: (value: boolean) => void;
+  setSessionError: (value: string | null) => void;
   setLoading: (loading: boolean) => void;
 }
 
@@ -55,15 +57,16 @@ export const useAuthStore = create<AuthState>((set) => ({
   isAuthenticated: hasStoredAuth(),
   isLoading: false,
   isSessionChecking: false,
+  sessionError: null,
   login: (user, token, refreshToken) => {
     setStoredToken(token);
     setStoredRefreshToken(refreshToken);
-    set({ user, token, refreshToken, isAuthenticated: true, isLoading: false });
+    set({ user, token, refreshToken, isAuthenticated: true, isLoading: false, sessionError: null });
   },
   logout: () => {
     setStoredToken(null);
     setStoredRefreshToken(null);
-    set({ user: null, token: null, refreshToken: null, isAuthenticated: false, isLoading: false });
+    set({ user: null, token: null, refreshToken: null, isAuthenticated: false, isLoading: false, sessionError: null });
   },
   setToken: (token) => {
     setStoredToken(token);
@@ -76,5 +79,6 @@ export const useAuthStore = create<AuthState>((set) => ({
   setUser: (user) => set({ user }),
   setAuthenticated: (value) => set({ isAuthenticated: value }),
   setSessionChecking: (value) => set({ isSessionChecking: value }),
+  setSessionError: (value) => set({ sessionError: value }),
   setLoading: (loading) => set({ isLoading: loading }),
 }));

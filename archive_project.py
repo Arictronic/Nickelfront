@@ -56,8 +56,11 @@ DEFAULT_EXCLUDE_DIR_NAMES = {
     ".svn",
     ".idea",
     ".vscode",
+    ".nickelfront_setup_state",
+    ".tmp_wheels",
 
     "archives",
+    "chroma_db",
 
     "__pycache__",
     ".pytest_cache",
@@ -80,6 +83,7 @@ DEFAULT_EXCLUDE_DIR_NAMES = {
     "venv",
     "env",
     "ENV",
+    "runtime",
 
     ".cache",
     "cache",
@@ -87,6 +91,9 @@ DEFAULT_EXCLUDE_DIR_NAMES = {
     "temp",
     "logs",
     "log",
+    "redis",
+    "ml",
+    "models",
 
     ".DS_Store",
 }
@@ -271,22 +278,30 @@ EXCLUDE_DIR_PATTERNS = {
 
     "archives",
     "archives/**",
+}
 
+
+ROOT_EXCLUDE_DIR_NAMES = {
+    "archives",
     "data",
-    "data/**",
     "storage",
-    "storage/**",
     "uploads",
-    "uploads/**",
     "media",
-    "media/**",
-
     "checkpoints",
-    "checkpoints/**",
     "ml_models",
-    "ml_models/**",
     "models_cache",
-    "models_cache/**",
+    ".tmp_wheels",
+    "chroma_db",
+    "redis",
+    "runtime",
+    "ml",
+    "models",
+    ".nickelfront_setup_state",
+}
+
+
+ROOT_EXCLUDE_DIR_GLOBS = {
+    "venv_broken*",
 }
 
 
@@ -325,6 +340,15 @@ MARKDOWN_EXTENSIONS = {
 }
 
 
+LLM_EXCLUDE_FILE_PATTERNS = {
+    "*.har",
+    "*.csv",
+    "*.parquet",
+    "*.rdb",
+    "*.ipynb",
+}
+
+
 # -----------------------------------------------------------------------------
 # Gitignore parser
 # -----------------------------------------------------------------------------
@@ -342,7 +366,7 @@ def normalize_rel(path: Path | str) -> str:
     return str(path).replace(os.sep, "/").strip("/")
 
 
-def parse_gitignore_file(path: Path) -> list[IgnoreRule]:
+def parse_gitignore_file(path: Path, root: Path) -> list[IgnoreRule]:
     rules: list[IgnoreRule] = []
 
     if not path.exists() or not path.is_file():
@@ -354,6 +378,7 @@ def parse_gitignore_file(path: Path) -> list[IgnoreRule]:
         return rules
 
     base_dir = path.parent
+    base_dir_rel = normalize_rel(base_dir.relative_to(root))
 
     for raw_line in lines:
         line = raw_line.strip()
@@ -384,18 +409,45 @@ def parse_gitignore_file(path: Path) -> list[IgnoreRule]:
                 negated=negated,
                 directory_only=directory_only,
                 anchored=anchored,
-                source=str(base_dir),
+                source=base_dir_rel,
             )
         )
 
     return rules
 
 
-def load_gitignore_rules(root: Path) -> list[IgnoreRule]:
+def _load_root_gitignore_rules(root: Path) -> list[IgnoreRule]:
     """
     Загружает только корневой .gitignore.
     """
-    return parse_gitignore_file(root / ".gitignore")
+    return parse_gitignore_file(root / ".gitignore", root)
+
+
+def load_gitignore_rules(root: Path) -> list[IgnoreRule]:
+    """
+    Загружает все .gitignore внутри проекта, кроме жёстко исключённых директорий.
+    """
+    rules: list[IgnoreRule] = []
+
+    for current_root, dir_names, file_names in os.walk(root):
+        current_path = Path(current_root)
+
+        kept_dirs: list[str] = []
+        for dir_name in dir_names:
+            abs_dir = current_path / dir_name
+            rel_dir = normalize_rel(abs_dir.relative_to(root))
+
+            if is_hard_excluded_dir(rel_dir, dir_name):
+                continue
+
+            kept_dirs.append(dir_name)
+
+        dir_names[:] = kept_dirs
+
+        if ".gitignore" in file_names:
+            rules.extend(parse_gitignore_file(current_path / ".gitignore", root))
+
+    return rules
 
 
 def path_matches_pattern(rel_path: str, pattern: str) -> bool:
@@ -431,8 +483,68 @@ def path_matches_pattern(rel_path: str, pattern: str) -> bool:
     return False
 
 
+def match_gitignore_rule(rel_path: str, is_dir: bool, rule: IgnoreRule) -> bool:
+    rel_path = normalize_rel(rel_path)
+    rule_source = normalize_rel(rule.source)
+    pattern = normalize_rel(rule.pattern)
+
+    if rule_source:
+        if rel_path == rule_source:
+            scoped_path = ""
+        elif rel_path.startswith(rule_source + "/"):
+            scoped_path = rel_path[len(rule_source) + 1 :]
+        else:
+            return False
+    else:
+        scoped_path = rel_path
+
+    if not scoped_path:
+        return False
+
+    if rule.anchored:
+        matched = (
+            scoped_path == pattern
+            or scoped_path.startswith(pattern.rstrip("/") + "/")
+            or fnmatch.fnmatch(scoped_path, pattern)
+            or fnmatch.fnmatch("/" + scoped_path, "/" + pattern)
+        )
+    else:
+        matched = path_matches_pattern(scoped_path, pattern)
+
+    if matched:
+        return True
+
+    if not rule.directory_only:
+        return False
+
+    parent_candidates = list(Path(scoped_path).parents)
+    if is_dir:
+        parent_candidates.insert(0, Path(scoped_path))
+
+    for parent in parent_candidates:
+        parent_str = normalize_rel(parent)
+        if not parent_str or parent_str == ".":
+            continue
+
+        if rule.anchored:
+            if (
+                parent_str == pattern
+                or parent_str.startswith(pattern.rstrip("/") + "/")
+                or fnmatch.fnmatch(parent_str, pattern)
+            ):
+                return True
+        elif path_matches_pattern(parent_str, pattern):
+            return True
+
+    return False
+
+
 def matches_any(rel_path: str, patterns: Iterable[str]) -> bool:
     return any(path_matches_pattern(rel_path, pattern) for pattern in patterns)
+
+
+def name_matches_any(name: str, patterns: Iterable[str]) -> bool:
+    return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
 
 
 def is_root_env_file(rel_path: str) -> bool:
@@ -492,7 +604,7 @@ def is_markdown_file(rel_path: str) -> bool:
     return Path(normalize_rel(rel_path)).suffix.lower() in MARKDOWN_EXTENSIONS
 
 
-def is_disallowed_markdown_file(rel_path: str) -> bool:
+def is_disallowed_markdown_file(rel_path: str, no_markdown: bool = False) -> bool:
     """
     В архиве из markdown должны остаться только:
     - README.md в корне;
@@ -500,6 +612,9 @@ def is_disallowed_markdown_file(rel_path: str) -> bool:
     """
     if not is_markdown_file(rel_path):
         return False
+
+    if no_markdown:
+        return True
 
     if is_root_readme_file(rel_path):
         return False
@@ -533,6 +648,9 @@ def is_inside_hard_excluded_dir(rel_path: str) -> bool:
     parts = rel_path.split("/")
     for index, part in enumerate(parts[:-1]):
         parent = "/".join(parts[: index + 1])
+        if is_always_include_dir(parent):
+            continue
+
         if is_hard_excluded_dir(parent, part):
             return True
 
@@ -540,10 +658,50 @@ def is_inside_hard_excluded_dir(rel_path: str) -> bool:
 
 
 def is_hard_excluded_dir(rel_path: str, name: str) -> bool:
+    nested_excluded_names = {
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+        ".nox",
+        ".coverage",
+        "htmlcov",
+        "node_modules",
+        ".next",
+        ".nuxt",
+        ".svelte-kit",
+        "dist",
+        "build",
+        "coverage",
+        ".venv",
+        "venv",
+        "env",
+        "ENV",
+        ".cache",
+        "cache",
+        "tmp",
+        "temp",
+        "logs",
+        "log",
+    }
+
     if name in DEFAULT_EXCLUDE_DIR_NAMES:
         return True
 
-    return matches_any(rel_path, EXCLUDE_DIR_PATTERNS)
+    if name_matches_any(name, ROOT_EXCLUDE_DIR_GLOBS):
+        return True
+
+    normalized_rel_path = normalize_rel(rel_path)
+    parts = normalized_rel_path.split("/")
+
+    if parts and parts[0] in ROOT_EXCLUDE_DIR_NAMES:
+        return True
+
+    if any(part in nested_excluded_names for part in parts):
+        return True
+
+    return matches_any(normalized_rel_path, EXCLUDE_DIR_PATTERNS)
 
 
 def is_hard_excluded_file(rel_path: str, name: str) -> bool:
@@ -563,6 +721,10 @@ def is_hard_excluded_file(rel_path: str, name: str) -> bool:
     return False
 
 
+def is_llm_excluded_file(rel_path: str) -> bool:
+    return matches_any(rel_path, LLM_EXCLUDE_FILE_PATTERNS)
+
+
 def is_ignored_by_gitignore(rel_path: str, is_dir: bool, rules: list[IgnoreRule]) -> bool:
     """
     Упрощённая, но практичная обработка .gitignore.
@@ -571,14 +733,7 @@ def is_ignored_by_gitignore(rel_path: str, is_dir: bool, rules: list[IgnoreRule]
     ignored = False
 
     for rule in rules:
-        pattern = normalize_rel(rule.pattern)
-
-        if rule.directory_only and not is_dir:
-            parts = rel_path.split("/")
-            if pattern not in parts:
-                continue
-
-        matched = path_matches_pattern(rel_path, pattern)
+        matched = match_gitignore_rule(rel_path, is_dir=is_dir, rule=rule)
 
         if matched:
             ignored = not rule.negated
@@ -608,15 +763,15 @@ def should_include_dir(
     if not rel_dir:
         return True, "root"
 
+    if is_always_include_dir(rel_dir):
+        return True, "always-include-dir"
+
     # Жёсткие исключения первыми:
     # __pycache__, node_modules, archives и т.д.
     if is_hard_excluded_dir(rel_dir, dir_name):
         return False, "hard-excluded-dir"
 
     # Важные директории спасаем от .gitignore.
-    if is_always_include_dir(rel_dir):
-        return True, "always-include-dir"
-
     if is_inside_always_include_dir(rel_dir):
         return True, "inside-always-include-dir"
 
@@ -632,6 +787,8 @@ def should_include_file(
     gitignore_rules: list[IgnoreRule],
     file_size: int,
     max_file_size_bytes: int,
+    no_markdown: bool,
+    llm_mode: bool,
 ) -> tuple[bool, str]:
     rel_file = normalize_rel(rel_file)
 
@@ -650,6 +807,12 @@ def should_include_file(
     if is_hard_excluded_file(rel_file, file_name):
         return False, "hard-excluded-file"
 
+    if is_disallowed_markdown_file(rel_file, no_markdown=no_markdown):
+        return False, "disallowed-markdown"
+
+    if llm_mode and is_llm_excluded_file(rel_file):
+        return False, "llm-excluded-file"
+
     # Важные файлы включаем даже если .gitignore против.
     if is_always_include_file(rel_file):
         return True, "always-include-file"
@@ -658,12 +821,16 @@ def should_include_file(
     if is_inside_always_include_dir(rel_file):
         # Но markdown внутри allowlist-директории всё равно фильтруем:
         # README.md или docs/*.md — да, остальное markdown — нет.
-        if is_disallowed_markdown_file(rel_file):
+        if is_disallowed_markdown_file(rel_file, no_markdown=no_markdown):
             return False, "disallowed-markdown"
 
         # В docs/ включаем только markdown-файлы.
-        if rel_file.startswith("docs/") and not is_docs_markdown_file(rel_file):
-            return False, "docs-non-markdown"
+        if rel_file.startswith("docs/"):
+            if no_markdown:
+                return False, "markdown-disabled"
+
+            if not is_docs_markdown_file(rel_file):
+                return False, "docs-non-markdown"
 
         return True, "inside-always-include-dir"
 
@@ -680,6 +847,8 @@ def iter_project_files(
     root: Path,
     gitignore_rules: list[IgnoreRule],
     max_file_size_bytes: int,
+    no_markdown: bool,
+    llm_mode: bool,
     verbose: bool = False,
 ) -> tuple[list[Path], ArchiveStats]:
     stats = ArchiveStats()
@@ -723,6 +892,8 @@ def iter_project_files(
                 gitignore_rules=gitignore_rules,
                 file_size=file_size,
                 max_file_size_bytes=max_file_size_bytes,
+                no_markdown=no_markdown,
+                llm_mode=llm_mode,
             )
 
             if include:
@@ -815,6 +986,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Не учитывать .gitignore вообще. Жёсткие exclude/secret правила всё равно работают.",
     )
 
+    parser.add_argument(
+        "--no-markdown",
+        action="store_true",
+        help="Не включать в архив никакие markdown-файлы, включая README.md и docs/*.",
+    )
+
+    parser.add_argument(
+        "--llm-mode",
+        action="store_true",
+        help="Архив для нейросети: только основной код и конфиги, без markdown и локальных артефактов, но с корневым .env.",
+    )
+
     return parser.parse_args(argv)
 
 
@@ -851,8 +1034,56 @@ def collect_existing_dirs(root: Path, files: list[Path]) -> set[str]:
     return existing_dirs
 
 
+def is_expected_missing_in_mode(check: str, llm_mode: bool, no_markdown: bool) -> bool:
+    if (llm_mode or no_markdown) and check in {"README.md", "docs"}:
+        return True
+
+    return False
+
+
+def should_prompt_for_mode(argv: list[str]) -> bool:
+    if argv:
+        return False
+
+    if not sys.stdin or not sys.stdin.isatty():
+        return False
+
+    return True
+
+
+def prompt_archive_mode() -> str:
+    print()
+    print("Выберите режим архивации:")
+    print("1. Обычный режим")
+    print("   Основной код и конфиги, корневой .env включается, README.md и docs/*.md остаются.")
+    print("2. Без markdown")
+    print("   То же самое, но без всех markdown-файлов, включая README.md и docs/*.")
+    print("3. Режим для нейросети")
+    print("   Только основной код и конфиги, без markdown и лишних локальных артефактов, но с корневым .env.")
+    print()
+
+    while True:
+        choice = input("Введите 1, 2 или 3: ").strip()
+
+        if choice in {"1", "2", "3"}:
+            return choice
+
+        print("Неверный выбор. Пожалуйста, введите 1, 2 или 3.")
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv or sys.argv[1:])
+    raw_argv = argv or sys.argv[1:]
+
+    if should_prompt_for_mode(raw_argv):
+        choice = prompt_archive_mode()
+        if choice == "2":
+            raw_argv = ["--no-markdown"]
+        elif choice == "3":
+            raw_argv = ["--llm-mode"]
+
+    args = parse_args(raw_argv)
+    llm_mode = args.llm_mode
+    effective_no_markdown = args.no_markdown or llm_mode
 
     root = args.root.resolve()
 
@@ -874,6 +1105,8 @@ def main(argv: list[str] | None = None) -> int:
         root=root,
         gitignore_rules=gitignore_rules,
         max_file_size_bytes=max_file_size_bytes,
+        no_markdown=effective_no_markdown,
+        llm_mode=llm_mode,
         verbose=args.verbose,
     )
 
@@ -908,7 +1141,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Root:           {root}")
     print(f"Output:         {output_path}")
     print(f"Dry run:        {args.dry_run}")
+    print(f"Mode:           {'llm' if llm_mode else 'default'}")
     print(f"Gitignore:      {'ignored' if args.ignore_gitignore else 'used'}")
+    print(f"Markdown:       {'excluded' if effective_no_markdown else 'allowed (README/docs only)'}")
     print(f"Files included: {len(files)}")
     print(f"Files skipped:  {stats.skipped_files}")
     print(f"Dirs skipped:   {stats.skipped_dirs}")
@@ -950,7 +1185,12 @@ def main(argv: list[str] | None = None) -> int:
 
     for check in important_checks:
         exists = check in existing_rel_paths or check in existing_dirs
-        marker = "OK " if exists else "MISS"
+        if exists:
+            marker = "OK "
+        elif is_expected_missing_in_mode(check, llm_mode=llm_mode, no_markdown=effective_no_markdown):
+            marker = "SKIP"
+        else:
+            marker = "MISS"
         print(f"{marker} {check}")
 
     accidental_artifacts = [

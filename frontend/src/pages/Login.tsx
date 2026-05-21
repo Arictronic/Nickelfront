@@ -106,9 +106,6 @@ export default function Login() {
         )}
       </div>
 
-      <label className="checkbox-label">
-        <input type="checkbox" /> Запомнить меня
-      </label>
 
       <button className="btn btn-primary" type="submit" disabled={!isEmailValid || !isPasswordFilled}>
         Войти

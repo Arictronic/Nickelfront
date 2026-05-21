@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_admin_user
+from app.api.deps import require_admin_user
 from app.db.session import get_db
 from app.services.embedding_service import get_embedding_service
 from app.services.paper_service import PaperService
@@ -187,7 +187,7 @@ async def vector_search_stats():
 
 @router.post("/rebuild", response_model=VectorRebuildResponse)
 async def rebuild_vector_index(
-    _current_user: UserResponse = Depends(get_current_user),
+    _admin: UserResponse = Depends(require_admin_user),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(default=10000, ge=1, le=100000, description="Макс. количество статей"),
     batch_size: int = Query(default=32, ge=1, le=128, description="Размер пакета"),

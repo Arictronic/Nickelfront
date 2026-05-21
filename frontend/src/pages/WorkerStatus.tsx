@@ -18,53 +18,75 @@ type ParseJob = {
   initialCount: number;
   lastObservedCount: number;
   lastCountChangeAt: number;
-  status: "in_progress" | "completed" | "cancelled";
+  status: "in_progress" | "completed" | "cancelled" | "failed" | "expired";
   celeryStatus?: CeleryTaskStatus;
   lastPolledAt?: number;
 };
 
-const LS_KEY = "parseJobs.v6";
-const LEGACY_LS_KEYS = ["parseJobs.v5", "parseJobs.v4", "parseJobs.v3", "parseJobs.v2", "parseJobs.v1"];
-const LS_RESET_MARK = "parseJobs.reset.v3";
+const LS_KEY = "parseJobs";
+const LEGACY_LS_KEYS = ["parseJobs.v6", "parseJobs.v5", "parseJobs.v4", "parseJobs.v3", "parseJobs.v2", "parseJobs.v1", "parseJobs.reset.v3"];
+const STALE_PENDING_TASK_MS = 30 * 60_000;
 
-function clearAllParseJobKeys() {
-  const toDelete: string[] = [];
-  for (let i = 0; i < localStorage.length; i += 1) {
-    const key = localStorage.key(i);
-    if (key && key.startsWith("parseJobs.")) {
-      toDelete.push(key);
-    }
+function clearLegacyParseJobKeys() {
+  for (const key of LEGACY_LS_KEYS) {
+    localStorage.removeItem(key);
   }
-  toDelete.forEach((key) => localStorage.removeItem(key));
+}
+
+function clearParseJobStorage() {
+  clearLegacyParseJobKeys();
+  localStorage.removeItem(LS_KEY);
+}
+
+function isValidParseJob(job: unknown): job is ParseJob {
+  const maybeJob = job as Partial<ParseJob> | null | undefined;
+  return typeof maybeJob?.jobId === "string" && maybeJob.jobId.trim().length > 0;
+}
+
+function normalizeJobs(jobs: unknown): ParseJob[] {
+  if (!Array.isArray(jobs)) return [];
+  return jobs
+    .filter(isValidParseJob)
+    .map((job) => ({
+      ...job,
+      jobId: String(job.jobId),
+      source: job.source as PaperSource | "all",
+      status: (["in_progress", "completed", "cancelled", "failed", "expired"].includes(String(job.status))
+        ? job.status
+        : "in_progress") as ParseJob["status"],
+    }));
+}
+
+function isExpiredPendingTask(job: ParseJob, now: number): boolean {
+  return job.status === "in_progress" && now - job.lastCountChangeAt > STALE_PENDING_TASK_MS && job.lastObservedCount <= job.initialCount;
 }
 
 function loadJobs(): ParseJob[] {
   try {
-    if (!localStorage.getItem(LS_RESET_MARK)) {
-      clearAllParseJobKeys();
-      localStorage.setItem(LS_RESET_MARK, "1");
-    }
-    for (const key of LEGACY_LS_KEYS) localStorage.removeItem(key);
+    // Старые версионные ключи не используем: после runtime-cleanup они могут
+    // содержать task_id, которых уже нет в Redis/Celery.
+    clearLegacyParseJobKeys();
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return [];
-    return JSON.parse(raw) as ParseJob[];
+    return normalizeJobs(JSON.parse(raw));
   } catch {
+    clearParseJobStorage();
     return [];
   }
 }
 
 function saveJobs(jobs: ParseJob[]) {
-  localStorage.setItem(LS_KEY, JSON.stringify(jobs));
+  localStorage.setItem(LS_KEY, JSON.stringify(normalizeJobs(jobs)));
 }
 
 function mergeJobs(localJobs: ParseJob[], sharedJobs: ParseJob[]): ParseJob[] {
   const byId = new Map<string, ParseJob>();
-  for (const job of [...sharedJobs, ...localJobs]) {
-    byId.set(job.jobId, {
-      ...job,
-      source: job.source as PaperSource | "all",
-      status: job.status as ParseJob["status"],
-    });
+  for (const job of normalizeJobs(localJobs)) {
+    byId.set(job.jobId, job);
+  }
+  // Backend/shared history is fresher than browser localStorage.
+  for (const job of normalizeJobs(sharedJobs)) {
+    byId.set(job.jobId, job);
   }
   return Array.from(byId.values()).sort((a, b) => b.startedAt - a.startedAt).slice(0, 50);
 }
@@ -75,23 +97,46 @@ export default function WorkerStatus() {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number>(Date.now());
   const [error, setError] = useState<string | null>(null);
   const jobsRef = useRef<ParseJob[]>(jobs);
+  const pollingRef = useRef(false);
 
   useEffect(() => {
     jobsRef.current = jobs;
   }, [jobs]);
 
   useEffect(() => {
+    let cancelled = false;
+
     Promise.all([getPapersCount("all"), getSharedParseJobs(50)])
-      .then(([count, sharedJobs]) => {
+      .then(([count, sharedJobsRaw]) => {
+        if (cancelled) return;
+
+        const sharedJobs = normalizeJobs(sharedJobsRaw);
         setAllCount(count);
+
+        // После runtime cleanup backend удаляет data/parse_jobs.json и papers.
+        // В этом состоянии локальная browser-история устарела: не надо опрашивать
+        // старые task_id и создавать видимость "живых" задач.
+        if (count === 0 && sharedJobs.length === 0) {
+          clearParseJobStorage();
+          jobsRef.current = [];
+          setJobs([]);
+          return;
+        }
+
         setJobs((current) => {
-          const merged = mergeJobs(current, sharedJobs as ParseJob[]);
+          const merged = mergeJobs(current, sharedJobs);
           jobsRef.current = merged;
           saveJobs(merged);
           return merged;
         });
       })
-      .catch((e) => setError((e as Error).message));
+      .catch((e) => {
+        if (!cancelled) setError((e as Error).message);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const refreshJobs = async (baseJobs?: ParseJob[]) => {
@@ -106,12 +151,14 @@ export default function WorkerStatus() {
     const updatedJobs = await Promise.all(
       sourceJobs.map(async (job) => {
         if (job.status !== "in_progress") return job;
-        if (job.celeryStatus?.status === "REVOKED" || job.status === "cancelled") return job;
+        if (job.celeryStatus?.status === "REVOKED") return job;
 
         try {
           const celeryStatus = await getCeleryTaskStatus(job.jobId);
           const now = Date.now();
-          const isCompleted = celeryStatus.status === "SUCCESS" || celeryStatus.status === "FAILURE";
+          const isSuccess = celeryStatus.status === "SUCCESS";
+          const isFailure = celeryStatus.status === "FAILURE";
+          const isCompleted = isSuccess || isFailure;
           const isRevoked = celeryStatus.status === "REVOKED";
           const savedCount = celeryStatus.saved_count || celeryStatus.total_saved || celeryStatus.result?.saved_count || celeryStatus.result?.total_saved || 0;
 
@@ -122,6 +169,7 @@ export default function WorkerStatus() {
             const lastCountChangeAt = changed ? now : job.lastCountChangeAt;
             const stableMs = 60_000;
             const shouldComplete = now - lastCountChangeAt > stableMs && current > job.initialCount;
+            const expired = !shouldComplete && isExpiredPendingTask({ ...job, lastObservedCount: current, lastCountChangeAt }, now);
 
             return {
               ...job,
@@ -129,7 +177,7 @@ export default function WorkerStatus() {
               lastObservedCount: current,
               lastCountChangeAt,
               lastPolledAt: now,
-              status: shouldComplete ? "completed" : "in_progress",
+              status: shouldComplete ? "completed" : expired ? "expired" : "in_progress",
             } as ParseJob;
           }
 
@@ -139,7 +187,7 @@ export default function WorkerStatus() {
             lastObservedCount: savedCount > 0 ? savedCount : job.lastObservedCount,
             lastCountChangeAt: isCompleted ? now : job.lastCountChangeAt,
             lastPolledAt: now,
-            status: isRevoked ? "cancelled" : isCompleted ? "completed" : "in_progress",
+            status: isRevoked ? "cancelled" : isFailure ? "failed" : isSuccess ? "completed" : "in_progress",
           } as ParseJob;
         } catch {
           const source = job.source === "all" ? "all" : job.source;
@@ -156,6 +204,8 @@ export default function WorkerStatus() {
           const stableMs = 60_000;
           if (now - next.lastCountChangeAt > stableMs && current > next.initialCount) {
             next.status = "completed";
+          } else if (isExpiredPendingTask(next, now)) {
+            next.status = "expired";
           }
           return next;
         }
@@ -181,16 +231,18 @@ export default function WorkerStatus() {
 
   // Polling статуса задач Celery
   useEffect(() => {
-    if (jobsRef.current.length === 0) return;
+    if (!jobsRef.current.some((job) => job.status === "in_progress")) return;
     let cancelled = false;
 
     const pollInterval = window.setInterval(async () => {
+      if (cancelled || pollingRef.current || !jobsRef.current.some((job) => job.status === "in_progress")) return;
+      pollingRef.current = true;
       try {
-        if (cancelled) return;
         await refreshJobs();
       } catch (e) {
-        if (cancelled) return;
-        setError((e as Error).message);
+        if (!cancelled) setError((e as Error).message);
+      } finally {
+        pollingRef.current = false;
       }
     }, 5000);
 
@@ -203,13 +255,15 @@ export default function WorkerStatus() {
   const inProgress = jobs.filter((j) => j.status === "in_progress").length;
   const completed = jobs.filter((j) => j.status === "completed").length;
 
-  const clearHistory = () => {
-    if (!window.confirm("Очистить историю задач в интерфейсе? (не влияет на celery)")) return;
+  const clearHistory = async () => {
+    if (!window.confirm("Очистить историю задач? Записи будут удалены из интерфейса и общей истории backend. Celery-задачи не перезапускаются.")) return;
+    const knownJobs = jobsRef.current;
+    setError(null);
+    await Promise.allSettled(knownJobs.map((job) => deleteSharedParseJob(job.jobId)));
     jobsRef.current = [];
     setJobs([]);
-    localStorage.removeItem(LS_KEY);
+    clearParseJobStorage();
     setLastUpdatedAt(Date.now());
-    setError(null);
   };
 
   const cancelJob = async (jobId: string) => {
@@ -219,13 +273,14 @@ export default function WorkerStatus() {
 
     try {
       await revokeCeleryTask(jobId, false);
-      const nextJobs = jobs.map((job) =>
+      const nextJobs: ParseJob[] = jobs.map((job): ParseJob =>
         job.jobId === jobId
           ? {
               ...job,
               status: "cancelled",
               celeryStatus: {
                 ...(job.celeryStatus || {}),
+                task_id: job.jobId,
                 status: "REVOKED",
                 state: "REVOKED",
               },
@@ -246,9 +301,8 @@ export default function WorkerStatus() {
     }
 
     try {
-      await deleteCeleryTask(jobId);
-      await deleteSharedParseJob(jobId).catch(() => null);
-      const nextJobs = jobs.filter((job) => job.jobId !== jobId);
+      await Promise.allSettled([deleteCeleryTask(jobId), deleteSharedParseJob(jobId)]);
+      const nextJobs: ParseJob[] = jobs.filter((job) => job.jobId !== jobId);
       setJobs(nextJobs);
       jobsRef.current = nextJobs;
       saveJobs(nextJobs);
@@ -259,6 +313,7 @@ export default function WorkerStatus() {
 
   const getProgressPercent = (job: ParseJob): number => {
     if (job.status === "completed") return 100;
+    if (job.status === "failed" || job.status === "expired") return 0;
     if (job.celeryStatus) {
       const current = job.celeryStatus.current || job.celeryStatus.result?.current || 0;
       const total = job.celeryStatus.total || job.celeryStatus.result?.total || 0;
@@ -271,7 +326,9 @@ export default function WorkerStatus() {
 
   const getStatusText = (job: ParseJob): string => {
     if (job.status === "completed") return "✓ Завершено";
+    if (job.status === "failed") return "✕ Ошибка";
     if (job.status === "cancelled") return "Отменено";
+    if (job.status === "expired") return "Истёк / не найден";
 
     if (job.celeryStatus) {
       const status = job.celeryStatus.status;
@@ -298,8 +355,19 @@ export default function WorkerStatus() {
               try {
                 setError(null);
                 const fromStorage = loadJobs();
-                const sharedJobs = await getSharedParseJobs(50);
-                const merged = mergeJobs(fromStorage, sharedJobs as ParseJob[]);
+                const [count, sharedJobsRaw] = await Promise.all([getPapersCount("all"), getSharedParseJobs(50)]);
+                const sharedJobs = normalizeJobs(sharedJobsRaw);
+
+                if (count === 0 && sharedJobs.length === 0) {
+                  clearParseJobStorage();
+                  jobsRef.current = [];
+                  setJobs([]);
+                  setAllCount(0);
+                  setLastUpdatedAt(Date.now());
+                  return;
+                }
+
+                const merged = mergeJobs(fromStorage, sharedJobs);
                 jobsRef.current = merged;
                 setJobs(merged);
                 saveJobs(merged);
@@ -374,7 +442,7 @@ export default function WorkerStatus() {
                     <td>{j.source}</td>
                     <td style={{ maxWidth: 280 }}>{j.query}</td>
                     <td>
-                      <span className={`status ${j.status === "completed" || j.celeryStatus?.status === "SUCCESS" ? "active" : ""}`}>
+                      <span className={`status ${j.status === "completed" || j.celeryStatus?.status === "SUCCESS" ? "active" : j.status === "failed" || j.celeryStatus?.status === "FAILURE" ? "failed" : ""}`}>
                         {statusText}
                       </span>
                     </td>

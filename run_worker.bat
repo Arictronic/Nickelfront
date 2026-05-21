@@ -2,6 +2,10 @@
 setlocal
 cd /d %~dp0
 
+if exist "%~dp0scripts\load_env.bat" (
+  call "%~dp0scripts\load_env.bat" "%~dp0.env"
+)
+
 if exist .venv\Scripts\activate.bat (
   call .venv\Scripts\activate.bat
 ) else if exist venv\Scripts\activate.bat (
@@ -18,18 +22,24 @@ if exist .venv\Scripts\activate.bat (
 set "WORKER_SLOT=%~1"
 if "%WORKER_SLOT%"=="" set "WORKER_SLOT=%RANDOM%"
 
-set "WORKER_CONCURRENCY=%~2"
-if "%WORKER_CONCURRENCY%"=="" set "WORKER_CONCURRENCY=1"
+if not "%~2"=="" set "WORKER_CONCURRENCY=%~2"
+if not defined WORKER_CONCURRENCY set "WORKER_CONCURRENCY=1"
 
-set "WORKER_POOL=%~3"
-if "%WORKER_POOL%"=="" set "WORKER_POOL=solo"
+if not "%~3"=="" set "WORKER_POOL=%~3"
+if not defined WORKER_POOL set "WORKER_POOL=solo"
 
 rem Regular workers should not consume the controlled Qwen gateway queue.
 rem Most project tasks use Celery's default queue: celery.
-set "WORKER_QUEUES=%~4"
-if "%WORKER_QUEUES%"=="" set "WORKER_QUEUES=celery"
+if not "%~4"=="" set "WORKER_QUEUES=%~4"
+if not defined WORKER_QUEUES set "WORKER_QUEUES=celery"
 
 cd backend
+set "NICKELFRONT_SERVICE_NAME=celery_worker"
+set "NICKELFRONT_WORKER_ROLE=regular"
+set "NICKELFRONT_WORKER_QUEUES=%WORKER_QUEUES%"
 set "WORKER_NAME=worker-%WORKER_SLOT%@%COMPUTERNAME%"
-python -m celery -A app.tasks.celery_app worker --loglevel=info -n %WORKER_NAME% -Q %WORKER_QUEUES% -E --pool=%WORKER_POOL% --concurrency=%WORKER_CONCURRENCY%
+echo Regular Celery worker %WORKER_NAME% listens queue(s): %WORKER_QUEUES%.
+echo Logs: logs\celery_worker.log
+echo concurrency=%WORKER_CONCURRENCY%, pool=%WORKER_POOL%
+python -m celery -A app.tasks.celery_app worker --loglevel=info -n %WORKER_NAME% -Q %WORKER_QUEUES% -E --pool=%WORKER_POOL% --concurrency=%WORKER_CONCURRENCY% --without-gossip --without-mingle
 endlocal

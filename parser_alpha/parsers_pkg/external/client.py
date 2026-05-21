@@ -8,13 +8,13 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus, urljoin, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 from loguru import logger
 
-from parsers_pkg.base import BaseAPIClient, RetryConfig, decide_for_exception, decide_for_status
+from parsers_pkg.base import BaseAPIClient, RetryConfig, decide_for_exception, decide_for_status, normalize_doi
 from parsers_pkg.errors import ParsingError, SourceUnavailableError
 
 
@@ -24,22 +24,63 @@ def _parse_iso_date(value: str | None) -> str | None:
     return str(value).replace("Z", "")
 
 
-def _strip_jats(text: str | None) -> str | None:
-    if not text:
+def _strip_jats(text: Any) -> str | None:
+    """Strip simple JATS/HTML markup from abstract-like API fields.
+
+    Crossref normally returns ``abstract`` as a string, but malformed rows or
+    fixtures can contain lists/objects.  Calling ``re.sub`` directly on those
+    shapes raises TypeError and drops the whole record, so unwrap common text
+    keys first and only stringify scalar fallbacks.
+    """
+    if text is None:
         return None
-    return re.sub(r"<[^>]+>", " ", text).strip()
+    if isinstance(text, (list, tuple, set)):
+        for item in text:
+            cleaned = _strip_jats(item)
+            if cleaned:
+                return cleaned
+        return None
+    if isinstance(text, dict):
+        for key in ("abstract", "abstractText", "value", "text", "content"):
+            cleaned = _strip_jats(text.get(key))
+            if cleaned:
+                return cleaned
+        return None
+
+    raw = " ".join(str(text).split()).strip()
+    if not raw:
+        return None
+    cleaned = re.sub(r"<[^>]+>", " ", raw)
+    return " ".join(cleaned.split()).strip() or None
 
 
 def _date_parts_to_iso(parts: list[int] | None) -> str | None:
     if not parts:
         return None
-    year = parts[0] if len(parts) >= 1 else 1
+    year = parts[0] if len(parts) >= 1 else 0
     month = parts[1] if len(parts) >= 2 else 1
     day = parts[2] if len(parts) >= 3 else 1
     try:
-        return datetime(year, month, day).isoformat()
+        year = int(year)
+        month = int(month)
+        day = int(day)
     except Exception:
         return None
+    if year <= 0:
+        return None
+    if not 1 <= month <= 12:
+        month = 1
+    if day <= 0:
+        day = 1
+    try:
+        return datetime(year, month, day).isoformat()
+    except Exception:
+        # Crossref occasionally has partial/invalid day values. Keep the year/month
+        # signal instead of dropping the date entirely.
+        try:
+            return datetime(year, month, 1).isoformat()
+        except Exception:
+            return None
 
 
 def _collapse_whitespace(value: str | None) -> str | None:
@@ -49,18 +90,418 @@ def _collapse_whitespace(value: str | None) -> str | None:
     return normalized or None
 
 
-def _parse_dot_date(value: str | None) -> str | None:
+def _parse_dot_date(value: Any) -> str | None:
     if not value:
         return None
-    raw = _collapse_whitespace(value)
+    raw = _first_text(value)
     if not raw:
         return None
-    for fmt in ("%Y.%m.%d", "%d.%m.%Y", "%Y-%m-%d"):
+    for fmt in (
+        "%Y.%m.%d",
+        "%Y.%m",
+        "%d.%m.%Y",
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%Y",
+    ):
         try:
             return datetime.strptime(raw, fmt).isoformat()
         except Exception:
             continue
     return None
+
+
+
+
+def _first_text(value: Any, default: str | None = None) -> str | None:
+    """Return the first non-empty text from scalar/list/object API fields.
+
+    Crossref/OpenAlex-like APIs usually return fields such as ``title`` and
+    ``container-title`` as lists, but source drift or mocked/manual rows may
+    send a plain string or a small object like ``{"value": "..."}``.
+    Indexing a string with ``[0]`` silently corrupts data into a single
+    character, while ``str(dict)`` pollutes records with Python reprs, so keep
+    this helper strict and explicit.
+    """
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return _collapse_whitespace(value) or default
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            text = _first_text(item, default=None)
+            if text:
+                return text
+        return default
+    if isinstance(value, dict):
+        for key in (
+            "value",
+            "text",
+            "content",
+            "title",
+            "name",
+            "display_name",
+            "displayName",
+            "fullName",
+            "authorName",
+            "url",
+            "URL",
+            "href",
+            "id",
+            "doi",
+        ):
+            if key in value:
+                text = _first_text(value.get(key), default=None)
+                if text:
+                    return text
+        for item in value.values():
+            text = _first_text(item, default=None)
+            if text:
+                return text
+        return default
+    text = _collapse_whitespace(str(value))
+    return text or default
+
+
+def _safe_date_parts(value: Any) -> list[int] | None:
+    """Normalize Crossref ``date-parts`` to [year, month, day]."""
+    if value is None:
+        return None
+    candidate = value
+    if isinstance(candidate, list) and candidate and isinstance(candidate[0], list):
+        candidate = candidate[0]
+    if not isinstance(candidate, (list, tuple)):
+        candidate = [candidate]
+
+    parts: list[int] = []
+    for item in candidate[:3]:
+        try:
+            number = int(item)
+        except (TypeError, ValueError):
+            continue
+        parts.append(number)
+    return parts or None
+
+
+def _parse_loose_date(value: Any) -> str | None:
+    """Parse source date strings beyond strict ISO, preserving at least the year.
+
+    EuropePMC commonly returns values such as ``2024 Apr 10`` or ``2024 Apr``;
+    Crossref can expose date-time fields when ``date-parts`` are absent.  Passing
+    those strings through unchanged makes the later Pydantic/backend date parser
+    drop them, so normalize known public-API date shapes here.
+    """
+    raw = _first_text(value)
+    if not raw:
+        return None
+    raw = raw.strip().replace("Z", "+00:00")
+
+    try:
+        return datetime.fromisoformat(raw).isoformat()
+    except Exception:
+        pass
+
+    formats = (
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%Y.%m.%d",
+        "%Y %b %d",
+        "%Y %B %d",
+        "%d %b %Y",
+        "%d %B %Y",
+        "%b %d %Y",
+        "%B %d %Y",
+        "%Y %b",
+        "%Y %B",
+        "%Y",
+    )
+    for fmt in formats:
+        try:
+            return datetime.strptime(raw, fmt).isoformat()
+        except Exception:
+            continue
+
+    # Last resort for noisy strings such as "2024 Apr; 12(3):1-5".
+    match = re.search(r"\b(18|19|20)\d{2}\b", raw)
+    if match:
+        try:
+            return datetime(int(match.group(0)), 1, 1).isoformat()
+        except Exception:
+            return None
+    return None
+
+
+def _extract_crossref_publication_date(item: dict[str, Any]) -> str | None:
+    """Return the best Crossref publication date from common date blocks."""
+    for key in (
+        "issued",
+        "published-print",
+        "published-online",
+        "published",
+        "posted",
+        "accepted",
+        "created",
+        "deposited",
+    ):
+        value = item.get(key)
+        block = _as_dict(value)
+        date_parts = _safe_date_parts(block.get("date-parts") if block else value)
+        parsed = _date_parts_to_iso(date_parts)
+        if parsed:
+            return parsed
+        if block:
+            parsed = _parse_loose_date(block.get("date-time") or block.get("date"))
+            if parsed:
+                return parsed
+        parsed = _parse_loose_date(value)
+        if parsed:
+            return parsed
+    return None
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    """Return a dict only when an API field is actually an object."""
+    return value if isinstance(value, dict) else {}
+
+
+def _extract_indexed_datetime(value: Any) -> str | None:
+    indexed = _as_dict(value)
+    return _collapse_whitespace(indexed.get("date-time"))
+
+
+def _europepmc_result_items(data: dict[str, Any]) -> list[dict[str, Any]]:
+    result_list = _as_dict(data.get("resultList"))
+    raw_results = result_list.get("result", [])
+    if isinstance(raw_results, dict):
+        raw_results = [raw_results]
+    if not isinstance(raw_results, list):
+        return []
+    return [item for item in raw_results if isinstance(item, dict)]
+
+
+def _split_author_string(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = _collapse_whitespace(value)
+        if not text:
+            return []
+        # Prefer semicolon/newline as author delimiters when present so names like
+        # "Smith, John; Doe, Jane" do not become four fake authors. EuropePMC
+        # commonly uses commas when there is no semicolon, so keep comma fallback.
+        delimiter = r"[;\n]+" if re.search(r"[;\n]", text) else r","
+        return [part.strip() for part in re.split(delimiter, text) if part.strip()] or [text]
+    if isinstance(value, (list, tuple, set)):
+        authors: list[str] = []
+        for item in value:
+            authors.extend(_split_author_string(item))
+        return list(dict.fromkeys(authors))
+    if isinstance(value, dict):
+        direct = _coerce_text_list(value.get("fullName") or value.get("name") or value.get("authorName"))
+        if direct:
+            return direct
+        authors: list[str] = []
+        for item in value.values():
+            authors.extend(_split_author_string(item))
+        return list(dict.fromkeys(authors))
+    text = _collapse_whitespace(str(value))
+    return [text] if text else []
+
+def _coerce_dict_list(value: Any) -> list[dict[str, Any]]:
+    """Return dict records from API fields that may be one object or a list."""
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _coerce_text_list(value: Any) -> list[str]:
+    """Normalize API text/list fields without iterating over string characters.
+
+    Some APIs drift between strings, lists and small objects such as
+    {"name": "Metallurgy"}.  Returning str(dict) pollutes keywords/authors
+    with Python reprs, so prefer common semantic keys and only recurse through
+    nested values as a fallback.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = _collapse_whitespace(value)
+        return [text] if text else []
+    if isinstance(value, dict):
+        for key in (
+            "name",
+            "display_name",
+            "displayName",
+            "title",
+            "label",
+            "value",
+            "subject",
+            "term",
+            "fullName",
+            "authorName",
+        ):
+            if key in value:
+                extracted = _coerce_text_list(value.get(key))
+                if extracted:
+                    return extracted
+        output: list[str] = []
+        for item in value.values():
+            output.extend(_coerce_text_list(item))
+        return list(dict.fromkeys(output))
+    if isinstance(value, (list, tuple, set)):
+        output: list[str] = []
+        for item in value:
+            output.extend(_coerce_text_list(item))
+        return list(dict.fromkeys(output))
+    text = _collapse_whitespace(str(value))
+    return [text] if text else []
+
+
+def _extract_crossref_authors(value: Any) -> list[str]:
+    """Extract author names from Crossref rows with list/dict/string variants."""
+    authors: list[str] = []
+    for author in _coerce_dict_list(value):
+        # Crossref can provide either given/family or a single organization/name.
+        # Some rows wrap these scalars as {"value": "..."}; use _first_text to
+        # avoid saving Python reprs or dropping the author.
+        name = _first_text(author.get("name") or author.get("organization"))
+        given = _first_text(author.get("given"))
+        family = _first_text(author.get("family"))
+        full = name or " ".join(part for part in [given, family] if part).strip()
+        if full:
+            authors.append(full)
+    if not authors:
+        authors.extend(_coerce_text_list(value))
+    return list(dict.fromkeys(authors))
+
+
+def _is_pdf_like_url(url: str | None, *, content_type: str | None = None) -> bool:
+    text = _collapse_whitespace(url)
+    if not text:
+        return False
+    parsed = urlparse(text)
+    path = (parsed.path or "").lower()
+    query = (parsed.query or "").lower()
+    ctype = (content_type or "").lower()
+    return (
+        path.endswith(".pdf")
+        or "/pdf" in path
+        or "pdf" in ctype
+        or "download=pdf" in query
+        or "format=pdf" in query
+        or "pdf=render" in query
+    )
+
+
+def _extract_crossref_pdf_url(item: dict[str, Any]) -> str | None:
+    """Return the first real PDF/full-text link from Crossref's ``link`` field."""
+    for link in _coerce_dict_list(item.get("link")):
+        url = _first_text(link.get("URL") or link.get("url"))
+        if url and _is_pdf_like_url(url, content_type=str(link.get("content-type") or "")):
+            return url
+    return None
+
+
+def _openalex_location_dicts(item: dict[str, Any]) -> list[dict[str, Any]]:
+    locations: list[dict[str, Any]] = []
+    for key in ("primary_location", "best_oa_location"):
+        locations.extend(_coerce_dict_list(item.get(key)))
+    locations.extend(_coerce_dict_list(item.get("locations")))
+    return locations
+
+
+def _first_openalex_pdf_url(item: dict[str, Any]) -> str | None:
+    for location in _openalex_location_dicts(item):
+        pdf_url = _first_text(location.get("pdf_url"))
+        if pdf_url:
+            return pdf_url
+    open_access = item.get("open_access") if isinstance(item.get("open_access"), dict) else {}
+    oa_url = _first_text(open_access.get("oa_url"))
+    if oa_url and _is_pdf_like_url(oa_url):
+        return oa_url
+    return None
+
+
+def _first_openalex_landing_url(item: dict[str, Any]) -> str | None:
+    for location in _openalex_location_dicts(item):
+        landing = _first_text(location.get("landing_page_url"))
+        if landing:
+            return landing
+    open_access = item.get("open_access") if isinstance(item.get("open_access"), dict) else {}
+    oa_url = _first_text(open_access.get("oa_url"))
+    return None if _is_pdf_like_url(oa_url) else oa_url
+
+
+def _first_openalex_source_name(item: dict[str, Any]) -> str | None:
+    for location in _openalex_location_dicts(item):
+        source_raw = location.get("source")
+        if isinstance(source_raw, dict):
+            name = _first_text(source_raw.get("display_name") or source_raw.get("displayName") or source_raw.get("name"))
+        else:
+            name = _first_text(source_raw)
+        if name:
+            return name
+    return None
+
+
+def _openalex_work_id(value: Any) -> str | None:
+    """Extract a stable OpenAlex work id from string/int/object API variants."""
+    text = _first_text(value)
+    if not text:
+        return None
+    text = text.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    if "/" in text:
+        text = text.rsplit("/", 1)[-1]
+    return text or None
+
+
+def _coerce_int_positions(value: Any) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        output: list[int] = []
+        for item in value:
+            output.extend(_coerce_int_positions(item))
+        return output
+    try:
+        pos = int(value)
+    except (TypeError, ValueError):
+        return []
+    return [pos] if pos >= 0 else []
+
+
+def _extract_rospatent_media_path(value: Any) -> str | None:
+    """Return the first usable Rospatent media-list path from API drift shapes."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return _collapse_whitespace(value)
+    if isinstance(value, (int, float)):
+        return _collapse_whitespace(str(value))
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            candidate = _extract_rospatent_media_path(item)
+            if candidate:
+                return candidate
+        return None
+    if isinstance(value, dict):
+        for key in ("url", "href", "path", "media_path", "mediaPath", "ex_media_list"):
+            candidate = _extract_rospatent_media_path(value.get(key))
+            if candidate:
+                return candidate
+        for item in value.values():
+            candidate = _extract_rospatent_media_path(item)
+            if candidate:
+                return candidate
+    return None
+
+
+def _coerce_europepmc_fulltext_links(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict) and "fullTextUrl" in value:
+        value = value.get("fullTextUrl")
+    return _coerce_dict_list(value)
 
 
 def _count_cyrillic_chars(value: str) -> int:
@@ -275,32 +716,40 @@ class OpenAlexClient(_RetryingClient):
             {"search": query, "per-page": min(limit, 50), "page": page},
         )
 
+        raw_results = data.get("results", [])
+        if not isinstance(raw_results, list):
+            raw_results = []
+
         results: list[dict[str, Any]] = []
-        for item in data.get("results", []):
+        for item in raw_results:
             if not isinstance(item, dict):
                 continue
-            authors = [
-                a.get("author", {}).get("display_name", "")
-                for a in item.get("authorships", [])
-                if isinstance(a, dict)
-            ]
-            authors = [a for a in authors if a]
+            authors = []
+            for authorship in _coerce_dict_list(item.get("authorships")):
+                author_obj = authorship.get("author")
+                author = author_obj if isinstance(author_obj, dict) else {}
+                name = _first_text(
+                    author.get("display_name")
+                    or author.get("displayName")
+                    or authorship.get("author_display_name")
+                    or authorship.get("raw_author_name")
+                )
+                if name:
+                    authors.append(name)
+            authors = list(dict.fromkeys(authors))
 
-            concepts = [
-                c.get("display_name", "")
-                for c in item.get("concepts", [])[:8]
-                if isinstance(c, dict)
-            ]
-            concepts = [c for c in concepts if c]
+            concepts = []
+            for concept in _coerce_dict_list(item.get("concepts"))[:8]:
+                name = _first_text(concept.get("display_name") or concept.get("displayName") or concept.get("name"))
+                if name:
+                    concepts.append(name)
+            concepts = list(dict.fromkeys(concepts))
 
-            doi = (item.get("doi") or "").replace("https://doi.org/", "") or None
-            primary_raw = item.get("primary_location")
-            primary = primary_raw if isinstance(primary_raw, dict) else {}
-            pdf_url = primary.get("pdf_url")
-            landing = primary.get("landing_page_url")
-            work_id = (item.get("id") or "").split("/")[-1]
-            source_raw = primary.get("source")
-            source_info = source_raw if isinstance(source_raw, dict) else {}
+            doi = normalize_doi(item.get("doi") or item.get("DOI"))
+            pdf_url = _first_openalex_pdf_url(item)
+            landing = _first_openalex_landing_url(item)
+            work_id = _openalex_work_id(item.get("id"))
+            source_name = _first_openalex_source_name(item)
             fallback_work_url = f"https://openalex.org/{work_id}" if work_id else None
             article_url = landing or (f"https://doi.org/{doi}" if doi else None) or fallback_work_url
             
@@ -312,10 +761,10 @@ class OpenAlexClient(_RetryingClient):
 
             results.append(
                 {
-                    "title": item.get("display_name") or "Untitled",
+                    "title": _first_text(item.get("display_name"), default="Untitled") or "Untitled",
                     "authors": authors,
-                    "published_date": _parse_iso_date(item.get("publication_date")),
-                    "journal": source_info.get("display_name"),
+                    "published_date": _parse_iso_date(_first_text(item.get("publication_date") or item.get("publication_year"))),
+                    "journal": source_name,
                     "doi": doi,
                     "abstract": abstract,
                     "keywords": concepts,
@@ -328,29 +777,41 @@ class OpenAlexClient(_RetryingClient):
 
         return results
     
-    def _reconstruct_abstract(self, inverted_index: dict[str, list[int]]) -> str | None:
+    def _reconstruct_abstract(self, inverted_index: dict[str, Any]) -> str | None:
         """Reconstruct abstract text from OpenAlex inverted index format."""
         try:
-            # Create a list to hold words at their positions
-            max_pos = max(max(positions) for positions in inverted_index.values() if positions)
+            positions_by_word: list[tuple[str, list[int]]] = []
+            max_pos = -1
+            for raw_word, raw_positions in inverted_index.items():
+                word = _collapse_whitespace(str(raw_word))
+                positions = _coerce_int_positions(raw_positions)
+                if not word or not positions:
+                    continue
+                positions_by_word.append((word, positions))
+                max_pos = max(max_pos, max(positions))
+
+            if max_pos < 0:
+                return None
+
             words = [""] * (max_pos + 1)
-            
-            # Place each word at its positions
-            for word, positions in inverted_index.items():
+            for word, positions in positions_by_word:
                 for pos in positions:
                     if 0 <= pos <= max_pos:
                         words[pos] = word
-            
-            # Join words and clean up
+
             abstract = " ".join(w for w in words if w).strip()
             return abstract if abstract else None
         except Exception:
             return None
 
     async def get_full_text(self, item_id: str) -> str | None:
-        data = await self._request_json(f"/works/{item_id}", {})
-        primary = data.get("primary_location") or {}
-        return primary.get("pdf_url") or primary.get("landing_page_url")
+        work_id = _openalex_work_id(item_id)
+        if not work_id:
+            return None
+        data = await self._request_json(f"/works/{work_id}", {})
+        if not isinstance(data, dict):
+            return None
+        return _first_openalex_pdf_url(data) or _first_openalex_landing_url(data)
 
 
 class CrossrefClient(_RetryingClient):
@@ -366,43 +827,40 @@ class CrossrefClient(_RetryingClient):
             {"query": query, "rows": min(limit, 50), "offset": max(offset, 0)},
         )
 
-        items = (data.get("message") or {}).get("items", [])
+        message = data.get("message") if isinstance(data.get("message"), dict) else {}
+        items = message.get("items", [])
+        if not isinstance(items, list):
+            items = []
         results: list[dict[str, Any]] = []
 
         for item in items:
             if not isinstance(item, dict):
                 continue
-            authors = []
-            for author in item.get("author", []) or []:
-                if isinstance(author, dict):
-                    given = (author.get("given") or "").strip()
-                    family = (author.get("family") or "").strip()
-                    full = " ".join([p for p in [given, family] if p]).strip()
-                    if full:
-                        authors.append(full)
+            authors = _extract_crossref_authors(item.get("author"))
 
-            date_parts = ((item.get("issued") or {}).get("date-parts") or [[]])[0]
-            publication_date = _date_parts_to_iso(date_parts)
+            publication_date = _extract_crossref_publication_date(item)
 
             results.append(
                 {
-                    "title": (item.get("title") or ["Untitled"])[0],
+                    "title": _first_text(item.get("title") or item.get("short-title"), default="Untitled") or "Untitled",
                     "authors": authors,
                     "published_date": publication_date,
-                    "journal": ((item.get("container-title") or [None])[0]),
-                    "doi": item.get("DOI"),
+                    "journal": _first_text(item.get("container-title")),
+                    "doi": normalize_doi(item.get("DOI") or item.get("doi")),
                     "abstract": _strip_jats(item.get("abstract")),
-                    "keywords": item.get("subject") or [],
+                    "keywords": _coerce_text_list(item.get("subject")),
                     "source": "Crossref",
-                    "source_id": item.get("DOI") or str(item.get("indexed", {}).get("date-time", "")),
-                    "url": item.get("URL"),
+                    "source_id": normalize_doi(item.get("DOI") or item.get("doi")) or _extract_indexed_datetime(item.get("indexed")),
+                    "url": _first_text(item.get("URL") or item.get("url")),
+                    "pdf_url": _extract_crossref_pdf_url(item),
                 }
             )
 
         return results
 
     async def get_full_text(self, item_id: str) -> str | None:
-        return f"https://doi.org/{item_id}" if item_id else None
+        doi = normalize_doi(item_id)
+        return f"https://doi.org/{doi}" if doi else None
 
 
 class EuropePMCClient(_RetryingClient):
@@ -426,23 +884,32 @@ class EuropePMCClient(_RetryingClient):
         )
 
         results: list[dict[str, Any]] = []
-        for item in (data.get("resultList") or {}).get("result", []):
-            if not isinstance(item, dict):
-                continue
-            authors = [a.strip() for a in (item.get("authorString") or "").split(",") if a.strip()]
-            year = item.get("pubYear")
-            publication_date = f"{year}-01-01T00:00:00" if year else None
-            doi = item.get("doi")
+        for item in _europepmc_result_items(data):
+            authors = _split_author_string(item.get("authorString") or item.get("authorList"))
+            publication_date = _parse_loose_date(
+                item.get("pubDate")
+                or item.get("firstPublicationDate")
+                or item.get("electronicPublicationDate")
+                or item.get("printPublicationDate")
+                or item.get("pubYear")
+            )
+            doi = normalize_doi(item.get("doi") or item.get("DOI"))
 
             pdf_url = None
-            ft = ((item.get("fullTextUrlList") or {}).get("fullTextUrl") or [])
+            ft = _coerce_europepmc_fulltext_links(item.get("fullTextUrlList"))
             for link in ft:
-                if isinstance(link, dict) and str(link.get("documentStyle", "")).lower() == "pdf":
-                    pdf_url = link.get("url")
+                style = str(link.get("documentStyle", "")).lower()
+                candidate_url = _first_text(link.get("url") or link.get("URL"))
+                if candidate_url and (style == "pdf" or _is_pdf_like_url(candidate_url)):
+                    pdf_url = candidate_url
                     break
 
-            article_id = item.get("id") or doi or item.get("source")
-            source_db = item.get("source")
+            # EuropePMC article pages require a real source-specific article id
+            # (for example MED:12345 or PMC:PMC12345).  Falling back to DOI here
+            # produced invalid URLs such as /article/MED/10.1000/..., while a DOI
+            # can still be represented correctly through the doi.org article URL.
+            article_id = _first_text(item.get("id") or item.get("pmid") or item.get("pmcid"))
+            source_db = _first_text(item.get("source"))
             source_ref = None
             if source_db and article_id:
                 source_ref = f"{source_db}:{article_id}"
@@ -453,12 +920,12 @@ class EuropePMCClient(_RetryingClient):
 
             results.append(
                 {
-                    "title": item.get("title") or "Untitled",
+                    "title": _first_text(item.get("title"), default="Untitled") or "Untitled",
                     "authors": authors,
                     "published_date": publication_date,
-                    "journal": item.get("journalTitle"),
+                    "journal": _first_text(item.get("journalTitle")),
                     "doi": doi,
-                    "abstract": item.get("abstractText"),
+                    "abstract": _strip_jats(item.get("abstractText")),
                     "keywords": [],
                     "source": "EuropePMC",
                     "source_id": source_ref or (str(article_id) if article_id else None),
@@ -501,6 +968,42 @@ class ELibraryClient(_RetryingClient):
         return headers
 
     @staticmethod
+    def _cookie_header_from_cookie_payload(payload: Any) -> str | None:
+        """Build a Cookie header from common browser export shapes.
+
+        Supported forms:
+        - {"name": "value", ...}
+        - [{"name": "...", "value": "...", "domain": "..."}, ...]
+        - {"cookies": [{"name": "...", "value": "..."}, ...]}
+        """
+        if isinstance(payload, dict) and isinstance(payload.get("cookies"), list):
+            payload = payload.get("cookies")
+
+        parts: list[str] = []
+        if isinstance(payload, dict):
+            for key_raw, value_raw in payload.items():
+                key = _collapse_whitespace(str(key_raw))
+                value = _collapse_whitespace(str(value_raw))
+                if key and value:
+                    parts.append(f"{key}={value}")
+
+        elif isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                domain = _collapse_whitespace(str(item.get("domain") or "")) or ""
+                if domain and "elibrary.ru" not in domain.lower():
+                    continue
+                key = _collapse_whitespace(str(item.get("name") or ""))
+                value = _collapse_whitespace(str(item.get("value") or ""))
+                if key and value:
+                    parts.append(f"{key}={value}")
+
+        if not parts:
+            return None
+        return "; ".join(dict.fromkeys(parts))
+
+    @staticmethod
     def _load_cookie_header_from_session_files() -> str | None:
         header_path = ELibraryClient.COOKIE_HEADER_FILE
         if header_path.exists():
@@ -517,15 +1020,9 @@ class ELibraryClient(_RetryingClient):
                 payload = json.loads(cookies_json_path.read_text(encoding="utf-8", errors="ignore"))
             except Exception:
                 payload = None
-            if isinstance(payload, dict):
-                parts = []
-                for k, v in payload.items():
-                    key = _collapse_whitespace(str(k))
-                    val = _collapse_whitespace(str(v))
-                    if key and val:
-                        parts.append(f"{key}={val}")
-                if parts:
-                    return "; ".join(parts)
+            value = ELibraryClient._cookie_header_from_cookie_payload(payload)
+            if value:
+                return value
         return None
 
     @staticmethod
@@ -782,9 +1279,12 @@ class ELibraryClient(_RetryingClient):
         return results
 
     async def get_full_text(self, item_id: str) -> str | None:
-        if not item_id:
+        raw = _collapse_whitespace(item_id)
+        if not raw:
             return None
-        return f"{self.BASE_URL}/item.asp?id={item_id}"
+        if raw.startswith("http://") or raw.startswith("https://"):
+            return raw
+        return f"{self.BASE_URL}/item.asp?id={quote_plus(raw)}"
 
 
 class FreePatentClient(_RetryingClient):
@@ -815,6 +1315,35 @@ class FreePatentClient(_RetryingClient):
     @staticmethod
     def _build_patent_url(patent_id: str) -> str:
         return f"https://www.freepatent.ru/patents/{patent_id}"
+
+    @staticmethod
+    def _unwrap_yandex_result_url(url: str | None) -> str | None:
+        """Return the real target URL from a Yandex result link when possible.
+
+        Yandex SERP links are often relative ``/clck/jsredir?...&url=<encoded>``
+        redirects. The previous parser skipped those rows because the href host was
+        ``yandex.ru`` (or empty for relative links), so FreePatent could return zero
+        results even though the encoded target was a valid freepatent.ru patent page.
+        """
+        raw = _collapse_whitespace(url)
+        if not raw:
+            return None
+
+        absolute = urljoin("https://yandex.ru", raw)
+        parsed = urlparse(absolute)
+        if "yandex." not in parsed.netloc.lower():
+            return absolute
+
+        query = parse_qs(parsed.query)
+        for key in ("url", "u", "target"):
+            values = query.get(key)
+            if not values:
+                continue
+            candidate = _collapse_whitespace(unquote(values[0]))
+            if candidate and urlparse(candidate).scheme in {"http", "https"}:
+                return candidate
+
+        return absolute
 
     def _extract_patents_from_mpk_html(self, html: str, limit: int) -> list[dict[str, Any]]:
         soup = BeautifulSoup(html, "html.parser")
@@ -874,11 +1403,11 @@ class FreePatentClient(_RetryingClient):
             if link is None:
                 continue
 
-            url = _collapse_whitespace(link.get("href"))
+            url = self._unwrap_yandex_result_url(link.get("href"))
             if not url:
                 continue
             parsed = urlparse(url)
-            if "freepatent.ru" not in parsed.netloc:
+            if "freepatent.ru" not in parsed.netloc.lower():
                 continue
 
             patent_id = self._extract_patent_id(url)
@@ -937,9 +1466,12 @@ class FreePatentClient(_RetryingClient):
         return results
 
     async def get_full_text(self, item_id: str) -> str | None:
-        if not item_id:
+        raw = _collapse_whitespace(item_id)
+        if not raw:
             return None
-        return f"https://www.freepatent.ru/{item_id.lstrip('/')}"
+        if raw.startswith("http://") or raw.startswith("https://"):
+            return raw
+        return f"https://www.freepatent.ru/{raw.lstrip('/')}"
 
 
 class PatentScopeClient(_RetryingClient):
@@ -953,14 +1485,13 @@ class PatentScopeClient(_RetryingClient):
         if not doc_id:
             return None
 
-        documents_tab_url = f"{self.BASE_URL}/search/en/detail.jsf?docId={quote_plus(doc_id)}&tab=DOCUMENTS"
         try:
             html = await self._request_text(
                 "/search/en/detail.jsf",
                 params={"docId": doc_id, "tab": "DOCUMENTS"},
             )
         except Exception:
-            return documents_tab_url
+            return None
 
         soup = BeautifulSoup(html, "html.parser")
         for anchor in soup.select("a[href]"):
@@ -971,7 +1502,7 @@ class PatentScopeClient(_RetryingClient):
             if ".pdf" in href_lower or "download" in href_lower:
                 return urljoin(f"{self.BASE_URL}/search/en/", href)
 
-        return documents_tab_url
+        return None
 
     async def search(self, query: str, limit: int = 25, offset: int = 0, **kwargs: Any) -> list[dict[str, Any]]:
         query_expr = query if ":" in query else f"FP:({query})"
@@ -999,7 +1530,7 @@ class PatentScopeClient(_RetryingClient):
         # rendering a result table.
         direct_match = re.search(r"[?&]docId=([^&]+)", final_url)
         if direct_match and not rows:
-            doc_id = direct_match.group(1)
+            doc_id = unquote(direct_match.group(1))
             title = _collapse_whitespace((soup.title.get_text(" ", strip=True) if soup.title else None)) or doc_id
             if "wipo - search" in title.lower():
                 title = doc_id
@@ -1027,7 +1558,7 @@ class PatentScopeClient(_RetryingClient):
 
             href = link.get("href") or ""
             source_id_match = re.search(r"docId=([^&]+)", href)
-            source_id = source_id_match.group(1) if source_id_match else href
+            source_id = unquote(source_id_match.group(1)) if source_id_match else href
             if source_id in seen:
                 continue
             seen.add(source_id)
@@ -1055,7 +1586,7 @@ class PatentScopeClient(_RetryingClient):
             )
             abstract = _collapse_whitespace(label_map.get("abstract") or label_map.get("аннотация"))
             app_no = label_map.get("application number") or label_map.get("номер заявки")
-            source_ref = source_id or app_no or number
+            source_ref = _collapse_whitespace(source_id or app_no or number)
             detail_url = f"{self.BASE_URL}/search/en/detail.jsf?docId={quote_plus(source_ref)}" if source_ref else None
             pdf_url = await self._resolve_documents_pdf_url(source_ref) if source_ref else None
 
@@ -1083,7 +1614,79 @@ class PatentScopeClient(_RetryingClient):
     async def get_full_text(self, item_id: str) -> str | None:
         if not item_id:
             return None
-        return f"https://patentscope.wipo.int/search/en/detail.jsf?docId={quote_plus(item_id)}"
+        raw = _collapse_whitespace(item_id)
+        if not raw:
+            return None
+        if raw.startswith("http://") or raw.startswith("https://"):
+            return raw
+        return f"https://patentscope.wipo.int/search/en/detail.jsf?docId={quote_plus(unquote(raw))}"
+
+
+
+
+def _extract_rospatent_file_names(value: Any) -> list[str]:
+    """Extract file names/URLs from Rospatent media-list payload variants."""
+    if value is None:
+        return []
+    if isinstance(value, (str, int, float)):
+        text = _collapse_whitespace(str(value))
+        return [text] if text else []
+    if isinstance(value, (list, tuple, set)):
+        output: list[str] = []
+        for item in value:
+            output.extend(_extract_rospatent_file_names(item))
+        return list(dict.fromkeys(output))
+    if isinstance(value, dict):
+        output: list[str] = []
+        for key in ("file", "filename", "fileName", "name", "path", "url", "href"):
+            if key in value:
+                output.extend(_extract_rospatent_file_names(value.get(key)))
+        for key in ("files", "items", "results", "result", "data", "documents", "media"):
+            if key in value:
+                output.extend(_extract_rospatent_file_names(value.get(key)))
+        return list(dict.fromkeys(output))
+    return []
+
+
+def _normalize_rospatent_hit(hit: dict[str, Any]) -> dict[str, Any] | None:
+    """Unwrap one Rospatent/Elasticsearch hit into the actual document body."""
+    if not isinstance(hit, dict):
+        return None
+
+    source_body = hit.get("_source")
+    if isinstance(source_body, dict):
+        normalized = dict(source_body)
+        if not normalized.get("id") and hit.get("_id") is not None:
+            normalized["id"] = hit.get("_id")
+        # Keep useful top-level metadata when the API returns it outside _source.
+        for key in ("highlight", "fields", "dataset", "index"):
+            if key not in normalized and key in hit:
+                normalized[key] = hit.get(key)
+        return normalized
+
+    return hit
+
+
+def _extract_rospatent_hits(value: Any) -> list[dict[str, Any]]:
+    """Extract Rospatent search hits from list and Elasticsearch-like payloads."""
+    if isinstance(value, list):
+        output: list[dict[str, Any]] = []
+        for item in value:
+            normalized = _normalize_rospatent_hit(item) if isinstance(item, dict) else None
+            if normalized:
+                output.append(normalized)
+        return output
+    if isinstance(value, dict):
+        for key in ("hits", "results", "items", "data"):
+            nested = value.get(key)
+            extracted = _extract_rospatent_hits(nested)
+            if extracted:
+                return extracted
+        normalized = _normalize_rospatent_hit(value)
+        if not normalized:
+            return []
+        return [normalized] if normalized.get("id") or normalized.get("common") or normalized.get("snippet") else []
+    return []
 
 
 class RosPatentClient(_RetryingClient):
@@ -1110,9 +1713,9 @@ class RosPatentClient(_RetryingClient):
         if not q:
             return True
 
-        common = hit.get("common") or {}
-        snippet = hit.get("snippet") or {}
-        biblio_ru = ((hit.get("biblio") or {}).get("ru") or {})
+        common = _as_dict(hit.get("common"))
+        snippet = _as_dict(hit.get("snippet"))
+        biblio_ru = _as_dict(_as_dict(hit.get("biblio")).get("ru"))
         blob = " ".join(
             [
                 str(hit.get("id") or ""),
@@ -1140,16 +1743,21 @@ class RosPatentClient(_RetryingClient):
         response = await client.get(media_path, headers=headers)
         response.raise_for_status()
         payload = response.json()
-        if isinstance(payload, list):
-            return [str(x) for x in payload if isinstance(x, (str, int, float))]
-        return []
+        return _extract_rospatent_file_names(payload)
 
     async def _resolve_pdf_url_from_doc(self, doc_payload: dict[str, Any]) -> str | None:
-        media_path_raw = _collapse_whitespace(doc_payload.get("ex_media_list"))
+        media_path_raw = _extract_rospatent_media_path(doc_payload.get("ex_media_list"))
+        if not media_path_raw:
+            for key in ("media_path", "mediaPath", "media", "files", "documents"):
+                media_path_raw = _extract_rospatent_media_path(doc_payload.get(key))
+                if media_path_raw:
+                    break
         if not media_path_raw:
             return None
 
         media_path = media_path_raw if media_path_raw.startswith("/") else f"/{media_path_raw}"
+        if urlparse(media_path_raw).scheme in {"http", "https"}:
+            media_path = media_path_raw
         try:
             files = await self._request_media_file_list(media_path)
         except Exception:
@@ -1163,7 +1771,18 @@ class RosPatentClient(_RetryingClient):
         if preferred is None:
             preferred = next((name for name in pdf_files if "main" in str(name).lower()), None)
         chosen = preferred or pdf_files[0]
-        return urljoin(f"{self.BASE_URL}/", f"{media_path.lstrip('/')}{chosen}")
+        chosen_text = str(chosen)
+        if urlparse(chosen_text).scheme in {"http", "https"}:
+            return chosen_text
+
+        # ``media_path`` is a directory returned by the API and ``chosen`` is a file name.
+        # Keep exactly one slash between them; otherwise URLs like
+        # ``.../media_pathfile.pdf`` are produced when the directory lacks a trailing slash.
+        chosen_part = chosen_text.lstrip("/")
+        if urlparse(media_path).scheme in {"http", "https"}:
+            return urljoin(f"{media_path.rstrip('/')}/", chosen_part)
+        media_path_part = str(media_path).strip("/")
+        return urljoin(f"{self.BASE_URL}/", f"{media_path_part}/{chosen_part}")
 
     async def _fetch_doc_payload(self, source_id: str) -> dict[str, Any] | None:
         if not source_id:
@@ -1178,18 +1797,25 @@ class RosPatentClient(_RetryingClient):
     def _extract_names(values: Any) -> list[str]:
         if not values:
             return []
+        if isinstance(values, dict):
+            for key in ("name", "fullName", "displayName", "value", "text"):
+                name = _first_text(values.get(key))
+                if name:
+                    return [name]
+            output: list[str] = []
+            for item in values.values():
+                output.extend(RosPatentClient._extract_names(item))
+            return list(dict.fromkeys(output))
         if isinstance(values, list):
             output: list[str] = []
             for item in values:
                 if isinstance(item, dict):
-                    name = _collapse_whitespace(item.get("name"))
-                    if name:
-                        output.append(name)
+                    output.extend(RosPatentClient._extract_names(item))
                 else:
                     text = _collapse_whitespace(str(item))
                     if text:
                         output.append(text)
-            return output
+            return list(dict.fromkeys(output))
         return [_collapse_whitespace(str(values))] if _collapse_whitespace(str(values)) else []
 
     async def search(self, query: str, limit: int = 25, offset: int = 0, **kwargs: Any) -> list[dict[str, Any]]:
@@ -1198,16 +1824,12 @@ class RosPatentClient(_RetryingClient):
 
         primary_payload = {"qn": query, "page": page, "size": per_page}
         data = await self._request_json_post("/search", primary_payload)
-        hits = data.get("hits", [])
-        if not isinstance(hits, list):
-            return []
+        hits = _extract_rospatent_hits(data.get("hits") if isinstance(data, dict) else data)
 
         if not hits:
             secondary_payload = {"query": query, "page": page, "size": per_page}
             data = await self._request_json_post("/search", secondary_payload)
-            hits = data.get("hits", [])
-        if not isinstance(hits, list):
-            return []
+            hits = _extract_rospatent_hits(data.get("hits") if isinstance(data, dict) else data)
 
         results: list[dict[str, Any]] = []
         for hit in hits:
@@ -1216,37 +1838,42 @@ class RosPatentClient(_RetryingClient):
             if not self._hit_matches_query(hit, query):
                 continue
 
-            common = hit.get("common") or {}
-            biblio_ru = ((hit.get("biblio") or {}).get("ru") or {})
-            snippet = hit.get("snippet") or {}
-            source_meta = (hit.get("meta") or {}).get("source") or {}
-            dataset = _collapse_whitespace(hit.get("dataset"))
+            common = _as_dict(hit.get("common"))
+            biblio_ru = _as_dict(_as_dict(hit.get("biblio")).get("ru"))
+            snippet = _as_dict(hit.get("snippet"))
+            source_meta = _as_dict(_as_dict(hit.get("meta")).get("source"))
+            dataset = _first_text(hit.get("dataset"))
             if self._is_non_patent_dataset(dataset):
                 continue
 
-            title = _collapse_whitespace(snippet.get("title") or biblio_ru.get("title")) or "Untitled"
-            abstract = _collapse_whitespace(snippet.get("description"))
-            publication_date = _parse_dot_date(common.get("publication_date"))
-            document_number = _collapse_whitespace(common.get("document_number"))
-            source_id = _collapse_whitespace(hit.get("id") or source_meta.get("path") or document_number)
+            title = _first_text(snippet.get("title") or biblio_ru.get("title")) or "Untitled"
+            abstract = _first_text(snippet.get("description"))
+            publication_date = _parse_dot_date(_first_text(common.get("publication_date")))
+            document_number = _first_text(common.get("document_number"))
+            source_id = _first_text(hit.get("id") or source_meta.get("path") or document_number)
             inventors = self._extract_names(biblio_ru.get("inventor"))
             patentee_names = self._extract_names(biblio_ru.get("patentee"))
             authors = inventors if inventors else patentee_names
 
             doc_payload = await self._fetch_doc_payload(source_id) if source_id else None
             if doc_payload:
-                abstract = _collapse_whitespace(
-                    abstract
-                    or ((doc_payload.get("abstract") or {}).get("ru"))
-                    or ((doc_payload.get("abstract") or {}).get("en"))
+                doc_abstract = _first_text(
+                    _as_dict(doc_payload.get("abstract")).get("ru")
+                    or _as_dict(doc_payload.get("abstract")).get("en")
                 )
-                doc_biblio_ru = ((doc_payload.get("biblio") or {}).get("ru") or {})
-                inventors = self._extract_names(doc_biblio_ru.get("inventor"))
-                patentee_names = self._extract_names(doc_biblio_ru.get("patentee"))
-                authors = inventors if inventors else patentee_names
+                if doc_abstract:
+                    abstract = doc_abstract
+                doc_biblio_ru = _as_dict(_as_dict(doc_payload.get("biblio")).get("ru"))
+                doc_inventors = self._extract_names(doc_biblio_ru.get("inventor"))
+                doc_patentee_names = self._extract_names(doc_biblio_ru.get("patentee"))
+                doc_authors = doc_inventors if doc_inventors else doc_patentee_names
+                if doc_authors:
+                    authors = doc_authors
 
             doc_url = self._build_doc_url(source_id)
             pdf_url = await self._resolve_pdf_url_from_doc(doc_payload) if doc_payload else None
+            if not pdf_url:
+                pdf_url = await self._resolve_pdf_url_from_doc(hit)
 
             results.append(
                 {
@@ -1260,8 +1887,8 @@ class RosPatentClient(_RetryingClient):
                         item
                         for item in [
                             dataset,
-                            _collapse_whitespace(hit.get("index")),
-                            _collapse_whitespace(common.get("kind")),
+                            _first_text(hit.get("index")),
+                            _first_text(common.get("kind")),
                         ]
                         if item
                     ],
@@ -1277,9 +1904,12 @@ class RosPatentClient(_RetryingClient):
 
         return results
     async def get_full_text(self, item_id: str) -> str | None:
-        if not item_id:
+        raw = _collapse_whitespace(item_id)
+        if not raw:
             return None
-        return self._build_doc_url(item_id)
+        if raw.startswith("http://") or raw.startswith("https://"):
+            return raw
+        return self._build_doc_url(raw)
 
 
 AVAILABLE_EXTERNAL_SOURCES = {

@@ -71,6 +71,13 @@ class SourceMetadata:
 class SourceRegistry:
     def __init__(self, sources: list[SourceMetadata]):
         self._by_name = {source.name: source for source in sources}
+        self._canonical_names = {source.name.casefold(): source.name for source in sources}
+
+    def _canonicalize(self, name: str | None) -> str | None:
+        raw = (name or "").strip()
+        if not raw:
+            return None
+        return self._canonical_names.get(raw.casefold())
 
     def list_names(self) -> list[str]:
         return sorted(self._by_name)
@@ -79,7 +86,8 @@ class SourceRegistry:
         return sorted(self._by_name.values(), key=lambda source: source.priority)
 
     def get(self, name: str) -> SourceMetadata:
-        source = self._by_name.get(name)
+        canonical = self._canonicalize(name)
+        source = self._by_name.get(canonical or "")
         if source is None:
             supported = ", ".join(self.list_names())
             raise MisconfigurationError(
@@ -89,7 +97,7 @@ class SourceRegistry:
         return source
 
     def is_supported(self, name: str) -> bool:
-        return name in self._by_name
+        return self._canonicalize(name) is not None
 
 
 def build_default_source_registry() -> SourceRegistry:
@@ -168,8 +176,9 @@ def build_default_source_registry() -> SourceRegistry:
                     full_text=False,
                     citations=True,
                     keywords=True,
-                    abstract=False,
+                    abstract=True,
                     date=True,
+                    pdf_url=True,
                     doi=True,
                     institution_metadata=True,
                 ),
@@ -200,6 +209,7 @@ def build_default_source_registry() -> SourceRegistry:
                     keywords=True,
                     abstract=True,
                     date=True,
+                    pdf_url=True,
                     doi=True,
                     institution_metadata=True,
                 ),
@@ -288,7 +298,7 @@ def build_default_source_registry() -> SourceRegistry:
                     keywords=False,
                     abstract=False,
                     date=True,
-                    pdf_url=False,
+                    pdf_url=True,
                     doi=False,
                 ),
                 priority=80,
@@ -318,7 +328,7 @@ def build_default_source_registry() -> SourceRegistry:
                     keywords=True,
                     abstract=True,
                     date=True,
-                    pdf_url=False,
+                    pdf_url=True,
                     doi=False,
                 ),
                 priority=85,
@@ -378,7 +388,7 @@ def build_default_source_registry() -> SourceRegistry:
                     keywords=True,
                     abstract=True,
                     date=True,
-                    pdf_url=False,
+                    pdf_url=True,
                     doi=False,
                 ),
                 priority=95,

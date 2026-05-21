@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
+import time
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +14,9 @@ from typing import Any
 
 from parsers_pkg.sources import SourceMetadata, SourceRegistry
 from parsers_pkg.translate import get_shared_query_translator
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -33,6 +39,20 @@ class SourceRunTelemetry:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_int_counter(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _sources_state(state: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    sources = state.get("sources")
+    return sources if isinstance(sources, dict) else {}
 
 
 _SOURCE_QUERY_REWRITE: dict[str, dict[str, str]] = {
@@ -173,6 +193,7 @@ class SourceHealthStore:
     def __init__(self, path: Path):
         self.path = path
         self._state = self._load()
+        self._base_state = deepcopy(self._state)
 
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -182,29 +203,129 @@ class SourceHealthStore:
         except Exception:
             return {"sources": {}, "updated_at": None}
 
-    def save(self) -> None:
-        """Persist source health atomically.
+    def _merge_with_current_disk_state(self) -> dict[str, Any]:
+        """Merge in-process telemetry deltas with the latest on-disk state.
 
-        Several parser subprocesses can run in parallel from different Celery workers.
-        A direct write can leave a half-written JSON file if a process is killed while
-        saving telemetry, which later breaks routing/fallback decisions.
+        Atomic replace prevents half-written JSON, but without merging the last writer
+        can still overwrite counters saved by another parser subprocess. Track deltas
+        against the state loaded at object creation and add them to the current file.
+        """
+        disk_state = self._load() if self.path.exists() else {"sources": {}, "updated_at": None}
+        merged_sources = dict(_sources_state(disk_state))
+
+        base_sources = _sources_state(self._base_state)
+        current_sources = _sources_state(self._state)
+        counters = ("runs", "successes", "failures", "degraded_runs")
+        last_fields = ("last_error", "last_run_at", "last_success_at", "last_parsed_count", "last_raw_count")
+
+        for source, current_entry in current_sources.items():
+            if not isinstance(current_entry, dict):
+                continue
+            base_entry = base_sources.get(source, {}) if isinstance(base_sources.get(source, {}), dict) else {}
+            merged_entry = merged_sources.get(source)
+            if not isinstance(merged_entry, dict):
+                merged_entry = deepcopy(base_entry) if base_entry else {}
+                merged_sources[source] = merged_entry
+
+            for key in counters:
+                current_value = _safe_int_counter(current_entry.get(key, 0))
+                base_value = _safe_int_counter(base_entry.get(key, 0))
+                delta = current_value - base_value
+                if delta:
+                    merged_entry[key] = _safe_int_counter(merged_entry.get(key, 0)) + delta
+                else:
+                    # Normalize stale/corrupt disk values such as null or "bad" to ints.
+                    merged_entry[key] = _safe_int_counter(merged_entry.get(key, current_value))
+
+            for key in last_fields:
+                if current_entry.get(key) != base_entry.get(key):
+                    merged_entry[key] = current_entry.get(key)
+                else:
+                    merged_entry.setdefault(key, current_entry.get(key))
+
+        merged_state = {
+            "sources": merged_sources,
+            "updated_at": _utc_now_iso(),
+        }
+        return merged_state
+
+    def _acquire_save_lock(self, *, timeout: float = 10.0, stale_after: float = 60.0) -> Path:
+        """Acquire a small cross-process lock for source_health.json writes.
+
+        Atomic replace protects against half-written JSON, but two parser subprocesses
+        can still read the same old file and overwrite each other's merged counters.
+        A directory lock works on Windows and Linux without extra dependencies.
+        """
+        lock_path = self.path.with_name(f"{self.path.name}.lock")
+        deadline = time.monotonic() + max(0.5, timeout)
+
+        while True:
+            try:
+                lock_path.mkdir(parents=True, exist_ok=False)
+                return lock_path
+            except FileExistsError:
+                try:
+                    age = time.time() - lock_path.stat().st_mtime
+                    if age > stale_after:
+                        lock_path.rmdir()
+                        continue
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    pass
+
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"Timed out waiting for source health lock: {lock_path}")
+                time.sleep(0.05)
+
+    @staticmethod
+    def _release_save_lock(lock_path: Path | None) -> None:
+        if lock_path is None:
+            return
+        try:
+            lock_path.rmdir()
+        except FileNotFoundError:
+            return
+
+    def save(self) -> None:
+        """Persist source health atomically and preserve concurrent updates.
+
+        Source health is telemetry, not parser payload. A stale lock or temporary
+        filesystem issue must not turn an otherwise successful parser run into a
+        failed Celery task.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._state["updated_at"] = _utc_now_iso()
-        payload = json.dumps(self._state, ensure_ascii=False, indent=2)
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(self.path.parent)) as tmp:
-            tmp.write(payload)
-            tmp_path = Path(tmp.name)
-        tmp_path.replace(self.path)
+        lock_path: Path | None = None
+        tmp_path: Path | None = None
+        try:
+            lock_path = self._acquire_save_lock()
+            merged_state = self._merge_with_current_disk_state()
+            payload = json.dumps(merged_state, ensure_ascii=False, indent=2)
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(self.path.parent)) as tmp:
+                tmp.write(payload)
+                tmp_path = Path(tmp.name)
+            tmp_path.replace(self.path)
+            self._state = merged_state
+            self._base_state = deepcopy(merged_state)
+        except Exception as exc:
+            logger.warning("Failed to save parser source health to %s: %s", self.path, exc)
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        finally:
+            self._release_save_lock(lock_path)
 
     def get(self, source: str) -> dict[str, Any]:
-        return dict(self._state.get("sources", {}).get(source, {}))
+        entry = _sources_state(self._state).get(source, {})
+        return dict(entry) if isinstance(entry, dict) else {}
 
     def score_penalty(self, source: str) -> float:
         state = self.get(source)
-        runs = int(state.get("runs", 0))
-        failures = int(state.get("failures", 0))
-        degraded_runs = int(state.get("degraded_runs", 0))
+        runs = _safe_int_counter(state.get("runs", 0))
+        failures = _safe_int_counter(state.get("failures", 0))
+        degraded_runs = _safe_int_counter(state.get("degraded_runs", 0))
         if runs == 0:
             return 0.0
 
@@ -213,21 +334,26 @@ class SourceHealthStore:
         return round((fail_ratio * 60.0) + (degraded_ratio * 20.0), 3)
 
     def record(self, telemetry: SourceRunTelemetry) -> None:
-        sources = self._state.setdefault("sources", {})
-        entry = sources.setdefault(
-            telemetry.source,
-            {
-                "runs": 0,
-                "successes": 0,
-                "failures": 0,
-                "degraded_runs": 0,
-                "last_error": None,
-                "last_run_at": None,
-                "last_success_at": None,
-                "last_parsed_count": 0,
-                "last_raw_count": 0,
-            },
-        )
+        sources = _sources_state(self._state)
+        if not sources:
+            self._state["sources"] = sources
+
+        default_entry = {
+            "runs": 0,
+            "successes": 0,
+            "failures": 0,
+            "degraded_runs": 0,
+            "last_error": None,
+            "last_run_at": None,
+            "last_success_at": None,
+            "last_parsed_count": 0,
+            "last_raw_count": 0,
+        }
+        existing = sources.get(telemetry.source)
+        entry = existing if isinstance(existing, dict) else dict(default_entry)
+        for key in ("runs", "successes", "failures", "degraded_runs"):
+            entry[key] = _safe_int_counter(entry.get(key, 0))
+        sources[telemetry.source] = entry
 
         entry["runs"] += 1
         if telemetry.success:

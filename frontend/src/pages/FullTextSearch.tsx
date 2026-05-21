@@ -43,8 +43,9 @@ export default function FullTextSearch() {
   }, [query]);
 
   // Search function
-  const handleSearch = async () => {
-    if (!query.trim()) return;
+  const handleSearch = async (overrideQuery?: string) => {
+    const effectiveQuery = (overrideQuery ?? query).trim();
+    if (!effectiveQuery) return;
     
     setLoading(true);
     setError(null);
@@ -52,7 +53,7 @@ export default function FullTextSearch() {
     
     try {
       const { papers, total: totalCount } = await fullTextSearch({
-        query,
+        query: effectiveQuery,
         limit,
         source: source === "all" ? undefined : source,
         searchMode,
@@ -62,7 +63,7 @@ export default function FullTextSearch() {
       setTotal(totalCount);
       
       // Load stats
-      const statsData = await getSearchStats(query);
+      const statsData = await getSearchStats(effectiveQuery);
       setStats(statsData);
     } catch (e: any) {
       setError(e.message || "Ошибка поиска");
@@ -84,7 +85,7 @@ export default function FullTextSearch() {
   const selectSuggestion = (suggestion: string) => {
     setQuery(suggestion);
     setShowSuggestions(false);
-    setTimeout(() => handleSearch(), 0);
+    setTimeout(() => void handleSearch(suggestion), 0);
   };
 
   // Search mode examples
@@ -109,7 +110,7 @@ export default function FullTextSearch() {
             className="input"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            onKeyPress={handleKeyPress}
+            onKeyDown={handleKeyPress}
             onFocus={() => query.length >= 2 && setShowSuggestions(true)}
             onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
             placeholder="Введите поисковый запрос..."
@@ -195,7 +196,7 @@ export default function FullTextSearch() {
 
             <button 
               className="btn btn-primary" 
-              onClick={handleSearch}
+              onClick={() => void handleSearch()}
               disabled={loading || !query.trim()}
             >
               {loading ? "Поиск..." : "🔍 Найти"}
@@ -261,7 +262,7 @@ export default function FullTextSearch() {
 
       {!loading && searched && results.length === 0 && (
         <div className="panel">
-          <p className="muted">Ничего не найдено по запросу "{query}"</p>
+          <p className="muted">Ничего не найдено по запросу «{query}»</p>
         </div>
       )}
 
@@ -374,7 +375,7 @@ export default function FullTextSearch() {
           <div>
             <h4 style={{ margin: "0 0 8px" }}>Точная фраза (phrase)</h4>
             <p style={{ fontSize: 14, color: "#64748b", margin: 0 }}>
-              Поиск точной фразы. Пример: <code>"high temperature"</code>
+              Поиск точной фразы. Пример: <code>&quot;high temperature&quot;</code>
             </p>
           </div>
           
@@ -384,7 +385,7 @@ export default function FullTextSearch() {
               Поддержка операторов: <code>AND</code>, <code>OR</code>, <code>NOT</code>, кавычки для фраз
             </p>
             <p style={{ fontSize: 13, color: "#94a3b8", marginTop: 4 }}>
-              Пример: <code>nickel AND superalloy, "high temperature", nickel NOT iron</code>
+              Пример: <code>nickel AND superalloy, &quot;high temperature&quot;, nickel NOT iron</code>
             </p>
           </div>
         </div>

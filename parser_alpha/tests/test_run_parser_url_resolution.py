@@ -52,6 +52,41 @@ class TestRunParserUrlResolution(unittest.TestCase):
         self.assertEqual(normalized[0]["url"], "https://europepmc.org/articles/PMC13080576")
         self.assertEqual(normalized[0]["pdf_url"], "https://europepmc.org/articles/PMC13080576?pdf=render")
 
+    def test_merge_records_by_dedupe_uses_canonical_patent_id(self):
+        records = [
+            {
+                "source": "Rospatent",
+                "journal": "Rospatent",
+                "source_id": "RU123456",
+                "title": "Состав никелевого сплава",
+                "url": "https://searchplatform.rospatent.gov.ru/doc/RU123456",
+                "abstract": None,
+            },
+            {
+                "source": "FreePatent",
+                "journal": "FreePatent",
+                "source_id": "patents/123456",
+                "title": "Патент 123456",
+                "url": "https://www.freepatent.ru/patents/123456",
+                "abstract": "Описание патента",
+            },
+        ]
+
+        merged = run_parser._merge_records_by_dedupe(records, limit=10)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["source_id"], "RU123456")
+        self.assertEqual(merged[0]["abstract"], "Описание патента")
+
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestRunParserDiagnosticsRobustness(unittest.TestCase):
+    def test_diagnostic_event_dicts_filters_non_dict_events(self):
+        events = run_parser._diagnostic_event_dicts({"events": [None, "bad", {"stage": "parse"}]})
+        self.assertEqual(events, [{"stage": "parse"}])
+
+    def test_diagnostic_list_field_ignores_non_list_values(self):
+        self.assertEqual(run_parser._diagnostic_list_field({"degraded_reasons": "bad"}, "degraded_reasons"), [])
+        self.assertEqual(run_parser._diagnostic_list_field({"degraded_reasons": ["rate_limited"]}, "degraded_reasons"), ["rate_limited"])

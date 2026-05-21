@@ -1,5 +1,10 @@
 import { apiClient } from "./client";
-import type { Paper, PaperListFilters, PaperSearchFilters, PaperSource } from "../types/paper";
+import type {
+  Paper,
+  PaperListFilters,
+  PaperSearchFilters,
+  PaperSource,
+} from "../types/paper";
 import type { VectorSearchFilters, VectorSearchResponse } from "../types/paper";
 
 const HTML_TAG_RE = /<[^>]+>/g;
@@ -38,18 +43,28 @@ type PaperApiModel = {
   updated_at: string | null;
 };
 
+function clampBackendLimit(limit: number | undefined, fallback: number = 10) {
+  const parsed = Number(limit ?? fallback);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(1, Math.min(100, Math.floor(parsed)));
+}
+
 function mapPaper(apiPaper: PaperApiModel): Paper {
   return {
     id: apiPaper.id,
     title: stripHtml(apiPaper.title) ?? "Untitled",
-    authors: (apiPaper.authors ?? []).map((a) => stripHtml(a) ?? "").filter(Boolean),
+    authors: (apiPaper.authors ?? [])
+      .map((a) => stripHtml(a) ?? "")
+      .filter(Boolean),
     publicationDate: apiPaper.publication_date ?? null,
     journal: stripHtml(apiPaper.journal),
     doi: apiPaper.doi ?? null,
     abstract: stripHtml(apiPaper.abstract),
     // Keep raw markdown/latex content for detailed paper view rendering.
     fullText: apiPaper.full_text ?? null,
-    keywords: (apiPaper.keywords ?? []).map((k) => stripHtml(k) ?? "").filter(Boolean),
+    keywords: (apiPaper.keywords ?? [])
+      .map((k) => stripHtml(k) ?? "")
+      .filter(Boolean),
     source: apiPaper.source,
     sourceId: apiPaper.source_id ?? null,
     url: apiPaper.url ?? null,
@@ -77,7 +92,7 @@ export async function getPapersList(args: {
 }) {
   const { data } = await apiClient.get<PaperApiModel[]>("/papers", {
     params: {
-      limit: args.limit,
+      limit: clampBackendLimit(args.limit),
       offset: args.offset,
       source: args.source && args.source !== "all" ? args.source : undefined,
     },
@@ -102,7 +117,7 @@ export async function searchPapers(filters: PaperSearchFilters) {
     sources: PaperSource[] | string[];
   }>("/papers/search", {
     query: filters.query,
-    limit: filters.limit,
+    limit: clampBackendLimit(filters.limit),
     sources: filters.sources,
     full_text_only: filters.fullTextOnly,
   });
@@ -131,13 +146,20 @@ export async function reprocessPaperContent(paperId: number) {
   return data;
 }
 
-export async function reprocessAllPapers(args?: { limit?: number; source?: string }) {
+export async function reprocessAllPapers(args?: {
+  limit?: number;
+  source?: string;
+}) {
   const { data } = await apiClient.post<{
     queued: number;
     task_ids: string[];
   }>(`/papers/reprocess-all`, undefined, {
     params: {
-      limit: args?.limit ?? 500,
+      limit: (() => {
+        const parsed = Number(args?.limit ?? 500);
+        if (!Number.isFinite(parsed)) return 500;
+        return Math.max(1, Math.min(5000, Math.floor(parsed)));
+      })(),
       source: args?.source,
     },
   });
@@ -148,7 +170,11 @@ export async function deletePaper(paperId: number) {
   await apiClient.delete(`/papers/id/${paperId}`);
 }
 
-export async function parsePapers(args: { query: string; limit: number; source: PaperSource }) {
+export async function parsePapers(args: {
+  query: string;
+  limit: number;
+  source: PaperSource;
+}) {
   const { data } = await apiClient.post<{
     message: string;
     task_id: string;
@@ -158,7 +184,7 @@ export async function parsePapers(args: { query: string; limit: number; source: 
   }>(`/papers/parse`, undefined, {
     params: {
       query: args.query,
-      limit: args.limit,
+      limit: clampBackendLimit(args.limit, 50),
       source: args.source,
     },
   });
@@ -166,7 +192,11 @@ export async function parsePapers(args: { query: string; limit: number; source: 
   return data;
 }
 
-export async function parseAll(args: { limitPerQuery: number; source: PaperSource | "all"; query: string }) {
+export async function parseAll(args: {
+  limitPerQuery: number;
+  source: PaperSource | "all";
+  query: string;
+}) {
   const { data } = await apiClient.post<{
     message: string;
     task_id: string;
@@ -175,7 +205,7 @@ export async function parseAll(args: { limitPerQuery: number; source: PaperSourc
     query?: string | null;
   }>(`/papers/parse-all`, undefined, {
     params: {
-      limit_per_query: args.limitPerQuery,
+      limit_per_query: clampBackendLimit(args.limitPerQuery, 50),
       source: args.source,
       query: args.query.trim(),
     },
@@ -185,14 +215,18 @@ export async function parseAll(args: { limitPerQuery: number; source: PaperSourc
 }
 
 export async function vectorSearch(filters: VectorSearchFilters) {
-  const { data } = await apiClient.post<VectorSearchResponse>("/vector/search", {
-    query: filters.query,
-    limit: filters.limit,
-    source: filters.source && filters.source !== "all" ? filters.source : undefined,
-    date_from: filters.dateFrom,
-    date_to: filters.dateTo,
-    search_type: filters.searchType,
-  });
+  const { data } = await apiClient.post<VectorSearchResponse>(
+    "/vector/search",
+    {
+      query: filters.query,
+      limit: clampBackendLimit(filters.limit),
+      source:
+        filters.source && filters.source !== "all" ? filters.source : undefined,
+      date_from: filters.dateFrom,
+      date_to: filters.dateTo,
+      search_type: filters.searchType,
+    },
+  );
 
   return {
     results: data.results ?? [],
@@ -232,7 +266,7 @@ export async function rebuildVectorIndex() {
     message: string;
     indexed: number;
     total: number;
-  }>("/vector/rebuild");
+  }>("/vector/rebuild", undefined, { timeout: 10 * 60_000 });
 
   return data;
 }
@@ -287,7 +321,9 @@ export type CeleryTaskStatus = {
 };
 
 export async function getCeleryTaskStatus(taskId: string) {
-  const { data } = await apiClient.get<CeleryTaskStatus>(`/tasks/celery/${taskId}/status`);
+  const { data } = await apiClient.get<CeleryTaskStatus>(
+    `/tasks/celery/${taskId}/status`,
+  );
   return data;
 }
 
@@ -299,14 +335,23 @@ export type SharedParseJob = {
   initialCount: number;
   lastObservedCount: number;
   lastCountChangeAt: number;
-  status: "in_progress" | "completed" | "cancelled" | string;
+  status:
+    | "in_progress"
+    | "completed"
+    | "cancelled"
+    | "failed"
+    | "expired"
+    | string;
   celeryStatus?: CeleryTaskStatus;
 };
 
 export async function getSharedParseJobs(limit: number = 50) {
-  const { data } = await apiClient.get<{ jobs: SharedParseJob[] }>("/tasks/parse-jobs", {
-    params: { limit },
-  });
+  const { data } = await apiClient.get<{ jobs: SharedParseJob[] }>(
+    "/tasks/parse-jobs",
+    {
+      params: { limit },
+    },
+  );
   return data.jobs ?? [];
 }
 
@@ -314,7 +359,10 @@ export async function deleteSharedParseJob(jobId: string) {
   await apiClient.delete(`/tasks/parse-jobs/${jobId}`);
 }
 
-export async function revokeCeleryTask(taskId: string, terminate: boolean = false) {
+export async function revokeCeleryTask(
+  taskId: string,
+  terminate: boolean = false,
+) {
   const { data } = await apiClient.post<{
     task_id: string;
     status: string;
@@ -350,7 +398,10 @@ export async function stopCeleryQueues(terminate: boolean = false) {
   return data;
 }
 
-export async function startAlloyAnalysis(args: { documentId: string; text: string }) {
+export async function startAlloyAnalysis(args: {
+  documentId: string;
+  text: string;
+}) {
   const { data } = await apiClient.post<{
     task_id: string;
     status: string;
@@ -362,7 +413,11 @@ export async function startAlloyAnalysis(args: { documentId: string; text: strin
   return data;
 }
 
-export async function startAlloyBatchAnalysis(args: { idSpec?: string; sources?: string[]; limit?: number }) {
+export async function startAlloyBatchAnalysis(args: {
+  idSpec?: string;
+  sources?: string[];
+  limit?: number;
+}) {
   const { data } = await apiClient.post<{
     task_id: string;
     status: string;
@@ -400,14 +455,16 @@ export async function getAlloyAnalysisResults(limit: number = 200) {
 }
 
 export async function getAlloyAnalysisPrompt() {
-  const { data } = await apiClient.get<{ prompt: string }>("/tasks/celery/alloy-analysis/prompt");
+  const { data } = await apiClient.get<{ prompt: string }>(
+    "/tasks/celery/alloy-analysis/prompt",
+  );
   return data.prompt || "";
 }
 
 export async function saveAlloyAnalysisPrompt(prompt: string) {
   const { data } = await apiClient.put<{ prompt: string; status: string }>(
     "/tasks/celery/alloy-analysis/prompt",
-    { prompt }
+    { prompt },
   );
   return data;
 }
@@ -428,8 +485,8 @@ export async function fullTextSearch(args: {
   }>("/search/fulltext", undefined, {
     params: {
       query: args.query,
-      limit: args.limit || 20,
-      offset: args.offset || 0,
+      limit: clampBackendLimit(args.limit, 20),
+      offset: Math.max(0, Math.floor(Number(args.offset ?? 0) || 0)),
       source: args.source,
       search_mode: args.searchMode || "websearch",
     },
@@ -443,14 +500,19 @@ export async function fullTextSearch(args: {
 }
 
 export async function getSearchSuggestions(prefix: string, limit: number = 10) {
-  const { data } = await apiClient.get<{ suggestions: string[]; prefix: string; count: number }>(
-    "/search/suggest",
-    { params: { prefix, limit } }
-  );
+  const { data } = await apiClient.get<{
+    suggestions: string[];
+    prefix: string;
+    count: number;
+  }>("/search/suggest", { params: { prefix, limit } });
   return data.suggestions;
 }
 
-export async function searchByKeywords(keywords: string[], matchAll: boolean = true, limit: number = 20) {
+export async function searchByKeywords(
+  keywords: string[],
+  matchAll: boolean = true,
+  limit: number = 20,
+) {
   const { data } = await apiClient.post<{
     papers: PaperApiModel[];
     total: number;

@@ -103,16 +103,19 @@ async def update_config(
     """
     qwen_service = get_qwen_service()
 
-    await asyncio.to_thread(
+    updated = await asyncio.to_thread(
         qwen_service.update_config,
         model=config_update.model,
         thinking_enabled=config_update.thinking_enabled,
         search_enabled=config_update.search_enabled,
         auto_continue_enabled=config_update.auto_continue_enabled,
         max_continues=config_update.max_continues,
+        stream_retries=config_update.stream_retries,
+        history_recovery_attempts=config_update.history_recovery_attempts,
+        history_recovery_interval_sec=config_update.history_recovery_interval_sec,
     )
 
-    return QwenConfigResponse(**(await asyncio.to_thread(qwen_service.get_config)))
+    return QwenConfigResponse(**updated)
 
 
 @router.post("/sessions", response_model=QwenSessionCreateResponse)
@@ -349,4 +352,5 @@ async def send_message(
         continue_count=result.get("continue_count", 0),
         can_continue=result.get("can_continue", False),
         auto_continue_performed=result.get("auto_continue_performed", False),
+        error=result.get("error"),
     )

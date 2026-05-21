@@ -5,60 +5,105 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
-import { deletePaper, getPaperById, getPaperPdfUrl, reprocessPaperContent } from "../api/papers";
+import {
+  deletePaper,
+  getPaperById,
+  getPaperPdfUrl,
+  reprocessPaperContent,
+} from "../api/papers";
+import { useToast } from "../components/ui/Toast";
 import type { Paper } from "../types/paper";
-import { getProcessingProgress, getProcessingStatusLabel, isPaperProcessing } from "../types/paper";
+import {
+  getProcessingProgress,
+  getProcessingStatusLabel,
+  isPaperProcessing,
+} from "../types/paper";
 
 type Tab = "main" | "parts" | "report";
 
 const RU = {
-  invalidId: "\u041d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u044b\u0439 ID \u0441\u0442\u0430\u0442\u044c\u0438",
-  loading: "\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430 \u0441\u0442\u0430\u0442\u044c\u0438...",
-  notFound: "\u0421\u0442\u0430\u0442\u044c\u044f \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430.",
+  invalidId:
+    "\u041d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u044b\u0439 ID \u0441\u0442\u0430\u0442\u044c\u0438",
+  loading:
+    "\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430 \u0441\u0442\u0430\u0442\u044c\u0438...",
+  notFound:
+    "\u0421\u0442\u0430\u0442\u044c\u044f \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430.",
   home: "\u0413\u043b\u0430\u0432\u043d\u0430\u044f",
   papers: "\u0421\u0442\u0430\u0442\u044c\u0438",
   authors: "\u0410\u0432\u0442\u043e\u0440\u044b",
   source: "\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a",
   date: "\u0414\u0430\u0442\u0430",
   journal: "\u0416\u0443\u0440\u043d\u0430\u043b",
-  keywords: "\u041a\u043b\u044e\u0447\u0435\u0432\u044b\u0435 \u0441\u043b\u043e\u0432\u0430",
-  status: "\u0421\u0442\u0430\u0442\u0443\u0441 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0438",
-  fullText: "\u041f\u043e\u043b\u043d\u044b\u0439 \u0442\u0435\u043a\u0441\u0442",
+  keywords:
+    "\u041a\u043b\u044e\u0447\u0435\u0432\u044b\u0435 \u0441\u043b\u043e\u0432\u0430",
+  status:
+    "\u0421\u0442\u0430\u0442\u0443\u0441 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0438",
+  fullText:
+    "\u041f\u043e\u043b\u043d\u044b\u0439 \u0442\u0435\u043a\u0441\u0442",
   yes: "\u0415\u0441\u0442\u044c",
   no: "\u041d\u0435\u0442",
   open: "\u041e\u0442\u043a\u0440\u044b\u0442\u044c",
   openPdf: "\u041e\u0442\u043a\u0440\u044b\u0442\u044c PDF",
   workerTask: "Worker task",
   tabMain: "\u0413\u043b\u0430\u0432\u043d\u0430\u044f",
-  tabParts: "\u0422\u0435\u043a\u0441\u0442 \u043f\u043e \u0447\u0430\u0441\u0442\u044f\u043c",
+  tabParts:
+    "\u0422\u0435\u043a\u0441\u0442 \u043f\u043e \u0447\u0430\u0441\u0442\u044f\u043c",
   tabReport: "\u041e\u0442\u0447\u0435\u0442",
   gist: "\u0421\u0443\u0442\u044c \u0441\u0442\u0430\u0442\u044c\u0438",
-  gistNotReady: "\u0421\u0443\u0442\u044c \u0441\u0442\u0430\u0442\u044c\u0438 \u043f\u043e\u043a\u0430 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432\u0430.",
-  pdfLen: "PDF (\u043a\u043e\u043b. \u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432",
-  articleText: "\u0422\u0435\u043a\u0441\u0442 \u0441\u0442\u0430\u0442\u044c\u0438",
-  reportBtn: "\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u043e\u0442\u0447\u0435\u0442 \u043d\u0430 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u043e\u0439 \u0441\u0442\u0440\u0430\u043d\u0438\u0446\u0435",
-  reprocessBtn: "\u041f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0443",
-  tokensPerPart: "\u0422\u043e\u043a\u0435\u043d\u043e\u0432 \u043d\u0430 \u0447\u0430\u0441\u0442\u044c",
-  approxTokens: "\u041f\u0440\u0438\u0431\u043b\u0438\u0437\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0439 total tokens",
+  gistNotReady:
+    "\u0421\u0443\u0442\u044c \u0441\u0442\u0430\u0442\u044c\u0438 \u043f\u043e\u043a\u0430 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432\u0430.",
+  pdfLen:
+    "PDF (\u043a\u043e\u043b. \u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432",
+  articleText:
+    "\u0422\u0435\u043a\u0441\u0442 \u0441\u0442\u0430\u0442\u044c\u0438",
+  reportBtn:
+    "\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u043e\u0442\u0447\u0435\u0442 \u043d\u0430 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u043e\u0439 \u0441\u0442\u0440\u0430\u043d\u0438\u0446\u0435",
+  reprocessBtn:
+    "\u041f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0443",
+  tokensPerPart:
+    "\u0422\u043e\u043a\u0435\u043d\u043e\u0432 \u043d\u0430 \u0447\u0430\u0441\u0442\u044c",
+  approxTokens:
+    "\u041f\u0440\u0438\u0431\u043b\u0438\u0437\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0439 total tokens",
   parts: "\u0427\u0430\u0441\u0442\u0438",
   emptyText: "\u0422\u0435\u043a\u0441\u0442 \u043f\u0443\u0441\u0442.",
   part: "\u0427\u0430\u0441\u0442\u044c",
-  selectedPart: "\u0412\u044b\u0431\u0440\u0430\u043d\u043d\u0430\u044f \u0447\u0430\u0441\u0442\u044c",
-  localMetrics: "\u041b\u043e\u043a\u0430\u043b\u044c\u043d\u044b\u0435 \u043c\u0435\u0442\u0440\u0438\u043a\u0438 (\u044d\u0432\u0440\u0438\u0441\u0442\u0438\u043a\u0438)",
-  localMetricsHint: "\u0412 API \u043f\u043e\u043a\u0430 \u043d\u0435\u0442 ML-\u044d\u043d\u0434\u043f\u043e\u0438\u043d\u0442\u0430 \u0434\u043b\u044f \u0438\u0437\u0432\u043b\u0435\u0447\u0435\u043d\u0438\u044f \u043c\u0435\u0442\u0440\u0438\u043a.",
-  temps: "\u0422\u0435\u043c\u043f\u0435\u0440\u0430\u0442\u0443\u0440\u044b (\u00b0C)",
-  aiAnalysis: "AI \u0430\u043d\u0430\u043b\u0438\u0437 (\u0440\u0443\u0441\u0441\u043a\u0438\u0439)",
-  aiNotReady: "\u0410\u043d\u0430\u043b\u0438\u0437 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.",
-  translation: "\u041f\u0435\u0440\u0435\u0432\u043e\u0434 (\u0440\u0443\u0441\u0441\u043a\u0438\u0439)",
-  translationNotReady: "\u041f\u0435\u0440\u0435\u0432\u043e\u0434 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.",
-  processingError: "\u041e\u0448\u0438\u0431\u043a\u0430 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0438",
-  noTextForReport: "\u041d\u0435\u0442 \u0442\u0435\u043a\u0441\u0442\u0430 \u0434\u043b\u044f \u043e\u0442\u0447\u0435\u0442\u0430.",
-  quickOverview: "\u0427\u0430\u0441\u0442\u0438 (\u0431\u044b\u0441\u0442\u0440\u044b\u0439 \u043e\u0431\u0437\u043e\u0440)",
-  deletePaper: "\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0441\u0442\u0430\u0442\u044c\u044e",
-  copyGist: "\u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u0441\u0443\u0442\u044c",
-  backToList: "\u041d\u0430\u0437\u0430\u0434 \u043a \u0441\u043f\u0438\u0441\u043a\u0443",
+  selectedPart:
+    "\u0412\u044b\u0431\u0440\u0430\u043d\u043d\u0430\u044f \u0447\u0430\u0441\u0442\u044c",
+  localMetrics:
+    "\u041b\u043e\u043a\u0430\u043b\u044c\u043d\u044b\u0435 \u043c\u0435\u0442\u0440\u0438\u043a\u0438 (\u044d\u0432\u0440\u0438\u0441\u0442\u0438\u043a\u0438)",
+  localMetricsHint:
+    "\u0412 API \u043f\u043e\u043a\u0430 \u043d\u0435\u0442 ML-\u044d\u043d\u0434\u043f\u043e\u0438\u043d\u0442\u0430 \u0434\u043b\u044f \u0438\u0437\u0432\u043b\u0435\u0447\u0435\u043d\u0438\u044f \u043c\u0435\u0442\u0440\u0438\u043a.",
+  temps:
+    "\u0422\u0435\u043c\u043f\u0435\u0440\u0430\u0442\u0443\u0440\u044b (\u00b0C)",
+  aiAnalysis:
+    "AI \u0430\u043d\u0430\u043b\u0438\u0437 (\u0440\u0443\u0441\u0441\u043a\u0438\u0439)",
+  aiNotReady:
+    "\u0410\u043d\u0430\u043b\u0438\u0437 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.",
+  translation:
+    "\u041f\u0435\u0440\u0435\u0432\u043e\u0434 (\u0440\u0443\u0441\u0441\u043a\u0438\u0439)",
+  translationNotReady:
+    "\u041f\u0435\u0440\u0435\u0432\u043e\u0434 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.",
+  processingError:
+    "\u041e\u0448\u0438\u0431\u043a\u0430 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0438",
+  noTextForReport:
+    "\u041d\u0435\u0442 \u0442\u0435\u043a\u0441\u0442\u0430 \u0434\u043b\u044f \u043e\u0442\u0447\u0435\u0442\u0430.",
+  quickOverview:
+    "\u0427\u0430\u0441\u0442\u0438 (\u0431\u044b\u0441\u0442\u0440\u044b\u0439 \u043e\u0431\u0437\u043e\u0440)",
+  deletePaper:
+    "\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0441\u0442\u0430\u0442\u044c\u044e",
+  copyGist:
+    "\u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u0441\u0443\u0442\u044c",
+  backToList:
+    "\u041d\u0430\u0437\u0430\u0434 \u043a \u0441\u043f\u0438\u0441\u043a\u0443",
   copied: "\u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u043e!",
-  confirmDelete: "\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0441\u0442\u0430\u0442\u044c\u044e \u0438\u0437 \u0431\u0430\u0437\u044b?",
+  copyEmpty: "Суть статьи ещё не готова — копировать нечего.",
+  deleteOk: "Статья удалена.",
+  deleteError: "Не удалось удалить статью",
+  reprocessQueued: "Повторная обработка поставлена в очередь.",
+  reprocessError: "Не удалось перезапустить обработку",
+  actionInProgress: "Выполняется...",
+  confirmDelete:
+    "\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0441\u0442\u0430\u0442\u044c\u044e \u0438\u0437 \u0431\u0430\u0437\u044b?",
   unknown: "\u2014",
 };
 
@@ -78,7 +123,18 @@ function splitByTokens(text: string, tokensPerPart: number): string[] {
 
 function localExtractMetrics(text: string) {
   const lower = text.toLowerCase();
-  const keywords = ["nickel", "superalloy", "inconel", "hastelloy", "creep", "tensile", "fatigue", "yield", "temperature", "corrosion"];
+  const keywords = [
+    "nickel",
+    "superalloy",
+    "inconel",
+    "hastelloy",
+    "creep",
+    "tensile",
+    "fatigue",
+    "yield",
+    "temperature",
+    "corrosion",
+  ];
   const found: Record<string, number> = {};
   for (const k of keywords) {
     const re = new RegExp(k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
@@ -86,7 +142,10 @@ function localExtractMetrics(text: string) {
     found[k] = m ? m.length : 0;
   }
 
-  const temps = (text.match(/(\d+(?:\.\d+)?)\s*(?:°\s*)?c/gi) ?? []).slice(0, 20);
+  const temps = (text.match(/(\d+(?:\.\d+)?)\s*(?:°\s*)?c/gi) ?? []).slice(
+    0,
+    20,
+  );
   const topKeywords = Object.entries(found)
     .sort((a, b) => b[1] - a[1])
     .filter(([, v]) => v > 0)
@@ -98,7 +157,11 @@ function localExtractMetrics(text: string) {
 function MarkdownText({ text }: { text: string }) {
   return (
     <div className="markdown-body">
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} skipHtml>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex]}
+        skipHtml
+      >
         {text}
       </ReactMarkdown>
     </div>
@@ -108,29 +171,44 @@ function MarkdownText({ text }: { text: string }) {
 export default function PatentDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const toast = useToast();
 
   const [paper, setPaper] = useState<Paper | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [pollingWarning, setPollingWarning] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("main");
   const [tokensPerPart, setTokensPerPart] = useState(350);
   const [activePartIndex, setActivePartIndex] = useState(0);
+  const [actionBusy, setActionBusy] = useState<"delete" | "reprocess" | null>(
+    null,
+  );
 
   const loadPaper = async (showLoading = true) => {
     const paperId = Number(id);
     if (!paperId || Number.isNaN(paperId)) {
-      setError(RU.invalidId);
+      setLoadError(RU.invalidId);
       setLoading(false);
       return;
     }
 
     if (showLoading) setLoading(true);
-    setError(null);
+    if (showLoading) {
+      setLoadError(null);
+    }
     try {
       const nextPaper = await getPaperById(paperId);
       setPaper(nextPaper);
+      setLoadError(null);
+      setPollingWarning(null);
     } catch (e) {
-      setError((e as Error).message);
+      const message = (e as Error).message;
+      if (showLoading || !paper) {
+        setLoadError(message);
+      } else {
+        setPollingWarning(`Не удалось обновить статус статьи: ${message}`);
+      }
     } finally {
       if (showLoading) setLoading(false);
     }
@@ -138,7 +216,6 @@ export default function PatentDetail() {
 
   useEffect(() => {
     loadPaper();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   useEffect(() => {
@@ -147,12 +224,15 @@ export default function PatentDetail() {
       loadPaper(false).catch(() => null);
     }, 4000);
     return () => window.clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paper?.id, paper?.processingStatus]);
 
   const fullText = paper?.fullText ?? "";
   const hasFullText = Boolean(paper?.fullText?.trim().length);
-  const hasFullTextOrPdf = Boolean((paper?.fullText && paper.fullText.trim().length > 0) || paper?.pdfUrl || paper?.pdfLocalPath);
+  const hasFullTextOrPdf = Boolean(
+    (paper?.fullText && paper.fullText.trim().length > 0) ||
+    paper?.pdfUrl ||
+    paper?.pdfLocalPath,
+  );
 
   const parts = useMemo(() => {
     if (!paper) return [];
@@ -177,39 +257,85 @@ export default function PatentDetail() {
   }, [parts, activePartIndex]);
 
   const onDelete = async () => {
-    if (!paper) return;
+    if (!paper || actionBusy) return;
     if (!window.confirm(RU.confirmDelete)) return;
-    await deletePaper(paper.id);
-    navigate("/papers");
+    setActionBusy("delete");
+    setActionError(null);
+    try {
+      await deletePaper(paper.id);
+      toast.success(RU.deleteOk);
+      navigate("/papers");
+    } catch (e) {
+      const message = (e as Error).message;
+      setActionError(`${RU.deleteError}: ${message}`);
+      toast.error(`${RU.deleteError}: ${message}`);
+    } finally {
+      setActionBusy(null);
+    }
   };
 
   const onReprocess = async () => {
-    if (!paper) return;
-    await reprocessPaperContent(paper.id);
-    await loadPaper();
+    if (!paper || actionBusy) return;
+    setActionBusy("reprocess");
+    setActionError(null);
+    try {
+      await reprocessPaperContent(paper.id);
+      toast.success(RU.reprocessQueued);
+      await loadPaper(false);
+    } catch (e) {
+      const message = (e as Error).message;
+      setActionError(`${RU.reprocessError}: ${message}`);
+      toast.error(`${RU.reprocessError}: ${message}`);
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
+  const copyGist = async () => {
+    if (!paper?.summaryRu?.trim()) {
+      toast.warning(RU.copyEmpty);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(paper.summaryRu);
+      toast.success(RU.copied);
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
   };
 
   if (loading) return <p className="muted">{RU.loading}</p>;
-  if (error) return <p className="error">{error}</p>;
+  if (loadError && !paper) return <p className="error">{loadError}</p>;
   if (!paper) return <p className="muted">{RU.notFound}</p>;
 
   return (
     <div className="page">
       <p className="muted">
-        <Link to="/dashboard">{RU.home}</Link> → <Link to="/papers">{RU.papers}</Link> → {paper.title}
+        <Link to="/dashboard">{RU.home}</Link> →{" "}
+        <Link to="/papers">{RU.papers}</Link> → {paper.title}
       </p>
+
+      {actionError && <p className="error">{actionError}</p>}
+      {pollingWarning && <p className="muted">{pollingWarning}</p>}
 
       <div className="panel">
         <h2 style={{ marginTop: 0 }}>{paper.title}</h2>
         <div className="detail-grid">
           <p>
-            <strong>{RU.authors}:</strong> {paper.authors.length ? paper.authors.slice(0, 4).join(", ") + (paper.authors.length > 4 ? "..." : "") : RU.unknown}
+            <strong>{RU.authors}:</strong>{" "}
+            {paper.authors.length
+              ? paper.authors.slice(0, 4).join(", ") +
+                (paper.authors.length > 4 ? "..." : "")
+              : RU.unknown}
           </p>
           <p>
             <strong>{RU.source}:</strong> {paper.source}
           </p>
           <p>
-            <strong>{RU.date}:</strong> {paper.publicationDate ? paper.publicationDate.slice(0, 10) : RU.unknown}
+            <strong>{RU.date}:</strong>{" "}
+            {paper.publicationDate
+              ? paper.publicationDate.slice(0, 10)
+              : RU.unknown}
           </p>
           <p>
             <strong>{RU.journal}:</strong> {paper.journal ?? RU.unknown}
@@ -218,17 +344,28 @@ export default function PatentDetail() {
             <strong>DOI:</strong> {paper.doi ?? RU.unknown}
           </p>
           <p>
-            <strong>{RU.keywords}:</strong> {paper.keywords.length ? paper.keywords.slice(0, 10).join(", ") : RU.unknown}
+            <strong>{RU.keywords}:</strong>{" "}
+            {paper.keywords.length
+              ? paper.keywords.slice(0, 10).join(", ")
+              : RU.unknown}
           </p>
           <div className="detail-progress">
             <div className="paper-progress-head">
               <strong>{RU.status}:</strong>
-              <span>{getProcessingStatusLabel(paper.processingStatus)} - {getProcessingProgress(paper.processingStatus)}%</span>
+              <span>
+                {getProcessingStatusLabel(paper.processingStatus)} -{" "}
+                {getProcessingProgress(paper.processingStatus)}%
+              </span>
             </div>
-            <div className="paper-progress-track" aria-label={`paper-${paper.id}-progress`}>
+            <div
+              className="paper-progress-track"
+              aria-label={`paper-${paper.id}-progress`}
+            >
               <div
                 className={`paper-progress-fill ${paper.processingStatus === "failed" ? "failed" : getProcessingProgress(paper.processingStatus) === 100 ? "done" : ""}`}
-                style={{ width: `${Math.max(3, getProcessingProgress(paper.processingStatus))}%` }}
+                style={{
+                  width: `${Math.max(3, getProcessingProgress(paper.processingStatus))}%`,
+                }}
               />
             </div>
           </div>
@@ -238,7 +375,12 @@ export default function PatentDetail() {
           <p>
             <strong>URL:</strong>{" "}
             {paper.url ? (
-              <a href={paper.url} target="_blank" rel="noreferrer" className="action-link">
+              <a
+                href={paper.url}
+                target="_blank"
+                rel="noreferrer"
+                className="action-link"
+              >
                 {RU.open}
               </a>
             ) : (
@@ -248,7 +390,12 @@ export default function PatentDetail() {
           <p>
             <strong>PDF:</strong>{" "}
             {paper.pdfUrl || paper.pdfLocalPath ? (
-              <a href={getPaperPdfUrl(paper.id)} target="_blank" rel="noreferrer" className="action-link">
+              <a
+                href={getPaperPdfUrl(paper.id)}
+                target="_blank"
+                rel="noreferrer"
+                className="action-link"
+              >
                 {RU.openPdf}
               </a>
             ) : (
@@ -256,21 +403,31 @@ export default function PatentDetail() {
             )}
           </p>
           <p>
-            <strong>{RU.workerTask}:</strong> {paper.contentTaskId ?? RU.unknown}
+            <strong>{RU.workerTask}:</strong>{" "}
+            {paper.contentTaskId ?? RU.unknown}
           </p>
         </div>
       </div>
 
       <div className="tabs">
-        <button className={`btn ${tab === "main" ? "btn-primary" : ""}`} onClick={() => setTab("main")}>
+        <button
+          className={`btn ${tab === "main" ? "btn-primary" : ""}`}
+          onClick={() => setTab("main")}
+        >
           {RU.tabMain}
         </button>
         {hasFullText && (
-          <button className={`btn ${tab === "parts" ? "btn-primary" : ""}`} onClick={() => setTab("parts")}>
+          <button
+            className={`btn ${tab === "parts" ? "btn-primary" : ""}`}
+            onClick={() => setTab("parts")}
+          >
             {RU.tabParts}
           </button>
         )}
-        <button className={`btn ${tab === "report" ? "btn-primary" : ""}`} onClick={() => setTab("report")}>
+        <button
+          className={`btn ${tab === "report" ? "btn-primary" : ""}`}
+          onClick={() => setTab("report")}
+        >
           {RU.tabReport}
         </button>
       </div>
@@ -291,7 +448,16 @@ export default function PatentDetail() {
               <h3 style={{ marginTop: 18 }}>
                 {RU.pdfLen}: {paper.fullText?.length ?? 0})
               </h3>
-              <iframe title="paper-pdf" src={getPaperPdfUrl(paper.id)} style={{ width: "100%", height: 640, border: "1px solid #e5e7eb", borderRadius: 8 }} />
+              <iframe
+                title="paper-pdf"
+                src={getPaperPdfUrl(paper.id)}
+                style={{
+                  width: "100%",
+                  height: 640,
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 8,
+                }}
+              />
               {paper.fullText && (
                 <>
                   <h3 style={{ marginTop: 18 }}>{RU.articleText}</h3>
@@ -302,11 +468,21 @@ export default function PatentDetail() {
           )}
 
           <div style={{ marginTop: 12 }}>
-            <button className="btn" onClick={() => navigate(`/papers/${paper.id}/report`)}>
+            <button
+              className="btn"
+              onClick={() => navigate(`/papers/${paper.id}/report`)}
+            >
               {RU.reportBtn}
             </button>
-            <button className="btn" style={{ marginLeft: 10 }} onClick={onReprocess}>
-              {RU.reprocessBtn}
+            <button
+              className="btn"
+              style={{ marginLeft: 10 }}
+              onClick={onReprocess}
+              disabled={actionBusy === "reprocess"}
+            >
+              {actionBusy === "reprocess"
+                ? RU.actionInProgress
+                : RU.reprocessBtn}
             </button>
           </div>
         </article>
@@ -332,15 +508,29 @@ export default function PatentDetail() {
             </span>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "340px 1fr", gap: 12, alignItems: "start" }}>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "340px 1fr",
+              gap: 12,
+              alignItems: "start",
+            }}
+          >
             <div className="panel" style={{ padding: 12, boxShadow: "none" }}>
               <h3 style={{ marginTop: 0 }}>{RU.parts}</h3>
               {!parts.length ? (
                 <p className="muted">{RU.emptyText}</p>
               ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div
+                  style={{ display: "flex", flexDirection: "column", gap: 8 }}
+                >
                   {parts.map((_, idx) => (
-                    <button key={idx} className={`btn ${idx === activePartIndex ? "btn-primary" : ""}`} onClick={() => setActivePartIndex(idx)} style={{ justifyContent: "flex-start" }}>
+                    <button
+                      key={idx}
+                      className={`btn ${idx === activePartIndex ? "btn-primary" : ""}`}
+                      onClick={() => setActivePartIndex(idx)}
+                      style={{ justifyContent: "flex-start" }}
+                    >
                       {RU.part} {idx + 1}
                     </button>
                   ))}
@@ -353,9 +543,17 @@ export default function PatentDetail() {
               <p className="muted">
                 Index: {activePartIndex + 1} / {parts.length}
               </p>
-              <p style={{ whiteSpace: "pre-wrap" }}>{parts[activePartIndex] ?? ""}</p>
+              <p style={{ whiteSpace: "pre-wrap" }}>
+                {parts[activePartIndex] ?? ""}
+              </p>
 
-              <hr style={{ border: "none", borderTop: "1px solid #e5e7eb", margin: "14px 0" }} />
+              <hr
+                style={{
+                  border: "none",
+                  borderTop: "1px solid #e5e7eb",
+                  margin: "14px 0",
+                }}
+              />
               <h3 style={{ marginTop: 0 }}>{RU.localMetrics}</h3>
               <p className="muted">{RU.localMetricsHint}</p>
 
@@ -363,10 +561,17 @@ export default function PatentDetail() {
                 <div className="detail-grid" style={{ marginTop: 10 }}>
                   <p>
                     <strong>Top keywords:</strong>{" "}
-                    {partMetrics.topKeywords.length ? partMetrics.topKeywords.map(([k, v]) => `${k}=${v}`).join(", ") : RU.unknown}
+                    {partMetrics.topKeywords.length
+                      ? partMetrics.topKeywords
+                          .map(([k, v]) => `${k}=${v}`)
+                          .join(", ")
+                      : RU.unknown}
                   </p>
                   <p>
-                    <strong>{RU.temps}:</strong> {partMetrics.temps.length ? partMetrics.temps.join(", ") : RU.unknown}
+                    <strong>{RU.temps}:</strong>{" "}
+                    {partMetrics.temps.length
+                      ? partMetrics.temps.join(", ")
+                      : RU.unknown}
                   </p>
                 </div>
               )}
@@ -378,10 +583,18 @@ export default function PatentDetail() {
       {tab === "report" && (
         <article className="panel">
           <h3>{RU.aiAnalysis}</h3>
-          {paper.analysisRu ? <p style={{ whiteSpace: "pre-wrap" }}>{paper.analysisRu}</p> : <p className="muted">{RU.aiNotReady}</p>}
+          {paper.analysisRu ? (
+            <p style={{ whiteSpace: "pre-wrap" }}>{paper.analysisRu}</p>
+          ) : (
+            <p className="muted">{RU.aiNotReady}</p>
+          )}
 
           <h3 style={{ marginTop: 18 }}>{RU.translation}</h3>
-          {paper.translationRu ? <p style={{ whiteSpace: "pre-wrap" }}>{paper.translationRu}</p> : <p className="muted">{RU.translationNotReady}</p>}
+          {paper.translationRu ? (
+            <p style={{ whiteSpace: "pre-wrap" }}>{paper.translationRu}</p>
+          ) : (
+            <p className="muted">{RU.translationNotReady}</p>
+          )}
 
           {paper.processingError && (
             <p className="error" style={{ marginTop: 12 }}>
@@ -394,39 +607,64 @@ export default function PatentDetail() {
           ) : (
             <>
               <h3>{RU.quickOverview}</h3>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                  gap: 10,
+                }}
+              >
                 {parts.slice(0, 8).map((part, idx) => {
                   const m = localExtractMetrics(part);
                   return (
-                    <article className="panel" key={idx} style={{ boxShadow: "none", padding: 12 }}>
+                    <article
+                      className="panel"
+                      key={idx}
+                      style={{ boxShadow: "none", padding: 12 }}
+                    >
                       <p className="muted">
                         {RU.part} {idx + 1}
                       </p>
-                      <p style={{ margin: 0, whiteSpace: "pre-wrap", fontSize: 13 }}>
-                        {(m.topKeywords.length ? m.topKeywords.map(([k, v]) => `${k}:${v}`).join(", ") : "\u043c\u0435\u0442\u0440\u0438\u043a\u0438 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b") + "\n\n"}
+                      <p
+                        style={{
+                          margin: 0,
+                          whiteSpace: "pre-wrap",
+                          fontSize: 13,
+                        }}
+                      >
+                        {(m.topKeywords.length
+                          ? m.topKeywords
+                              .map(([k, v]) => `${k}:${v}`)
+                              .join(", ")
+                          : "\u043c\u0435\u0442\u0440\u0438\u043a\u0438 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b") +
+                          "\n\n"}
                         {part.slice(0, 300)}...
                       </p>
                     </article>
                   );
                 })}
               </div>
-              {parts.length > 8 && <p className="muted">\u041f\u043e\u043a\u0430\u0437\u0430\u043d\u044b \u043f\u0435\u0440\u0432\u044b\u0435 8 \u0447\u0430\u0441\u0442\u0435\u0439.</p>}
+              {parts.length > 8 && (
+                <p className="muted">
+                  \u041f\u043e\u043a\u0430\u0437\u0430\u043d\u044b
+                  \u043f\u0435\u0440\u0432\u044b\u0435 8
+                  \u0447\u0430\u0441\u0442\u0435\u0439.
+                </p>
+              )}
             </>
           )}
         </article>
       )}
 
       <div className="actions">
-        <button className="btn btn-danger" onClick={onDelete}>
-          {RU.deletePaper}
-        </button>
         <button
-          className="btn"
-          onClick={() => {
-            navigator.clipboard.writeText(paper.summaryRu ?? "");
-            alert(RU.copied);
-          }}
+          className="btn btn-danger"
+          onClick={onDelete}
+          disabled={actionBusy === "delete"}
         >
+          {actionBusy === "delete" ? RU.actionInProgress : RU.deletePaper}
+        </button>
+        <button className="btn" onClick={() => void copyGist()}>
           {RU.copyGist}
         </button>
         <button className="btn" onClick={() => navigate("/papers")}>

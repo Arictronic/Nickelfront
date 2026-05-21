@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 export type ToastType = "success" | "error" | "info" | "warning";
 
@@ -13,17 +13,61 @@ interface ToastProps extends Toast {
   onDismiss: (id: string) => void;
 }
 
-/**
- * Компонент отдельного Toast уведомления.
- */
+type ToastApi = {
+  toasts: Toast[];
+  success: (message: string, duration?: number) => string;
+  error: (message: string, duration?: number) => string;
+  warning: (message: string, duration?: number) => string;
+  info: (message: string, duration?: number) => string;
+  dismiss: (id: string) => void;
+  clear: () => void;
+};
+
+const ToastContext = createContext<ToastApi | null>(null);
+
+function useToastState(): ToastApi {
+  const [toasts, setToasts] = useState<Toast[]>([]);
+
+  const api = useMemo<ToastApi>(() => {
+    const addToast = (type: ToastType, message: string, duration?: number) => {
+      const id = `${Date.now()}-${Math.random()}`;
+      setToasts((prev) => [...prev, { id, type, message, duration }]);
+      return id;
+    };
+
+    return {
+      toasts,
+      success: (message, duration) => addToast("success", message, duration),
+      error: (message, duration) => addToast("error", message, duration),
+      warning: (message, duration) => addToast("warning", message, duration),
+      info: (message, duration) => addToast("info", message, duration),
+      dismiss: (id) => setToasts((prev) => prev.filter((toast) => toast.id !== id)),
+      clear: () => setToasts([]),
+    };
+  }, [toasts]);
+
+  return api;
+}
+
+export function ToastProvider({ children }: { children: ReactNode }) {
+  const api = useToastState();
+  return <ToastContext.Provider value={api}>{children}</ToastContext.Provider>;
+}
+
+export function useToast() {
+  const ctx = useContext(ToastContext);
+  if (!ctx) {
+    throw new Error("useToast must be used inside ToastProvider");
+  }
+  return ctx;
+}
+
+/** Компонент отдельного Toast уведомления. */
 function ToastItem({ id, type, message, duration = 5000, onDismiss }: ToastProps) {
   useEffect(() => {
-    if (duration > 0) {
-      const timer = setTimeout(() => {
-        onDismiss(id);
-      }, duration);
-      return () => clearTimeout(timer);
-    }
+    if (duration <= 0) return;
+    const timer = window.setTimeout(() => onDismiss(id), duration);
+    return () => window.clearTimeout(timer);
   }, [id, duration, onDismiss]);
 
   const getStyles = () => {
@@ -39,7 +83,7 @@ function ToastItem({ id, type, message, duration = 5000, onDismiss }: ToastProps
       minWidth: 300,
       maxWidth: 500,
       animation: "slideIn 0.3s ease-out",
-    };
+    } as const;
 
     switch (type) {
       case "success":
@@ -54,28 +98,18 @@ function ToastItem({ id, type, message, duration = 5000, onDismiss }: ToastProps
     }
   };
 
-  const getIcon = () => {
-    switch (type) {
-      case "success":
-        return "✓";
-      case "error":
-        return "✕";
-      case "warning":
-        return "⚠";
-      case "info":
-      default:
-        return "ℹ";
-    }
-  };
+  const icon = type === "success" ? "✓" : type === "error" ? "✕" : type === "warning" ? "⚠" : "ℹ";
 
   return (
     <div style={getStyles()} role="alert">
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 18 }}>{getIcon()}</span>
+        <span style={{ fontSize: 18 }}>{icon}</span>
         <span>{message}</span>
       </div>
       <button
+        type="button"
         onClick={() => onDismiss(id)}
+        aria-label="Закрыть уведомление"
         style={{
           background: "transparent",
           border: "none",
@@ -92,9 +126,6 @@ function ToastItem({ id, type, message, duration = 5000, onDismiss }: ToastProps
   );
 }
 
-/**
- * Контейнер для Toast уведомлений.
- */
 interface ToastContainerProps {
   toasts: Toast[];
   onDismiss: (id: string) => void;
@@ -102,26 +133,20 @@ interface ToastContainerProps {
 }
 
 export function ToastContainer({ toasts, onDismiss, position = "top-right" }: ToastContainerProps) {
-  const getPositionStyles = () => {
-    switch (position) {
-      case "top-right":
-        return { top: 20, right: 20 };
-      case "top-left":
-        return { top: 20, left: 20 };
-      case "bottom-right":
-        return { bottom: 20, right: 20 };
-      case "bottom-left":
-        return { bottom: 20, left: 20 };
-      default:
-        return { top: 20, right: 20 };
-    }
-  };
+  const positionStyles =
+    position === "top-left"
+      ? { top: 20, left: 20 }
+      : position === "bottom-right"
+        ? { bottom: 20, right: 20 }
+        : position === "bottom-left"
+          ? { bottom: 20, left: 20 }
+          : { top: 20, right: 20 };
 
   return (
     <div
       style={{
         position: "fixed",
-        ...getPositionStyles(),
+        ...positionStyles,
         zIndex: 9999,
         display: "flex",
         flexDirection: "column",
@@ -132,39 +157,6 @@ export function ToastContainer({ toasts, onDismiss, position = "top-right" }: To
       ))}
     </div>
   );
-}
-
-/**
- * Хук для управления Toast уведомлениями.
- */
-export function useToast() {
-  const [toasts, setToasts] = useState<Toast[]>([]);
-
-  const addToast = (type: ToastType, message: string, duration?: number) => {
-    const id = `${Date.now()}-${Math.random()}`;
-    const toast: Toast = { id, type, message, duration };
-    setToasts((prev) => [...prev, toast]);
-    return id;
-  };
-
-  const dismissToast = (id: string) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  };
-
-  const success = (message: string, duration?: number) => addToast("success", message, duration);
-  const error = (message: string, duration?: number) => addToast("error", message, duration);
-  const warning = (message: string, duration?: number) => addToast("warning", message, duration);
-  const info = (message: string, duration?: number) => addToast("info", message, duration);
-
-  return {
-    toasts,
-    success,
-    error,
-    warning,
-    info,
-    dismiss: dismissToast,
-    clear: () => setToasts([]),
-  };
 }
 
 export default ToastContainer;

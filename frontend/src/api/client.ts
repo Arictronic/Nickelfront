@@ -4,8 +4,8 @@ import { useAuthStore } from "../store/authStore";
 // Определяем базовый URL API
 // - Если задан VITE_API_URL (полный URL), используем его
 // - Иначе используем относительный путь (для работы через proxy на сервере)
-const apiUrl = import.meta.env.VITE_API_URL;
-const baseURL = apiUrl ? apiUrl : "/api/v1";
+const apiUrl = String(import.meta.env.VITE_API_URL || "").trim();
+const baseURL = apiUrl || "/api/v1";
 
 function serializeParams(params: Record<string, unknown>): string {
   const searchParams = new URLSearchParams();
@@ -52,6 +52,13 @@ const refreshClient = axios.create({
 
 let refreshPromise: Promise<{ access_token: string; refresh_token: string } | null> | null = null;
 
+function clearAuthAndRedirect(): void {
+  useAuthStore.getState().logout();
+  if (window.location.pathname !== "/login") {
+    window.location.href = "/login";
+  }
+}
+
 // Add auth header
 apiClient.interceptors.request.use(
   (config) => {
@@ -80,9 +87,7 @@ apiClient.interceptors.response.use(
     if (status === 401 && !originalRequest._retry && !isAuthRoute) {
       const refreshToken = localStorage.getItem("refresh_token");
       if (!refreshToken) {
-        localStorage.removeItem("auth_token");
-        localStorage.removeItem("refresh_token");
-        window.location.href = "/login";
+        clearAuthAndRedirect();
         return Promise.reject(error);
       }
 
@@ -100,9 +105,7 @@ apiClient.interceptors.response.use(
 
       const data = await refreshPromise;
       if (!data?.access_token || !data?.refresh_token) {
-        localStorage.removeItem("auth_token");
-        localStorage.removeItem("refresh_token");
-        window.location.href = "/login";
+        clearAuthAndRedirect();
         return Promise.reject(error);
       }
 
@@ -110,6 +113,7 @@ apiClient.interceptors.response.use(
       localStorage.setItem("refresh_token", data.refresh_token);
       useAuthStore.getState().setToken(data.access_token);
       useAuthStore.getState().setRefreshToken(data.refresh_token);
+      useAuthStore.getState().setSessionError(null);
 
       // Background profile refresh to avoid UI flicker
       refreshClient
@@ -130,27 +134,57 @@ apiClient.interceptors.response.use(
 
     // Keep login/register errors inside UI form (no forced page reload).
     if (status === 401 && isRefreshRoute) {
-      localStorage.removeItem("auth_token");
-      localStorage.removeItem("refresh_token");
-      window.location.href = "/login";
+      clearAuthAndRedirect();
+    }
+
+    const payload = error.response?.data;
+    const detail = payload?.detail ?? payload?.message ?? payload?.error ?? payload?.details;
+    if (detail) {
+      error.message = typeof detail === "string" ? detail : JSON.stringify(detail);
     }
 
     return Promise.reject(error);
   }
 );
 
-export function getBackendRootUrl(): string {
-  const configuredBase = String(apiClient.defaults.baseURL || "");
+function normalizeRootUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
 
   try {
-    if (/^https?:\/\//i.test(configuredBase)) {
-      return new URL(configuredBase).origin;
+    if (/^https?:\/\//i.test(trimmed)) {
+      return new URL(trimmed).origin;
+    }
+
+    if (typeof window !== "undefined" && trimmed.startsWith("/")) {
+      return window.location.origin;
     }
   } catch {
-    // Fallback below.
+    return null;
   }
 
-  // In local Vite mode apiClient usually uses relative /api/v1 through proxy.
-  // Backend Swagger is not under /api, so point directly to the local FastAPI server.
-  return "http://localhost:8001";
+  return null;
+}
+
+export function getBackendRootUrl(): string {
+  const envCandidates = [
+    String(import.meta.env.VITE_BACKEND_ROOT_URL || ""),
+    String(import.meta.env.VITE_PROXY_TARGET || ""),
+    String(import.meta.env.VITE_API_URL || ""),
+  ];
+
+  for (const candidate of envCandidates) {
+    const normalized = normalizeRootUrl(candidate);
+    if (normalized) return normalized;
+  }
+
+  const configuredBase = normalizeRootUrl(String(apiClient.defaults.baseURL || ""));
+  if (configuredBase) return configuredBase;
+
+  const apiPort = String(import.meta.env.API_PORT || import.meta.env.VITE_API_PORT || "").trim();
+  if (/^\d+$/.test(apiPort)) {
+    return `http://127.0.0.1:${apiPort}`;
+  }
+
+  return "http://127.0.0.1:8001";
 }

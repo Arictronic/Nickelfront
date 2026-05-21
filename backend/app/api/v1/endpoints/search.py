@@ -4,6 +4,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.endpoints.error_helpers import format_paper_db_error
 from app.db.session import get_db
 from app.services.fulltext_search_service import FullTextSearchService
 from app.services.paper_service import PaperService
@@ -53,7 +54,7 @@ async def fulltext_search(
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка поиска: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка поиска: {format_paper_db_error(e)}")
 
 
 @router.get("/suggest")
@@ -78,7 +79,7 @@ async def search_suggestions(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка получения подсказок: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка получения подсказок: {format_paper_db_error(e)}")
 
 
 @router.post("/keywords")
@@ -110,7 +111,7 @@ async def search_by_keywords(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка поиска: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка поиска: {format_paper_db_error(e)}")
 
 
 @router.get("/stats")
@@ -133,7 +134,7 @@ async def get_search_stats(
         return stats
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка получения статистики: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка получения статистики: {format_paper_db_error(e)}")
 
 
 @router.get("/highlight/{paper_id}")
@@ -171,4 +172,4 @@ async def get_search_highlight(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка: {format_paper_db_error(e)}")

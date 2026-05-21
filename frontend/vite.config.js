@@ -53,14 +53,22 @@ export default defineConfig(({ mode }) => {
   }
 
   const env = loadEnv(mode, rootEnvDir, '')
-  const apiUrl = env.VITE_API_URL || 'http://localhost:8001/api/v1'
-  let proxyTarget = 'http://localhost:8001'
+  const apiUrl = env.VITE_API_URL || '/api/v1'
+  const backendPort = env.API_PORT || '8001'
+  const configuredProxyTarget = env.VITE_PROXY_TARGET || env.VITE_BACKEND_URL || `http://127.0.0.1:${backendPort}`
+  let proxyTarget = configuredProxyTarget
 
   try {
-    proxyTarget = new URL(apiUrl).origin
+    if (/^https?:\/\//i.test(apiUrl)) {
+      proxyTarget = new URL(apiUrl).origin
+    }
   } catch {
-    // Keep default proxy target if VITE_API_URL isn't an absolute URL.
+    // Keep configured proxy target if VITE_API_URL isn't an absolute URL.
   }
+
+  // Windows/Node may resolve localhost to IPv6 first and Vite proxy can fail with EACCES.
+  // FastAPI is still reachable on 127.0.0.1:8001 in local dev, so prefer IPv4 explicitly.
+  proxyTarget = proxyTarget.replace('http://localhost:', 'http://127.0.0.1:')
 
   return {
     customLogger,
@@ -73,7 +81,17 @@ export default defineConfig(({ mode }) => {
       proxy: {
         '/api': {
           target: proxyTarget,
-          changeOrigin: true
+          changeOrigin: true,
+          secure: false,
+          xfwd: true,
+          timeout: 300000,
+          proxyTimeout: 300000,
+          configure(proxy) {
+            proxy.on('error', (err, req) => {
+              const url = req?.url || ''
+              writeFrontendLog('ERROR', `proxy ${url} -> ${proxyTarget}: ${err?.message || err}`)
+            })
+          }
         }
       }
     }

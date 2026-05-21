@@ -9,6 +9,47 @@ from loguru import logger
 from parsers_pkg.base import BaseParser
 from shared.schemas.paper import Paper
 
+def _coerce_dict_list(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _coerce_text_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = " ".join(value.split()).strip()
+        return [text] if text else []
+    if isinstance(value, dict):
+        for key in ("name", "title", "url", "downloadUrl", "value", "text", "id", "doi"):
+            if value.get(key):
+                return _coerce_text_list(value.get(key))
+        output: list[str] = []
+        for item in value.values():
+            output.extend(_coerce_text_list(item))
+        return list(dict.fromkeys(output))
+    if isinstance(value, (list, tuple, set)):
+        output: list[str] = []
+        for item in value:
+            output.extend(_coerce_text_list(item))
+        return list(dict.fromkeys(output))
+    text = " ".join(str(value).split()).strip()
+    return [text] if text else []
+
+
+def _first_text(value: Any) -> str | None:
+    values = _coerce_text_list(value)
+    return values[0] if values else None
+
+def _is_probable_pdf_url(value: str | None) -> bool:
+    if not value:
+        return False
+    lowered = value.lower()
+    return lowered.endswith(".pdf") or "/download/" in lowered or "download=pdf" in lowered or "format=pdf" in lowered
+
 
 class COREParser(BaseParser):
     """Parser for CORE papers."""
@@ -38,69 +79,64 @@ class COREParser(BaseParser):
         try:
             authors = []
             raw_authors = data.get("authors")
-            if isinstance(raw_authors, list):
-                for author in raw_authors:
-                    if isinstance(author, dict):
-                        name = author.get("name")
-                        if name:
-                            authors.append(str(name))
-                    elif author:
-                        authors.append(str(author))
-            elif isinstance(raw_authors, str):
-                authors = [raw_authors]
+            for author in _coerce_dict_list(raw_authors):
+                name = _first_text(author.get("name") or author.get("displayName") or author.get("fullName"))
+                if name:
+                    authors.append(name)
+            if not authors:
+                authors = _coerce_text_list(raw_authors)
 
             publication_date = self._parse_publication_date(data)
 
             keywords = []
-            if isinstance(data.get("topics"), list):
-                keywords.extend(str(t) for t in data["topics"] if t)
-            if isinstance(data.get("fieldOfStudy"), list):
-                keywords.extend(str(t) for t in data["fieldOfStudy"] if t)
+            keywords.extend(_coerce_text_list(data.get("topics")))
+            keywords.extend(_coerce_text_list(data.get("fieldOfStudy")))
             keywords = list(dict.fromkeys(keywords))
 
             journal = None
             journals = data.get("journals")
-            if isinstance(journals, list) and journals:
-                first_journal = journals[0]
-                if isinstance(first_journal, dict):
-                    journal = first_journal.get("title") or first_journal.get("name")
-                elif first_journal:
-                    journal = str(first_journal)
+            journal_records = _coerce_dict_list(journals)
+            if journal_records:
+                journal = _first_text(journal_records[0].get("title") or journal_records[0].get("name"))
+            if not journal:
+                journal = _first_text(journals)
 
             if not journal:
-                publisher = data.get("publisher")
-                if isinstance(publisher, str) and publisher.strip():
-                    journal = publisher.strip()
+                journal = _first_text(data.get("publisher"))
 
-            pdf_url = data.get("downloadUrl")
+            pdf_url = _first_text(data.get("downloadUrl"))
 
             url = None
-            source_urls = data.get("sourceFulltextUrls")
-            if isinstance(source_urls, list) and source_urls:
+            source_urls = _coerce_text_list(data.get("sourceFulltextUrls"))
+            if source_urls:
                 # CORE often returns full-text/PDF links here; keep them as PDF/full-text candidates,
                 # while the canonical article URL is derived later from source_id when needed.
                 pdf_url = pdf_url or source_urls[0]
 
-            if not url:
-                links = data.get("links")
-                if isinstance(links, list):
-                    for link in links:
-                        if isinstance(link, dict) and link.get("type") in {"reader", "download"}:
-                            url = link.get("url")
-                            if url:
-                                break
+            links = _coerce_dict_list(data.get("links"))
+            for link in links:
+                link_type = str(link.get("type") or "").lower()
+                link_url = _first_text(link.get("url"))
+                if not link_url:
+                    continue
+                if link_type == "download" or _is_probable_pdf_url(link_url):
+                    pdf_url = pdf_url or link_url
+                    continue
+                if link_type in {"reader", "fulltext", "full_text"}:
+                    url = link_url
+                    break
 
             return Paper(
-                title=data.get("title", "") or "Untitled",
+                title=_first_text(data.get("title")) or "Untitled",
                 authors=authors,
                 publication_date=publication_date,
                 journal=journal,
-                doi=data.get("doi"),
-                abstract=data.get("abstract"),
+                doi=_first_text(data.get("doi")),
+                abstract=_first_text(data.get("abstract")),
                 full_text=None,
                 keywords=keywords,
                 source=self.source,
-                source_id=str(data.get("id", "")) or None,
+                source_id=_first_text(data.get("id")),
                 url=url,
                 pdf_url=pdf_url,
             )
@@ -119,7 +155,9 @@ class COREParser(BaseParser):
         for value in date_candidates:
             if not value:
                 continue
-            raw = str(value).replace("Z", "")
+            raw = (_first_text(value) or "").replace("Z", "")
+            if not raw:
+                continue
             try:
                 return datetime.fromisoformat(raw)
             except ValueError:
@@ -132,7 +170,7 @@ class COREParser(BaseParser):
         year_published = data.get("yearPublished")
         if year_published:
             try:
-                return datetime(int(year_published), 1, 1)
+                return datetime(int(_first_text(year_published) or year_published), 1, 1)
             except Exception:
                 return None
 

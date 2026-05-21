@@ -3,17 +3,139 @@ param(
     [string]$Action = 'menu',
     [switch]$IncludeRag,
     [switch]$KillByPorts,
-    [int]$RedisPort = 6380,
-    [int]$FlowerPort = 5555,
-    [int]$FrontendPort = 5173,
-    [int]$CeleryWorkers = 3,
-    [int]$QwenWorkers = 5,
-    [string]$QwenQueue = 'qwen'
+
+    # 0/-1 means: read from .env or fallback.
+    # CLI parameters still override .env when explicitly set.
+    [int]$RedisPort = 0,
+    [int]$FlowerPort = 0,
+    [int]$FrontendPort = 0,
+    [int]$CeleryWorkers = -1,
+    [int]$QwenWorkers = -1,
+    [string]$QwenQueue = '',
+    [int]$WorkerConcurrency = 0,
+    [int]$QwenWorkerConcurrency = 0,
+    [string]$WorkerPool = '',
+    [string]$QwenWorkerPool = '',
+    [string]$WorkerQueues = ''
 )
 
 $ErrorActionPreference = 'Stop'
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+
+function Import-DotEnv {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        return
+    }
+
+    Get-Content $Path -Encoding UTF8 | ForEach-Object {
+        $line = $_.Trim()
+        if (-not $line) { return }
+        if ($line.StartsWith('#')) { return }
+        if ($line.StartsWith('export ')) {
+            $line = $line.Substring(7).Trim()
+        }
+
+        $idx = $line.IndexOf('=')
+        if ($idx -le 0) { return }
+
+        $key = $line.Substring(0, $idx).Trim()
+        $value = $line.Substring($idx + 1).Trim()
+        if (-not $key) { return }
+
+        if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+            if ($value.Length -ge 2) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+        }
+
+        [Environment]::SetEnvironmentVariable($key, $value, 'Process')
+    }
+}
+
+function Get-EnvString {
+    param(
+        [string]$ExplicitValue,
+        [string]$Name,
+        [string]$DefaultValue
+    )
+
+    if ($ExplicitValue -and $ExplicitValue.Trim()) {
+        return $ExplicitValue.Trim()
+    }
+
+    $value = [Environment]::GetEnvironmentVariable($Name, 'Process')
+    if ($value -and $value.Trim()) {
+        return $value.Trim()
+    }
+
+    return $DefaultValue
+}
+
+function Get-EnvInt {
+    param(
+        [int]$ExplicitValue,
+        [string]$Name,
+        [int]$DefaultValue,
+        [switch]$AllowZero
+    )
+
+    if ($AllowZero) {
+        if ($ExplicitValue -ge 0) { return $ExplicitValue }
+    }
+    else {
+        if ($ExplicitValue -gt 0) { return $ExplicitValue }
+    }
+
+    $raw = [Environment]::GetEnvironmentVariable($Name, 'Process')
+    if ($raw -and $raw.Trim()) {
+        $parsed = 0
+        if ([int]::TryParse($raw.Trim(), [ref]$parsed)) {
+            if ($AllowZero) {
+                if ($parsed -ge 0) { return $parsed }
+            }
+            else {
+                if ($parsed -gt 0) { return $parsed }
+            }
+        }
+        Write-Host "WARN: invalid integer in .env: $Name=$raw. Fallback: $DefaultValue"
+    }
+
+    return $DefaultValue
+}
+
+Import-DotEnv -Path (Join-Path $RepoRoot '.env')
+
+$RedisPort = Get-EnvInt -ExplicitValue $RedisPort -Name 'REDIS_PORT' -DefaultValue 6380
+$FlowerPort = Get-EnvInt -ExplicitValue $FlowerPort -Name 'FLOWER_PORT' -DefaultValue 5555
+$FrontendPort = Get-EnvInt -ExplicitValue $FrontendPort -Name 'VITE_DEV_PORT' -DefaultValue 5173
+$FrontendHost = Get-EnvString -ExplicitValue '' -Name 'VITE_DEV_HOST' -DefaultValue '0.0.0.0'
+$ApiHost = Get-EnvString -ExplicitValue '' -Name 'API_HOST' -DefaultValue '0.0.0.0'
+$ApiPort = Get-EnvInt -ExplicitValue 0 -Name 'API_PORT' -DefaultValue 8001
+$QwenServicePort = Get-EnvInt -ExplicitValue 0 -Name 'QWEN_SERVICE_PORT' -DefaultValue 8767
+$RagPort = Get-EnvInt -ExplicitValue 0 -Name 'RAG_PORT' -DefaultValue 8000
+
+$CeleryWorkers = Get-EnvInt -ExplicitValue $CeleryWorkers -Name 'CELERY_WORKERS' -DefaultValue 3 -AllowZero
+$QwenWorkers = Get-EnvInt -ExplicitValue $QwenWorkers -Name 'QWEN_QUEUE_WORKERS' -DefaultValue 5 -AllowZero
+$QwenQueue = Get-EnvString -ExplicitValue $QwenQueue -Name 'QWEN_QUEUE_NAME' -DefaultValue 'qwen'
+$WorkerConcurrency = Get-EnvInt -ExplicitValue $WorkerConcurrency -Name 'WORKER_CONCURRENCY' -DefaultValue 1
+$QwenWorkerConcurrency = Get-EnvInt -ExplicitValue $QwenWorkerConcurrency -Name 'QWEN_WORKER_CONCURRENCY' -DefaultValue 1
+$WorkerPool = Get-EnvString -ExplicitValue $WorkerPool -Name 'WORKER_POOL' -DefaultValue 'solo'
+$QwenWorkerPool = Get-EnvString -ExplicitValue $QwenWorkerPool -Name 'QWEN_WORKER_POOL' -DefaultValue $WorkerPool
+$WorkerQueues = Get-EnvString -ExplicitValue $WorkerQueues -Name 'WORKER_QUEUES' -DefaultValue 'celery'
+
+Write-Host 'Nickelfront startup configuration from .env / CLI:'
+Write-Host "  CELERY_WORKERS=$CeleryWorkers"
+Write-Host "  WORKER_CONCURRENCY=$WorkerConcurrency"
+Write-Host "  WORKER_POOL=$WorkerPool"
+Write-Host "  WORKER_QUEUES=$WorkerQueues"
+Write-Host "  QWEN_QUEUE_WORKERS=$QwenWorkers"
+Write-Host "  QWEN_QUEUE_NAME=$QwenQueue"
+Write-Host "  QWEN_WORKER_CONCURRENCY=$QwenWorkerConcurrency"
+Write-Host "  QWEN_WORKER_POOL=$QwenWorkerPool"
+
 $VenvPython = Join-Path $RepoRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path $VenvPython)) {
     $VenvPython = Join-Path $RepoRoot 'venv\Scripts\python.exe'
@@ -59,28 +181,21 @@ $Services = @(
     @{
         Tag = 'NF_BACKEND'
         WorkDir = Join-Path $RepoRoot 'backend'
-        Ports = @(8001)
-        Command = "`$host.UI.RawUI.WindowTitle='NF_BACKEND'; Set-Location '$($RepoRoot.Replace("'", "''"))\\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload"
-        Optional = $false
-    },
-    @{
-        Tag = 'NF_CELERY_1'
-        WorkDir = Join-Path $RepoRoot 'backend'
-        Ports = @()
-        Command = "`$host.UI.RawUI.WindowTitle='NF_CELERY_1'; Set-Location '$($RepoRoot.Replace("'", "''"))\\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app worker --loglevel=info --pool=solo --concurrency=1 -Q celery -n worker-1@$env:COMPUTERNAME"
+        Ports = @($ApiPort)
+        Command = "`$host.UI.RawUI.WindowTitle='NF_BACKEND'; Set-Location '$($RepoRoot.Replace("'", "''"))\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m uvicorn app.main:app --host $ApiHost --port $ApiPort --reload"
         Optional = $false
     },
     @{
         Tag = 'NF_FLOWER'
         WorkDir = Join-Path $RepoRoot 'backend'
         Ports = @($FlowerPort)
-        Command = "`$host.UI.RawUI.WindowTitle='NF_FLOWER'; Set-Location '$($RepoRoot.Replace("'", "''"))\\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app flower --address=0.0.0.0 --port=$FlowerPort"
+        Command = "`$host.UI.RawUI.WindowTitle='NF_FLOWER'; Set-Location '$($RepoRoot.Replace("'", "''"))\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app flower --address=0.0.0.0 --port=$FlowerPort"
         Optional = $false
     },
     @{
         Tag = 'NF_QWEN'
         WorkDir = $RepoRoot
-        Ports = @(8767)
+        Ports = @($QwenServicePort)
         Command = "`$host.UI.RawUI.WindowTitle='NF_QWEN'; Set-Location '$($RepoRoot.Replace("'", "''"))'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' qwen_service/service.py"
         Optional = $false
     },
@@ -88,10 +203,22 @@ $Services = @(
         Tag = 'NF_FRONTEND'
         WorkDir = Join-Path $RepoRoot 'frontend'
         Ports = @($FrontendPort)
-        Command = "`$host.UI.RawUI.WindowTitle='NF_FRONTEND'; Set-Location '$($RepoRoot.Replace("'", "''"))\\frontend'; & '$FrontendNpm' run dev -- --host 0.0.0.0 --port $FrontendPort --strictPort"
+        Command = "`$host.UI.RawUI.WindowTitle='NF_FRONTEND'; Set-Location '$($RepoRoot.Replace("'", "''"))\frontend'; & '$FrontendNpm' run dev -- --host $FrontendHost --port $FrontendPort --strictPort"
         Optional = $false
     }
 )
+
+if ($CeleryWorkers -gt 0) {
+    for ($i = 1; $i -le $CeleryWorkers; $i++) {
+        $script:Services += @{
+            Tag = "NF_CELERY_$i"
+            WorkDir = Join-Path $RepoRoot 'backend'
+            Ports = @()
+            Command = "`$host.UI.RawUI.WindowTitle='NF_CELERY_$i'; Set-Location '$($RepoRoot.Replace("'", "''"))\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app worker --loglevel=info --pool=$WorkerPool --concurrency=$WorkerConcurrency -Q $WorkerQueues -E --without-gossip --without-mingle -n worker-$i@`$env:COMPUTERNAME"
+            Optional = $false
+        }
+    }
+}
 
 if ($QwenWorkers -gt 0) {
     for ($i = 1; $i -le $QwenWorkers; $i++) {
@@ -99,19 +226,7 @@ if ($QwenWorkers -gt 0) {
             Tag = "NF_QWEN_GATEWAY_$i"
             WorkDir = Join-Path $RepoRoot 'backend'
             Ports = @()
-            Command = "`$host.UI.RawUI.WindowTitle='NF_QWEN_GATEWAY_$i'; Set-Location '$($RepoRoot.Replace("'", "''"))\backend'; `$env:PYTHONIOENCODING='utf-8'; `$env:QWEN_GATEWAY_WORKER='1'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app worker --loglevel=info --pool=solo --concurrency=1 -Q $QwenQueue -n qwen-$i@`$env:COMPUTERNAME"
-            Optional = $false
-        }
-    }
-}
-
-if ($CeleryWorkers -gt 1) {
-    for ($i = 2; $i -le $CeleryWorkers; $i++) {
-        $script:Services += @{
-            Tag = "NF_CELERY_$i"
-            WorkDir = Join-Path $RepoRoot 'backend'
-            Ports = @()
-            Command = "`$host.UI.RawUI.WindowTitle='NF_CELERY_$i'; Set-Location '$($RepoRoot.Replace("'", "''"))\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app worker --loglevel=info --pool=solo --concurrency=1 -Q celery -n worker-$i@`$env:COMPUTERNAME"
+            Command = "`$host.UI.RawUI.WindowTitle='NF_QWEN_GATEWAY_$i'; Set-Location '$($RepoRoot.Replace("'", "''"))\backend'; `$env:PYTHONIOENCODING='utf-8'; `$env:QWEN_GATEWAY_WORKER='1'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app worker --loglevel=info --pool=$QwenWorkerPool --concurrency=$QwenWorkerConcurrency -Q $QwenQueue -E --without-gossip --without-mingle -n qwen-$i@`$env:COMPUTERNAME"
             Optional = $false
         }
     }
@@ -125,8 +240,8 @@ function Ensure-RagService {
     $script:Services += @{
         Tag = 'NF_RAG'
         WorkDir = Join-Path $RepoRoot 'rag'
-        Ports = @(8000)
-        Command = "`$host.UI.RawUI.WindowTitle='NF_RAG'; Set-Location '$($RepoRoot.Replace("'", "''"))'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m rag.app.main"
+        Ports = @($RagPort)
+        Command = "`$host.UI.RawUI.WindowTitle='NF_RAG'; Set-Location '$($RepoRoot.Replace("'", "''"))'; `$env:PYTHONIOENCODING='utf-8'; & powershell -NoProfile -ExecutionPolicy Bypass -File '$($PSScriptRoot.Replace("'", "''"))\run_rag_venv.ps1' -NoPause"
         Optional = $false
     }
 }

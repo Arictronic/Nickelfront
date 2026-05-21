@@ -106,6 +106,52 @@ def _format_parser_output_for_error(stdout_text: str, stderr_text: str, limit: i
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
+_SCALAR_TEXT_OBJECT_KEYS = (
+    "value",
+    "text",
+    "content",
+    "title",
+    "name",
+    "display_name",
+    "displayName",
+    "fullName",
+    "authorName",
+    "url",
+    "URL",
+    "href",
+    "id",
+    "doi",
+    "date",
+    "publishedDate",
+    "publication_date",
+    "year",
+)
+
+
+def _first_scalar_text_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, datetime)):
+        return value
+    if isinstance(value, dict):
+        for key in _SCALAR_TEXT_OBJECT_KEYS:
+            if key in value:
+                candidate = _first_scalar_text_value(value.get(key))
+                if candidate not in (None, ""):
+                    return candidate
+        for item in value.values():
+            candidate = _first_scalar_text_value(item)
+            if candidate not in (None, ""):
+                return candidate
+        return None
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            candidate = _first_scalar_text_value(item)
+            if candidate not in (None, ""):
+                return candidate
+        return None
+    return value
+
 _CONTENT_PROCESSING_ACTIVE_OR_DONE_STATUSES = {
     "queued_for_content_processing",
     "pdf_pending",
@@ -298,11 +344,76 @@ async def _run_parser_alpha(query: str, limit: int, source: str) -> tuple[dict[s
     return await asyncio.to_thread(_run_parser_alpha_sync, query, limit, source)
 
 
-def _to_str_list(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
+_LIST_TEXT_OBJECT_KEYS = (
+    "name",
+    "fullName",
+    "displayName",
+    "display_name",
+    "authorName",
+    "value",
+    "text",
+    "title",
+    "label",
+    "term",
+    "subject",
+)
+
+
+def _dedupe_str_list(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
+def _to_str_list(value: Any, *, split_commas: bool = False) -> list[str]:
+    """Normalize parser JSON list fields before PaperCreate construction.
+
+    Parser records can contain legacy strings, JSON-encoded lists, or objects like
+    {"name": "Alice Smith"}.  Flatten objects by semantic keys instead of
+    saving Python reprs.  Authors keep commas inside names; keywords/flags can opt
+    into comma splitting.
+    """
     if value is None:
         return []
+    if isinstance(value, dict):
+        for key in _LIST_TEXT_OBJECT_KEYS:
+            if key in value:
+                extracted = _to_str_list(value.get(key), split_commas=split_commas)
+                if extracted:
+                    return extracted
+        output: list[str] = []
+        for item in value.values():
+            output.extend(_to_str_list(item, split_commas=split_commas))
+        return _dedupe_str_list(output)
+    if isinstance(value, (list, tuple, set)):
+        output: list[str] = []
+        for item in value:
+            output.extend(_to_str_list(item, split_commas=split_commas))
+        return _dedupe_str_list(output)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, (list, tuple, set, dict)):
+                return _to_str_list(parsed, split_commas=split_commas)
+            if isinstance(parsed, str) and parsed.strip():
+                return [parsed.strip()]
+        except Exception:
+            pass
+        pattern = r"[;,\n]+" if split_commas else r"[;\n]+"
+        parts = [part.strip() for part in re.split(pattern, text) if part.strip()]
+        return parts or [text]
     text = str(value).strip()
     return [text] if text else []
 
@@ -312,8 +423,8 @@ def _to_str_dict(value: Any) -> dict[str, str]:
         return {}
     result: dict[str, str] = {}
     for key, item in value.items():
-        key_text = str(key).strip()
-        item_text = str(item).strip()
+        key_text = _clean_text(key)
+        item_text = _clean_text(item)
         if key_text and item_text:
             result[key_text] = item_text
     return result
@@ -326,10 +437,13 @@ def _normalize_parse_confidence(value: Any) -> float | None:
         confidence = float(value)
     except (TypeError, ValueError):
         return None
+    if 1 < confidence <= 100:
+        confidence = confidence / 100
     return max(0.0, min(1.0, confidence))
 
 
 def _clean_text(value: Any) -> str | None:
+    value = _first_scalar_text_value(value)
     if value is None:
         return None
     text = html.unescape(str(value))
@@ -339,6 +453,7 @@ def _clean_text(value: Any) -> str | None:
 
 
 def _normalize_publication_date(value: Any) -> datetime | None:
+    value = _first_scalar_text_value(value)
     if value is None:
         return None
 
@@ -591,22 +706,22 @@ async def _parse_async(
 
                 paper_create = PaperCreate(
                     title=(_clean_text(paper.get("title")) or "Untitled"),
-                    authors=[x for x in (_clean_text(a) for a in _to_str_list(paper.get("authors"))) if x],
+                    authors=[x for x in (_clean_text(a) for a in _to_str_list(paper.get("authors"), split_commas=False)) if x],
                     publication_date=_normalize_publication_date(paper.get("publication_date")),
                     journal=_clean_text(paper.get("journal")),
                     doi=_clean_text(paper.get("doi")),
                     abstract=_clean_text(paper.get("abstract")),
                     full_text=_clean_text(paper.get("full_text")),
-                    keywords=[x for x in (_clean_text(k) for k in _to_str_list(paper.get("keywords"))) if x],
+                    keywords=[x for x in (_clean_text(k) for k in _to_str_list(paper.get("keywords"), split_commas=True)) if x],
                     source=(_clean_text(paper.get("source")) or source),
                     source_id=_clean_text(paper.get("source_id")),
-                    url=(str(paper.get("url")).strip() if paper.get("url") else None),
-                    pdf_url=(str(paper.get("pdf_url")).strip() if paper.get("pdf_url") else None),
+                    url=_clean_text(paper.get("url")),
+                    pdf_url=_clean_text(paper.get("pdf_url")),
                     parse_confidence=_normalize_parse_confidence(paper.get("parse_confidence")),
                     provenance=_to_str_dict(paper.get("provenance")),
                     quality_flags=[
                         x
-                        for x in (_clean_text(flag) for flag in _to_str_list(paper.get("quality_flags")))
+                        for x in (_clean_text(flag) for flag in _to_str_list(paper.get("quality_flags"), split_commas=True))
                         if x
                     ],
                     schema_version=_clean_text(paper.get("schema_version")) or "2.0",

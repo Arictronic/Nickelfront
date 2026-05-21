@@ -8,6 +8,7 @@ export default function Header() {
   const user = useAuthStore((s) => s.user);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const isSessionChecking = useAuthStore((s) => s.isSessionChecking);
+  const sessionError = useAuthStore((s) => s.sessionError);
   const { logout } = useAuth();
 
   const handleLogout = async () => {
@@ -21,6 +22,9 @@ export default function Header() {
   if (isSessionChecking) {
     sessionLabel = "Session: checking";
     sessionClass = "checking";
+  } else if (sessionError) {
+    sessionLabel = "Session: backend unavailable";
+    sessionClass = "pending";
   } else if (isAuthenticated) {
     if (user) {
       sessionLabel = "Session: active";
@@ -43,10 +47,10 @@ export default function Header() {
           <span className="session-dot" />
           <span>{sessionLabel}</span>
         </div>
-        <span className="user-chip">{user?.username || user?.email || "guest@local"}</span>
-        {user ? (
+        <span className="user-chip">{user?.username || user?.email || (isAuthenticated && sessionError ? "пользователь не подтверждён" : "guest@local")}</span>
+        {user || (isAuthenticated && sessionError) ? (
           <button className="btn btn-ghost" onClick={handleLogout}>
-            Выйти
+            {user ? "Выйти" : "Сбросить сессию"}
           </button>
         ) : (
           <button className="btn btn-ghost" onClick={() => navigate("/login")}>

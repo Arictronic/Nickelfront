@@ -180,8 +180,8 @@ export default function Register() {
       <label className="checkbox-label">
         <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />
         <span>
-          Я согласен с <a href="/terms" target="_blank" rel="noopener noreferrer">условиями использования</a> и
-          <a href="/privacy" target="_blank" rel="noopener noreferrer"> политикой конфиденциальности</a>
+          Я согласен с <Link to="/terms" target="_blank" rel="noopener noreferrer">условиями использования</Link> и
+          <Link to="/privacy" target="_blank" rel="noopener noreferrer"> политикой конфиденциальности</Link>
         </span>
       </label>
 

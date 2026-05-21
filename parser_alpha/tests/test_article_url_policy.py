@@ -27,6 +27,22 @@ class TestArticleUrlPolicy(unittest.TestCase):
             derive_article_url(source="Unknown", url=None, doi=None, source_id="abc")
         )
 
+    def test_normalize_doi_accepts_common_prefixes(self):
+        from parsers_pkg.base.normalization import normalize_doi
+
+        self.assertEqual(normalize_doi("DOI: 10.1000/ABC.1."), "10.1000/abc.1")
+        self.assertEqual(normalize_doi("https://dx.doi.org/10.1000/ABC.1"), "10.1000/abc.1")
+
+    def test_derive_europepmc_url_from_source_prefix_and_id(self):
+        self.assertEqual(
+            derive_article_url(source="EuropePMC", url=None, doi=None, source_id="MED:123456"),
+            "https://europepmc.org/article/MED/123456",
+        )
+        self.assertEqual(
+            derive_article_url(source="EuropePMC", url=None, doi=None, source_id="PMC:PMC13080576"),
+            "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13080576/",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

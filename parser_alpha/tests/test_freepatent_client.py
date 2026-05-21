@@ -40,6 +40,41 @@ class TestFreePatentClient(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all("MPK/" not in (r.get("url") or "") for r in records))
         self.assertEqual(records[0]["source_id"], "patents/2459000")
 
+    def test_yandex_redirect_link_is_unwrapped(self):
+        encoded = "https%3A%2F%2Fwww.freepatent.ru%2Fpatents%2F2459000"
+        href = f"/clck/jsredir?from=yandex.ru&url={encoded}&text=nickel"
+
+        self.assertEqual(
+            FreePatentClient._unwrap_yandex_result_url(href),
+            "https://www.freepatent.ru/patents/2459000",
+        )
+
+    async def test_yandex_redirect_result_is_parsed_as_patent(self):
+        search_html = """
+        <html><body>
+          <li class="b-serp-item">
+            <a class="b-serp-item__title-link"
+               href="/clck/jsredir?url=https%3A%2F%2Fwww.freepatent.ru%2Fpatents%2F2459000">
+              Патент на никелевый сплав
+            </a>
+            <div class="b-serp-item__text">Описание патента</div>
+          </li>
+        </body></html>
+        """
+
+        client = FreePatentClient()
+
+        async def fake_request_text(path: str, params=None) -> str:
+            return search_html
+
+        client._request_text = fake_request_text  # type: ignore[method-assign]
+
+        records = await client.search("никелевый сплав", limit=5)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["source_id"], "patents/2459000")
+        self.assertEqual(records[0]["url"], "https://www.freepatent.ru/patents/2459000")
+
 
 if __name__ == "__main__":
     unittest.main()

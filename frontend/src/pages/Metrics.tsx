@@ -53,6 +53,7 @@ function normalizeQualityReport(data: any): QualityReport | null {
 export default function Metrics() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [topKeywords, setTopKeywords] = useState<TopItem[]>([]);
   const [qualityReport, setQualityReport] = useState<QualityReport | null>(null);
   const [keywordStats, setKeywordStats] = useState<KeywordStats | null>(null);
@@ -65,19 +66,43 @@ export default function Metrics() {
   const loadAnalytics = async () => {
     setLoading(true);
     setError(null);
+    setWarning(null);
 
     try {
-      const [keywordsRes, qualityRes, keywordStatsRes] = await Promise.all([
+      const [keywordsRes, qualityRes, keywordStatsRes] = await Promise.allSettled([
         apiClient.get<{ items: TopItem[] }>("/analytics/metrics/top?item_type=keywords&limit=100"),
         apiClient.get<QualityReport>("/analytics/metrics/quality-report"),
         apiClient.get<KeywordStats>("/analytics/metrics/keyword-stats"),
       ]);
 
-      setTopKeywords(keywordsRes.data?.items ?? []);
-      setQualityReport(normalizeQualityReport(qualityRes.data));
-      setKeywordStats(keywordStatsRes.data ?? null);
+      if (keywordsRes.status === "fulfilled") {
+        setTopKeywords(keywordsRes.value.data?.items ?? []);
+      } else {
+        setTopKeywords([]);
+      }
+
+      if (qualityRes.status === "fulfilled") {
+        setQualityReport(normalizeQualityReport(qualityRes.value.data));
+      } else {
+        setQualityReport(null);
+      }
+
+      if (keywordStatsRes.status === "fulfilled") {
+        setKeywordStats(keywordStatsRes.value.data ?? null);
+      } else {
+        setKeywordStats(null);
+      }
+
+      const failures = [keywordsRes, qualityRes, keywordStatsRes].filter((res) => res.status === "rejected");
+      if (failures.length === 3) {
+        const first = failures[0] as PromiseRejectedResult;
+        setError(first.reason?.message || "Ошибка загрузки данных");
+      } else if (failures.length > 0) {
+        setWarning(`Часть метрик не загрузилась (${failures.length}/3). Остальные данные показаны.`);
+      }
     } catch (e: any) {
       setError(e.message || "Ошибка загрузки данных");
+      setWarning(null);
       console.error("Analytics error:", e);
     } finally {
       setLoading(false);
@@ -124,6 +149,13 @@ export default function Metrics() {
           <button className="btn" onClick={loadAnalytics}>Обновить</button>
         </div>
       </div>
+
+
+      {warning && (
+        <div className="panel">
+          <p className="muted">{warning}</p>
+        </div>
+      )}
 
       {keywordStats && (
         <div className="panel">

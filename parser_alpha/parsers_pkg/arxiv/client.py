@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Any
@@ -224,10 +225,21 @@ class ArxivClient(BaseAPIClient):
             return None
 
     async def get_full_text(self, item_id: str) -> str | None:
-        clean_id = item_id
-        if clean_id.startswith("arXiv:"):
-            clean_id = clean_id[6:]
-        clean_id = clean_id.split("/")[-1].split("v")[0]
+        clean_id = (item_id or "").strip()
+        if not clean_id:
+            return None
+        clean_id = clean_id.replace("http://", "https://")
+        if "arxiv.org/abs/" in clean_id:
+            clean_id = clean_id.split("arxiv.org/abs/", 1)[1]
+        elif "arxiv.org/pdf/" in clean_id:
+            clean_id = clean_id.split("arxiv.org/pdf/", 1)[1]
+        if clean_id.startswith("arXiv:") or clean_id.startswith("arxiv:"):
+            clean_id = clean_id.split(":", 1)[1]
+        clean_id = clean_id.split("?", 1)[0].split("#", 1)[0].strip("/")
+        clean_id = clean_id.removesuffix(".pdf")
+        clean_id = re.sub(r"v\d+$", "", clean_id)
+        if not clean_id:
+            return None
         return f"https://arxiv.org/pdf/{clean_id}.pdf"
 
     async def close(self):

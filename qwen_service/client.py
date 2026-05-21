@@ -1,12 +1,4 @@
-"""
-Qwen Service Client - Клиент для тестирования Qwen Service
-Запускается как обычный Python скрипт для проверки работы сервиса
-
-Настройки загружаются из переменных окружения (.env в корне проекта):
-- QWEN_SERVICE_HOST - хост (по умолчанию 127.0.0.1)
-- QWEN_SERVICE_PORT - порт (по умолчанию 8767)
-- QWEN_API_KEY - API ключ (по умолчанию qwen-service-key-2026)
-"""
+"""Qwen Service client for smoke tests and interactive usage."""
 
 from __future__ import annotations
 
@@ -26,20 +18,20 @@ if env_path.exists():
 
 # Конфигурация из переменных окружения
 SERVICE_URL = f"http://{os.getenv('QWEN_SERVICE_HOST', '127.0.0.1')}:{os.getenv('QWEN_SERVICE_PORT', '8767')}"
-API_KEY = os.getenv("QWEN_API_KEY", "qwen-service-key-2026")
+API_KEY = os.getenv("QWEN_API_KEY", "")
 
 
 class QwenServiceClient:
-    """Клиент для работы с Qwen Service"""
+    """Documentation updated."""
 
     def __init__(self, base_url: str = SERVICE_URL, api_key: str = API_KEY):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
-        self.headers = {"Authorization": f"Bearer {api_key}"}
+        self.headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self.current_session_id: str | None = None
 
     def _request(self, method: str, endpoint: str, **kwargs):
-        """Внутренний метод для HTTP запросов"""
+        """Documentation updated."""
         url = f"{self.base_url}{endpoint}"
         with httpx.Client(timeout=60.0) as client:
             response = client.request(method, url, headers=self.headers, **kwargs)
@@ -47,27 +39,27 @@ class QwenServiceClient:
             return response.json()
 
     def health_check(self) -> dict:
-        """Проверка доступности сервиса"""
+        """Documentation updated."""
         return self._request("GET", "/health")
 
     def get_config(self) -> dict:
-        """Получение конфигурации"""
+        """Documentation updated."""
         return self._request("GET", "/config")
 
     def set_token(self, token: str) -> dict:
-        """Установка токена Qwen"""
+        """Documentation updated."""
         return self._request("POST", "/config/token", json={"token": token})
 
     def set_api_key(self, api_key: str) -> dict:
-        """Установка API ключа"""
+        """Documentation updated."""
         return self._request("POST", "/config/api_key", json={"api_key": api_key})
 
     def get_model(self) -> dict:
-        """Получение текущей модели"""
+        """Documentation updated."""
         return self._request("GET", "/config/model")
 
     def set_model(self, model: str, thinking_enabled: bool = True, search_enabled: bool = True) -> dict:
-        """Настройка модели"""
+        """Documentation updated."""
         return self._request(
             "POST",
             "/config/model",
@@ -75,29 +67,29 @@ class QwenServiceClient:
         )
 
     def list_models(self) -> dict:
-        """Получение списка моделей"""
+        """Documentation updated."""
         return self._request("GET", "/models")
 
     def create_session(self) -> dict:
-        """Создание новой сессии"""
+        """Documentation updated."""
         result = self._request("POST", "/sessions")
         self.current_session_id = result.get("session_id")
         return result
 
     def list_sessions(self) -> dict:
-        """Получение списка сессий"""
+        """Documentation updated."""
         return self._request("GET", "/sessions")
 
     def get_session(self, session_id: str) -> dict:
-        """Получение информации о сессии"""
+        """Documentation updated."""
         return self._request("GET", f"/sessions/{session_id}")
 
     def delete_session(self, session_id: str) -> dict:
-        """Удаление сессии"""
+        """Documentation updated."""
         return self._request("DELETE", f"/sessions/{session_id}")
 
     def rename_session(self, session_id: str, title: str) -> dict:
-        """Переименование сессии"""
+        """Documentation updated."""
         return self._request("POST", f"/sessions/{session_id}/rename", json={"title": title})
 
     def send_message(
@@ -109,10 +101,10 @@ class QwenServiceClient:
         file_ids: list[str] | None = None,
         auto_continue: bool | None = None,
     ) -> dict:
-        """Отправка сообщения"""
+        """Documentation updated."""
         sid = session_id or self.current_session_id
         if not sid:
-            raise ValueError("Не указан session_id")
+            raise ValueError("session_id is required")
 
         payload = {
             "session_id": sid,
@@ -131,7 +123,7 @@ class QwenServiceClient:
         )
 
     def continue_message(self, session_id: str, message_id: int, thinking_enabled: bool = True) -> dict:
-        """Продолжение ответа"""
+        """Documentation updated."""
         return self._request(
             "POST",
             "/messages/continue",
@@ -139,23 +131,23 @@ class QwenServiceClient:
         )
 
     def upload_file(self, file_path: str) -> dict:
-        """Загрузка файла"""
+        """Documentation updated."""
         return self._request("POST", "/files/upload", json={"file_path": file_path})
 
     def get_file(self, file_id: str) -> dict:
-        """Получение информации о файле"""
+        """Documentation updated."""
         return self._request("GET", f"/files/{file_id}")
 
     def get_user_info(self) -> dict:
-        """Получение информации о пользователе"""
+        """Documentation updated."""
         return self._request("GET", "/user/info")
 
     def get_auto_continue_config(self) -> dict:
-        """Получение настроек авто-продолжения"""
+        """Documentation updated."""
         return self._request("GET", "/config/auto_continue")
 
     def set_auto_continue_config(self, enabled: bool, max_continues: int | None = None) -> dict:
-        """Настройка авто-продолжения"""
+        """Documentation updated."""
         params = {"enabled": str(enabled).lower()}
         if max_continues is not None:
             params["max_continues"] = str(max_continues)
@@ -170,8 +162,8 @@ def print_separator(title: str = ""):
 
 
 def test_service():
-    """Тестирование сервиса"""
-    print_separator("QWEN SERVICE CLIENT - ТЕСТИРОВАНИЕ")
+    """Documentation updated."""
+    print_separator("QWEN SERVICE CLIENT - ТЕСТРОВАНЕ")
 
     client = QwenServiceClient()
 
@@ -251,8 +243,8 @@ def test_service():
     for s in sessions[:3]:
         print(f"  - {s.get('title', 'N/A')} ({s.get('id', 'N/A')[:8]}...)")
 
-    # 8. Информация о пользователе
-    print_separator("[8] Информация о пользователе")
+    # 8. нформация о пользователе
+    print_separator("[8] нформация о пользователе")
     user_info = client.get_user_info()
     info = user_info.get("user_info", {})
     if info:
@@ -260,7 +252,7 @@ def test_service():
         print(f"Display Name: {info.get('displayName', 'N/A')}")
         print(f"Email: {info.get('email', 'N/A')}")
     else:
-        print("Информация недоступна")
+        print("нформация недоступна")
 
     # 9. Тестирование режима с поиском
     print_separator("[9] Тест с поиском в интернете")
@@ -279,8 +271,8 @@ def test_service():
     print(answer_search[:400] if len(answer_search) > 400 else answer_search)
     print("-" * 60)
 
-    # Итоги
-    print_separator("✅ ТЕСТИРОВАНИЕ ЗАВЕРШЕНО")
+    # тоги
+    print_separator("✅ ТЕСТРОВАНЕ ЗАВЕРШЕНО")
     print(f"Сессия: {session_id}")
     print("Всего сообщений отправлено: 2")
     print("Сервис работает корректно!")
@@ -288,8 +280,8 @@ def test_service():
 
 
 def interactive_mode():
-    """Интерактивный режим чата"""
-    print_separator("QWEN SERVICE CLIENT - ИНТЕРАКТИВНЫЙ ЧАТ")
+    """Documentation updated."""
+    print_separator("QWEN SERVICE CLIENT - НТЕРАКТВНЫЙ ЧАТ")
 
     client = QwenServiceClient()
 

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { getBackendRootUrl } from "../api/client";
 import { getPapersCount } from "../api/papers";
 import { PAPER_SOURCES } from "../types/paper";
@@ -15,9 +16,38 @@ export default function Database() {
     try {
       const allPromise = getPapersCount();
       const sourcePromises = PAPER_SOURCES.map(async (source) => [source, await getPapersCount(source)] as const);
-      const [all, sourceEntries] = await Promise.all([allPromise, Promise.all(sourcePromises)]);
-      setAllCount(all);
-      setSourceCounts(Object.fromEntries(sourceEntries));
+      const [allResult, sourceResults] = await Promise.allSettled([
+        allPromise,
+        Promise.allSettled(sourcePromises),
+      ]);
+
+      if (allResult.status === "fulfilled") {
+        setAllCount(allResult.value);
+      } else {
+        setAllCount(0);
+      }
+
+      const nextSourceCounts: Record<string, number> = {};
+      let failedSources = 0;
+      if (sourceResults.status === "fulfilled") {
+        for (const result of sourceResults.value) {
+          if (result.status === "fulfilled") {
+            const [source, count] = result.value;
+            nextSourceCounts[source] = count;
+          } else {
+            failedSources += 1;
+          }
+        }
+      } else {
+        failedSources = PAPER_SOURCES.length;
+      }
+      setSourceCounts(nextSourceCounts);
+
+      if (allResult.status === "rejected" && failedSources === PAPER_SOURCES.length) {
+        setError(allResult.reason?.message || "Ошибка загрузки данных БД");
+      } else if (allResult.status === "rejected" || failedSources > 0) {
+        setError(`Часть счётчиков не загрузилась. Ошибок по источникам: ${failedSources}.`);
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -71,20 +101,10 @@ export default function Database() {
 
       <div className="panel">
         <h3>Таблицы в базе данных</h3>
-        <div className="detail-grid">
-          <p>
-            <strong>papers</strong> — основные данные статей
-          </p>
-          <p>
-            <strong>users</strong> — пользователи системы
-          </p>
-          <p>
-            <strong>refresh_tokens</strong> — токены обновления сессий
-          </p>
-          <p>
-            <strong>alembic_version</strong> — версия миграций БД
-          </p>
-        </div>
+        <p className="muted">
+          Список таблиц больше не захардкожен во frontend, чтобы не вводить в заблуждение после миграций.
+          Фактическую структуру БД проверяй через Alembic/PostgreSQL или отдельный admin endpoint.
+        </p>
       </div>
 
       <div className="panel">
@@ -102,12 +122,12 @@ export default function Database() {
           • <code>DELETE /api/v1/papers/id/{"{id}"}</code> — удаление статьи
         </p>
         <div className="actions" style={{ marginTop: 10 }}>
-          <a className="btn btn-primary" href="/papers" style={{ textDecoration: "none" }}>
+          <Link className="btn btn-primary" to="/papers" style={{ textDecoration: "none" }}>
             Перейти к списку статей
-          </a>
-          <a className="btn" href="/vector-search" style={{ textDecoration: "none" }}>
+          </Link>
+          <Link className="btn" to="/vector-search" style={{ textDecoration: "none" }}>
             Векторный поиск
-          </a>
+          </Link>
           <a className="btn" href={`${getBackendRootUrl()}/docs`} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
             Swagger документация
           </a>

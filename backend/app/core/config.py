@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     QWEN_MAX_CONTINUES: int = 5
     QWEN_RATE_LIMIT_SECONDS: float = 2.0  # Мин. интервал между запросами
     QWEN_API_KEY: str | None = None  # API ключ для защиты сервиса
+    # Timeout for one chat request from backend to qwen_service.
+    # If the request hangs longer than this, backend can create a fresh Qwen session
+    # and retry the same prompt once, returning the new session_id to frontend.
+    QWEN_CHAT_TIMEOUT_SECONDS: float = 300.0
+    QWEN_CHAT_RETRY_ON_TIMEOUT: bool = True
 
     # Qwen Service (standalone HTTP сервис)
     QWEN_SERVICE_HOST: str = "127.0.0.1"
@@ -99,7 +104,8 @@ class Settings(BaseSettings):
     QWEN_QUEUE_ENABLED: bool = True
     QWEN_QUEUE_NAME: str = "qwen"
     QWEN_QUEUE_TIMEOUT: float = 1000.0
-    QWEN_QUEUE_TASK_RATE_LIMIT: str = "300/h"
+    # Celery rate limit for qwen gateway tasks. Use "off"/"none"/"0"/empty to disable.
+    QWEN_QUEUE_TASK_RATE_LIMIT: str | None = None
     QWEN_QUEUE_WORKERS: int = 5
 
     # RAG Settings

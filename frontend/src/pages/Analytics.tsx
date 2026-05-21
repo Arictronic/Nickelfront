@@ -1,21 +1,39 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiClient } from "../api/client";
-import { getVectorStats, rebuildVectorIndex, searchPapers, vectorSearch } from "../api/papers";
+import {
+  fullTextSearch,
+  getVectorStats,
+  rebuildVectorIndex,
+  vectorSearch,
+} from "../api/papers";
+import { useAuthStore } from "../store/authStore";
 import { PAPER_SOURCES } from "../types/paper";
-import type { PaperSource, SearchType, VectorSearchResult } from "../types/paper";
+import type {
+  PaperSource,
+  SearchType,
+  VectorSearchResult,
+} from "../types/paper";
 
 type TopItem = {
   name: string;
   count: number;
 };
 
+function normalizeLimit(value: unknown) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 1;
+  return Math.max(1, Math.min(100, Math.floor(parsed)));
+}
+
 export default function Analytics() {
+  const user = useAuthStore((s) => s.user);
+  const isAdmin = !!user?.is_admin;
+
   const [query, setQuery] = useState("nickel superalloy creep");
   const [source, setSource] = useState<PaperSource | "all">("all");
   const [fullTextOnly, setFullTextOnly] = useState(false);
   const [limit, setLimit] = useState(15);
-
   const [searchType, setSearchType] = useState<SearchType>("vector");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -38,11 +56,6 @@ export default function Analytics() {
     loadKeywordHints();
   }, []);
 
-  const sources = useMemo<PaperSource[]>(
-    () => (source === "all" ? [...PAPER_SOURCES] : [source]),
-    [source]
-  );
-
   const loadVectorStats = async () => {
     try {
       const stats = await getVectorStats();
@@ -54,7 +67,9 @@ export default function Analytics() {
 
   const loadKeywordHints = async () => {
     try {
-      const { data } = await apiClient.get<{ items: TopItem[] }>("/analytics/metrics/top?item_type=keywords&limit=100");
+      const { data } = await apiClient.get<{ items: TopItem[] }>(
+        "/analytics/metrics/top?item_type=keywords&limit=100",
+      );
       setKeywordHints(data.items ?? []);
     } catch {
       // non-blocking
@@ -66,19 +81,25 @@ export default function Analytics() {
     setLoading(true);
     setError(null);
     try {
+      const normalizedLimit = normalizeLimit(limit);
+      setLimit(normalizedLimit);
+
       if (searchType === "text") {
-        const res = await searchPapers({
+        const res = await fullTextSearch({
           query,
-          sources,
-          fullTextOnly,
-          limit,
+          source: source === "all" ? undefined : source,
+          limit: normalizedLimit,
+          searchMode: "websearch",
         });
-        setResults(res.papers.map((paper) => ({ paper, similarity: 0 })));
-        setTotal(res.total);
+        const papers = fullTextOnly
+          ? res.papers.filter((paper) => Boolean(paper.fullText?.trim() || paper.pdfUrl || paper.pdfLocalPath))
+          : res.papers;
+        setResults(papers.map((paper) => ({ paper, similarity: -1 })));
+        setTotal(fullTextOnly ? papers.length : res.total);
       } else {
         const res = await vectorSearch({
           query,
-          limit,
+          limit: normalizedLimit,
           source,
           dateFrom: dateFrom || undefined,
           dateTo: dateTo || undefined,
@@ -95,7 +116,12 @@ export default function Analytics() {
   };
 
   const onRebuildIndex = async () => {
-    if (!window.confirm("Перестроить векторный индекс? Это может занять несколько минут.")) return;
+    if (
+      !window.confirm(
+        "Перестроить векторный индекс? Это может занять несколько минут.",
+      )
+    )
+      return;
     setLoading(true);
     setError(null);
     try {
@@ -122,7 +148,10 @@ export default function Analytics() {
     let similaritySum = 0;
 
     for (const result of results) {
-      sourcesMap.set(result.paper.source, (sourcesMap.get(result.paper.source) ?? 0) + 1);
+      sourcesMap.set(
+        result.paper.source,
+        (sourcesMap.get(result.paper.source) ?? 0) + 1,
+      );
       similaritySum += result.similarity || 0;
       for (const keyword of result.paper.keywords ?? []) {
         const normalized = keyword.trim().toLowerCase();
@@ -132,23 +161,32 @@ export default function Analytics() {
 
     return {
       sourceCount: sourcesMap.size,
-      topSource: Array.from(sourcesMap.entries()).sort((a, b) => b[1] - a[1])[0],
+      topSource: Array.from(sourcesMap.entries()).sort(
+        (a, b) => b[1] - a[1],
+      )[0],
       uniqueKeywords: keywordSet.size,
       avgSimilarity: results.length ? similaritySum / results.length : 0,
     };
   }, [results]);
 
   const visibleHints = hintsExpanded ? keywordHints : keywordHints.slice(0, 24);
+  const dateFiltersAvailable = searchType !== "text";
 
   return (
     <div className="page">
       <div className="page-head">
         <h2>Поиск</h2>
         <div className="actions">
-          <button className="btn" onClick={onRebuildIndex} disabled={loading}>
-            Перестроить индекс
-          </button>
-          <button className="btn btn-primary" onClick={runSearch} disabled={loading}>
+          {isAdmin && (
+            <button className="btn" onClick={onRebuildIndex} disabled={loading}>
+              Перестроить индекс
+            </button>
+          )}
+          <button
+            className="btn btn-primary"
+            onClick={runSearch}
+            disabled={loading}
+          >
             {loading ? "Поиск..." : "Искать"}
           </button>
         </div>
@@ -162,11 +200,20 @@ export default function Analytics() {
               <strong>Статей в индексе:</strong> {vectorStats.count}
             </div>
             <div>
-              <strong>Модель:</strong> <span className="muted">{vectorStats.embedding_model || "не указана"}</span>
+              <strong>Модель:</strong>{" "}
+              <span className="muted">
+                {vectorStats.embedding_model || "не указана"}
+              </span>
             </div>
             <div>
               <strong>Эмбеддинги:</strong>{" "}
-              <span style={{ color: vectorStats.embedding_available ? "#22c55e" : "#ef4444" }}>
+              <span
+                style={{
+                  color: vectorStats.embedding_available
+                    ? "#22c55e"
+                    : "#ef4444",
+                }}
+              >
                 {vectorStats.embedding_available ? "доступны" : "недоступны"}
               </span>
             </div>
@@ -183,7 +230,13 @@ export default function Analytics() {
                 key={item.name}
                 className="btn"
                 style={{ padding: "7px 10px", fontSize: 12 }}
-                onClick={() => setQuery((current) => (current.trim() ? `${current.trim()} ${item.name}` : item.name))}
+                onClick={() =>
+                  setQuery((current) =>
+                    current.trim()
+                      ? `${current.trim()} ${item.name}`
+                      : item.name,
+                  )
+                }
                 title={`Встречается: ${item.count}`}
               >
                 {item.name} <span className="muted">{item.count}</span>
@@ -191,7 +244,11 @@ export default function Analytics() {
             ))}
           </div>
           {keywordHints.length > 24 && (
-            <button className="btn" style={{ marginTop: 12 }} onClick={() => setHintsExpanded((v) => !v)}>
+            <button
+              className="btn"
+              style={{ marginTop: 12 }}
+              onClick={() => setHintsExpanded((v) => !v)}
+            >
               {hintsExpanded ? "Свернуть" : "Развернуть дальше"}
             </button>
           )}
@@ -208,7 +265,10 @@ export default function Analytics() {
             placeholder="Введите запрос"
             style={{ minWidth: 420 }}
           />
-          <select value={source} onChange={(e) => setSource(e.target.value as PaperSource | "all")}>
+          <select
+            value={source}
+            onChange={(e) => setSource(e.target.value as PaperSource | "all")}
+          >
             <option value="all">Все источники</option>
             {PAPER_SOURCES.map((src) => (
               <option key={src} value={src}>
@@ -216,23 +276,52 @@ export default function Analytics() {
               </option>
             ))}
           </select>
-          <select value={searchType} onChange={(e) => setSearchType(e.target.value as SearchType)}>
+          <select
+            value={searchType}
+            onChange={(e) => setSearchType(e.target.value as SearchType)}
+          >
             <option value="vector">Векторный</option>
             <option value="semantic">Семантический</option>
             <option value="hybrid">Гибридный</option>
             <option value="text">Текстовый</option>
           </select>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input type="checkbox" checked={fullTextOnly} onChange={(e) => setFullTextOnly(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={fullTextOnly}
+              onChange={(e) => setFullTextOnly(e.target.checked)}
+            />
             Статьи только с полным текстом
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span>с:</span>
-            <input className="input" type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+            <input
+              className="input"
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              disabled={!dateFiltersAvailable}
+              title={
+                dateFiltersAvailable
+                  ? undefined
+                  : "Для полнотекстового поиска фильтр дат пока не поддерживается backend endpoint-ом"
+              }
+            />
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span>по:</span>
-            <input className="input" type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+            <input
+              className="input"
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              disabled={!dateFiltersAvailable}
+              title={
+                dateFiltersAvailable
+                  ? undefined
+                  : "Для полнотекстового поиска фильтр дат пока не поддерживается backend endpoint-ом"
+              }
+            />
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span>лимит:</span>
@@ -242,11 +331,17 @@ export default function Analytics() {
               min={1}
               max={100}
               value={limit}
-              onChange={(e) => setLimit(Number(e.target.value))}
+              onChange={(e) => setLimit(normalizeLimit(e.target.value))}
               style={{ width: 90 }}
             />
           </label>
         </div>
+        {!dateFiltersAvailable && (
+          <p className="muted" style={{ marginTop: 10 }}>
+            Фильтр дат отключён для полнотекстового поиска: endpoint
+            /search/fulltext пока не принимает date_from/date_to.
+          </p>
+        )}
       </div>
 
       {error && <p className="error">{error}</p>}
@@ -257,14 +352,25 @@ export default function Analytics() {
           Результаты <span className="muted">(найдено: {total})</span>
         </h3>
         {results.length > 0 && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginBottom: 14 }}>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+              gap: 12,
+              marginBottom: 14,
+            }}
+          >
             <div>
               <p className="muted">Источников в выдаче</p>
               <p className="kpi-status">{resultInsights.sourceCount}</p>
             </div>
             <div>
               <p className="muted">Главный источник</p>
-              <p className="kpi-status">{resultInsights.topSource ? `${resultInsights.topSource[0]} (${resultInsights.topSource[1]})` : "нет"}</p>
+              <p className="kpi-status">
+                {resultInsights.topSource
+                  ? `${resultInsights.topSource[0]} (${resultInsights.topSource[1]})`
+                  : "нет"}
+              </p>
             </div>
             <div>
               <p className="muted">Keywords в найденных</p>
@@ -272,12 +378,18 @@ export default function Analytics() {
             </div>
             <div>
               <p className="muted">Среднее сходство</p>
-              <p className="kpi-status">{searchType === "text" ? "нет" : `${(resultInsights.avgSimilarity * 100).toFixed(0)}%`}</p>
+              <p className="kpi-status">
+                {searchType === "text"
+                  ? "нет"
+                  : `${(resultInsights.avgSimilarity * 100).toFixed(0)}%`}
+              </p>
             </div>
           </div>
         )}
         {results.length === 0 ? (
-          <p className="muted">Нет результатов. Введите запрос и нажмите «Искать».</p>
+          <p className="muted">
+            Нет результатов. Введите запрос и нажмите «Искать».
+          </p>
         ) : (
           <table className="table" style={{ marginTop: 10 }}>
             <thead>
@@ -302,15 +414,29 @@ export default function Analytics() {
                     </div>
                   </td>
                   <td>
-                    <span style={{ fontWeight: 600, ...getSimilarityColor(res.similarity) }}>
-                      {searchType === "text" ? "—" : `${(res.similarity * 100).toFixed(0)}%`}
+                    <span
+                      style={{
+                        fontWeight: 600,
+                        ...(searchType === "text" ? {} : getSimilarityColor(res.similarity)),
+                      }}
+                    >
+                      {searchType === "text"
+                        ? "FTS"
+                        : `${(res.similarity * 100).toFixed(0)}%`}
                     </span>
                   </td>
                   <td>{res.paper.source}</td>
-                  <td>{res.paper.publicationDate ? res.paper.publicationDate.slice(0, 10) : "—"}</td>
+                  <td>
+                    {res.paper.publicationDate
+                      ? res.paper.publicationDate.slice(0, 10)
+                      : "—"}
+                  </td>
                   <td>{res.paper.doi ?? "—"}</td>
                   <td>
-                    <Link className="action-link" to={`/papers/${res.paper.id}`}>
+                    <Link
+                      className="action-link"
+                      to={`/papers/${res.paper.id}`}
+                    >
                       Открыть
                     </Link>
                   </td>

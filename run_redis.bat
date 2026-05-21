@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 cd /d %~dp0
 
 set REDIS_PORT=6380
@@ -16,8 +16,12 @@ set REDIS_EXE=%~dp0redis\redis-server.exe
 if not exist "%REDIS_EXE%" (
   echo Redis server not found. Downloading into %~dp0redis\ ...
   set "REDIS_ZIP=%~dp0redis.zip"
+  set "REDIS_DEST=%~dp0redis"
   set "REDIS_DOWNLOAD_URL=https://github.com/tporadowski/redis/releases/download/v5.0.14.1/Redis-x64-5.0.14.1.zip"
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $zip='%REDIS_ZIP%'; $dest='%~dp0redis'; if(!(Test-Path $dest)){New-Item -ItemType Directory -Path $dest | Out-Null}; Invoke-WebRequest -Uri '%REDIS_DOWNLOAD_URL%' -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dest -Force; Remove-Item $zip -Force;"
+  set "REDIS_ZIP_ENV=!REDIS_ZIP!"
+  set "REDIS_DEST_ENV=!REDIS_DEST!"
+  set "REDIS_URL_ENV=!REDIS_DOWNLOAD_URL!"
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "& { $ErrorActionPreference = 'Stop'; $zip = $env:REDIS_ZIP_ENV; $dest = $env:REDIS_DEST_ENV; $url = $env:REDIS_URL_ENV; if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }; Invoke-WebRequest -Uri $url -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dest -Force; Remove-Item $zip -Force }"
   if not exist "%REDIS_EXE%" (
     echo Failed to download Redis. Check network or URL.
     echo.

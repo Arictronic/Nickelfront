@@ -1,10 +1,18 @@
-"""Comprehensive parser testing script for all 5 sources."""
+"""Manual parser-data analysis script for all primary sources.
+
+This script expects previously generated JSON files in ``data/`` and is marked
+as external/manual so it is skipped by the default pytest run.
+"""
 
 import asyncio
 import json
 from pathlib import Path
 from datetime import datetime
 from typing import Any
+
+import pytest
+
+pytestmark = pytest.mark.external
 
 # Test queries for metallurgy domain
 TEST_QUERIES = [
@@ -216,6 +224,7 @@ async def test_all_sources():
     print("=" * 80)
     
     report_path = Path("data/parser_test_report.json")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     report = {
         "test_date": datetime.now().isoformat(),
         "sources_tested": SOURCES,
