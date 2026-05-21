@@ -22,6 +22,8 @@ from app.tasks.celery_app import celery_app
     name="app.tasks.qwen.send_message",
     rate_limit=settings.QWEN_QUEUE_TASK_RATE_LIMIT,
     acks_late=True,
+    soft_time_limit=int(max(60, settings.QWEN_QUEUE_TIMEOUT + 30)),
+    time_limit=int(max(90, settings.QWEN_QUEUE_TIMEOUT + 90)),
 )
 def qwen_send_message_task(
     self,

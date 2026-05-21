@@ -25,6 +25,8 @@ celery_app = Celery(
         "app.tasks.content_tasks",
         "app.tasks.alloy_analysis_tasks",
         "app.tasks.qwen_tasks",
+        # Legacy compatibility task name; internally uses the shared qwen gateway.
+        "app.tasks.translation_tasks",
     ],
 )
 

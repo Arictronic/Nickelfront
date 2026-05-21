@@ -266,6 +266,39 @@ class QwenTransport:
                 return response_json.get("data")
         return response_json
 
+    def _safe_response_text(self, resp: requests.Response, limit: int = 800) -> str:
+        """Return a short, token-safe response preview for diagnostics."""
+        try:
+            text = resp.text or ""
+        except Exception:
+            return ""
+        # Never log request headers/cookies/tokens; only provider response preview.
+        return text.replace("\r", " ").replace("\n", " ").strip()[:limit]
+
+    def _raise_for_bad_response(self, resp: requests.Response, *, operation: str) -> None:
+        """Convert non-2xx provider responses into explicit provider errors.
+
+        Without this guard, an HTML/JSON error page can be fed into the SSE parser,
+        producing an empty answer that looks like a successful Qwen response.
+        """
+        if 200 <= int(resp.status_code) < 300:
+            return
+
+        preview = self._safe_response_text(resp)
+        status = int(resp.status_code)
+        message = f"Qwen provider {operation} failed with HTTP {status}"
+        if preview:
+            message = f"{message}: {preview}"
+
+        lower = message.lower()
+        if status in {401, 403}:
+            raise QwenProviderError("Qwen provider authentication failed; check QWEN_TOKEN")
+        if status == 429 or "rate limit" in lower:
+            raise QwenProviderError(message)
+        if "model not found" in lower:
+            raise QwenProviderError(message)
+        raise QwenProviderError(message)
+
     def _setup_proxy(self, proxy_config: dict[str, Any]):
         """Configure proxy if provided"""
         proxy_url = proxy_config.get("url")
@@ -384,6 +417,7 @@ class QwenTransport:
             stream=True,
             timeout=(self.connect_timeout, self.stream_read_timeout),
         )
+        self._raise_for_bad_response(resp, operation="send_stream")
         return resp
 
     def continue_stream(
@@ -408,6 +442,7 @@ class QwenTransport:
             stream=True,
             timeout=(self.connect_timeout, self.stream_read_timeout),
         )
+        self._raise_for_bad_response(resp, operation="continue_stream")
         return resp
 
 
@@ -699,11 +734,31 @@ class QwenAPI:
         on_complete_parts: Callable[[str, str], None] | None = None,
         on_meta: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
-        """Continue response from a specific message"""
+        """Continue response from a specific message."""
         try:
-            remote_id = self._get_remote_message_id(self.session_id, message_id)
+            session_id = self.session_id
+            if not session_id:
+                raise QwenProviderError("Cannot continue Qwen response without session_id")
+
+            remote_id = self._get_remote_message_id(session_id, message_id)
+            if not remote_id and message_id > 0:
+                # The standalone service keeps local<->remote message ids in memory.
+                # After a service restart the local id can arrive from backend/UI while
+                # the mapping is empty. Fetch history once to rebuild the mapping before
+                # sending a broken continue request with parent_id=''.
+                self.fetch_history(session_id)
+                remote_id = self._get_remote_message_id(session_id, message_id)
+
+            if not remote_id and message_id <= 0:
+                remote_id = self._last_response_remote_id.get(session_id, "")
+                if not remote_id:
+                    chat = self.transport.fetch_chat(session_id)
+                    remote_id = self._find_latest_assistant_id(chat) or ""
+
             if not remote_id:
-                remote_id = self._last_response_remote_id.get(self.session_id, "")
+                raise QwenProviderError(
+                    f"Cannot continue Qwen response: remote message id is unknown for local id {message_id}"
+                )
 
             callbacks = StreamCallbacks(
                 on_complete_parts=on_complete_parts,
@@ -711,7 +766,7 @@ class QwenAPI:
             )
 
             payload = self._build_payload(
-                session_id=self.session_id,
+                session_id=session_id,
                 prompt="",
                 thinking_enabled=False,
                 search_enabled=False,
@@ -719,14 +774,14 @@ class QwenAPI:
             )
 
             resp = self.transport.continue_stream(
-                session_id=self.session_id,
+                session_id=session_id,
                 message_id=remote_id,
                 payload=payload,
                 thinking_enabled=False,
             )
 
             self._parse_and_finalize(
-                session_id=self.session_id,
+                session_id=session_id,
                 resp=resp,
                 thinking_enabled=False,
                 callbacks=callbacks,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from celery import Celery
+from celery.exceptions import TimeoutError as CeleryTimeoutError
 from celery.result import AsyncResult
 from loguru import logger
 
@@ -62,6 +63,22 @@ def send_qwen_message_via_queue(
 
     try:
         result = task.get(timeout=wait_timeout, propagate=True, disable_sync_subtasks=False)
+    except CeleryTimeoutError as exc:
+        # The caller has stopped waiting. Revoke the queued task if it has not started yet;
+        # the qwen task itself also has a hard time limit so a running worker cannot hang forever.
+        try:
+            task.revoke(terminate=False)
+        except Exception:
+            logger.debug("Failed to revoke timed-out Qwen task {}", task.id, exc_info=True)
+        logger.exception("Qwen queued request timed out: task_id={}, purpose={}, wait_timeout={}", task.id, purpose, wait_timeout)
+        return {
+            "error": f"Qwen queued request timed out after {wait_timeout}s",
+            "response": "",
+            "thinking": "",
+            "task_id": task.id,
+            "purpose": purpose,
+            "timeout": wait_timeout,
+        }
     except Exception as exc:
         logger.exception("Qwen queued request failed: task_id={}, purpose={}", task.id, purpose)
         return {

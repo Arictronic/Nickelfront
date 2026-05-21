@@ -19,7 +19,20 @@ class QwenTranslationAdapter:
         self.enabled = os.getenv("PARSER_TRANSLATE_QWEN_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
         self._celery_available = importlib.util.find_spec("celery") is not None
         # Parser-specific setting wins, generic Qwen queue is fallback.
-        self.queue = os.getenv("PARSER_TRANSLATE_QWEN_QUEUE") or os.getenv("QWEN_QUEUE_NAME") or "qwen"
+        # Guard against the removed legacy queue: a stale .env with
+        # PARSER_TRANSLATE_QWEN_QUEUE=qwen_translation would silently hang because
+        # run_qwen_translation_worker.bat is intentionally removed.
+        configured_queue = (os.getenv("PARSER_TRANSLATE_QWEN_QUEUE") or os.getenv("QWEN_QUEUE_NAME") or "qwen").strip()
+        allow_legacy_queue = os.getenv("PARSER_TRANSLATE_QWEN_ALLOW_LEGACY_QUEUE", "0").strip().lower() in {"1", "true", "yes", "on"}
+        if configured_queue == "qwen_translation" and not allow_legacy_queue:
+            logger.warning(
+                "Ignoring legacy PARSER_TRANSLATE_QWEN_QUEUE=qwen_translation; using shared queue 'qwen'. "
+                "Use run_qwen_worker.bat, not the removed translation worker."
+            )
+            configured_queue = os.getenv("QWEN_QUEUE_NAME", "qwen").strip() or "qwen"
+            if configured_queue == "qwen_translation":
+                configured_queue = "qwen"
+        self.queue = configured_queue
         self.timeout = float(os.getenv("PARSER_TRANSLATE_QWEN_TIMEOUT", os.getenv("QWEN_QUEUE_TIMEOUT", "1000")))
         self.broker = os.getenv("CELERY_BROKER_URL", os.getenv("REDIS_URL", "redis://localhost:6380/0"))
         self.backend = os.getenv("CELERY_RESULT_BACKEND", self.broker)

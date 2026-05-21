@@ -152,6 +152,8 @@ export interface CeleryTaskStatus {
     current?: number;
     total?: number;
     saved_count?: number;
+    updated_count?: number;
+    duplicate_count?: number;
     embedded_count?: number;
     errors?: string[];
     [key: string]: any;
@@ -166,6 +168,8 @@ export interface CeleryTaskStatus {
   current?: number;
   total?: number;
   saved_count?: number;
+  updated_count?: number;
+  duplicate_count?: number;
   embedded_count?: number;
   errors?: string[];
   name?: string;

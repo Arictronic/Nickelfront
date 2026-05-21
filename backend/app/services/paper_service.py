@@ -58,6 +58,10 @@ class PaperService:
             await self.db.commit()
             await self.db.refresh(existing)
 
+        # Transient flags used by parser Celery tasks for honest statistics.
+        # They are not mapped DB columns and are not exposed through Pydantic schemas.
+        setattr(existing, "_nickelfront_created", False)
+        setattr(existing, "_nickelfront_updated", updated)
         return existing
 
     async def create_paper(self, paper_data: PaperCreate) -> PaperSchema:
@@ -116,6 +120,9 @@ class PaperService:
         self.db.add(db_paper)
         await self.db.commit()
         await self.db.refresh(db_paper)
+
+        setattr(db_paper, "_nickelfront_created", True)
+        setattr(db_paper, "_nickelfront_updated", False)
 
         logger.info(f"Создана статья: {db_paper.id} - {db_paper.title[:50]}...")
         return db_paper

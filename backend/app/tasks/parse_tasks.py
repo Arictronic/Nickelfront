@@ -174,6 +174,8 @@ def _mark_revoked(task, query: str, source: str, current: int = 0, total: int = 
         "current": current,
         "total": total,
         "saved_count": 0,
+        "updated_count": 0,
+        "duplicate_count": 0,
         "embedded_count": 0,
         "content_queued_count": 0,
         "content_skipped_count": 0,
@@ -405,6 +407,8 @@ def _parse_queries_for_task(
     total_saved = 0
     total_content_queued = 0
     total_content_skipped = 0
+    total_updated = 0
+    total_duplicates = 0
 
     for idx, query in enumerate(queries):
         if _is_cancelled(task):
@@ -422,6 +426,8 @@ def _parse_queries_for_task(
                     "total_saved": total_saved,
                     "total_content_queued": total_content_queued,
                     "total_content_skipped": total_content_skipped,
+                    "total_updated": total_updated,
+                    "total_duplicates": total_duplicates,
                     "status": f"Обработка запроса {idx + 1}/{total_queries}: '{query}'",
                 },
             )
@@ -436,6 +442,8 @@ def _parse_queries_for_task(
             total_saved += int(result.get("saved_count", 0) or 0)
             total_content_queued += int(result.get("content_queued_count", 0) or 0)
             total_content_skipped += int(result.get("content_skipped_count", 0) or 0)
+            total_updated += int(result.get("updated_count", 0) or 0)
+            total_duplicates += int(result.get("duplicate_count", 0) or 0)
 
             if result.get("status") == "revoked":
                 break
@@ -458,6 +466,10 @@ def _parse_queries_for_task(
             "content_queued_count": total_content_queued,
             "total_content_skipped": total_content_skipped,
             "content_skipped_count": total_content_skipped,
+            "total_updated": total_updated,
+            "updated_count": total_updated,
+            "total_duplicates": total_duplicates,
+            "duplicate_count": total_duplicates,
             "status": "Все запросы обработаны",
         },
     )
@@ -472,6 +484,10 @@ def _parse_queries_for_task(
         "content_queued_count": total_content_queued,
         "total_content_skipped": total_content_skipped,
         "content_skipped_count": total_content_skipped,
+        "total_updated": total_updated,
+        "updated_count": total_updated,
+        "total_duplicates": total_duplicates,
+        "duplicate_count": total_duplicates,
     }
 
 
@@ -508,6 +524,8 @@ async def _parse_async(
         "found_count": 0,
         "parsed_count": 0,
         "saved_count": 0,
+        "updated_count": 0,
+        "duplicate_count": 0,
         "embedded_count": 0,
         "content_queued_count": 0,
         "content_skipped_count": 0,
@@ -563,6 +581,8 @@ async def _parse_async(
                             "current": idx,
                             "total": len(papers),
                             "saved_count": stats["saved_count"],
+                            "updated_count": stats["updated_count"],
+                            "duplicate_count": stats["duplicate_count"],
                             "content_queued_count": stats["content_queued_count"],
                             "content_skipped_count": stats["content_skipped_count"],
                             "status": f"Сохранение статей ({idx}/{len(papers)})...",
@@ -592,7 +612,14 @@ async def _parse_async(
                     schema_version=_clean_text(paper.get("schema_version")) or "2.0",
                 )
                 saved_paper = await paper_service.create_paper(paper_create)
-                stats["saved_count"] += 1
+                was_created = bool(getattr(saved_paper, "_nickelfront_created", True))
+                was_updated_existing = bool(getattr(saved_paper, "_nickelfront_updated", False))
+                if was_created:
+                    stats["saved_count"] += 1
+                elif was_updated_existing:
+                    stats["updated_count"] += 1
+                else:
+                    stats["duplicate_count"] += 1
 
                 if saved_paper.id:
                     if not _should_queue_content_processing(saved_paper):
@@ -642,6 +669,8 @@ async def _parse_async(
             "current": len(papers),
             "total": len(papers),
             "saved_count": stats["saved_count"],
+            "updated_count": stats["updated_count"],
+            "duplicate_count": stats["duplicate_count"],
             "embedded_count": stats["embedded_count"],
             "content_queued_count": stats["content_queued_count"],
             "content_skipped_count": stats["content_skipped_count"],
@@ -651,7 +680,8 @@ async def _parse_async(
 
     logger.info(
         f"Парсинг '{query}' ({source}): найдено={stats['found_count']}, "
-        f"распарсено={stats['parsed_count']}, сохранено={stats['saved_count']}, "
+        f"распарсено={stats['parsed_count']}, новых={stats['saved_count']}, "
+        f"обновлено={stats['updated_count']}, дублей={stats['duplicate_count']}, "
         f"в очереди на AI/PDF={stats['content_queued_count']}, "
         f"пропущено AI/PDF={stats['content_skipped_count']}"
     )
@@ -706,6 +736,8 @@ def parse_all_sources_task(
         total_saved = 0
         total_content_queued = 0
         total_content_skipped = 0
+        total_updated = 0
+        total_duplicates = 0
 
         if queries is not None:
             user_queries = [str(q).strip() for q in queries if str(q).strip()]
@@ -726,6 +758,8 @@ def parse_all_sources_task(
                     "total_saved": total_saved,
                     "total_content_queued": total_content_queued,
                     "total_content_skipped": total_content_skipped,
+                    "total_updated": total_updated,
+                    "total_duplicates": total_duplicates,
                     "status": f"Парсинг источника {source}...",
                 },
             )
@@ -752,6 +786,8 @@ def parse_all_sources_task(
             total_saved += int(source_result.get("total_saved", 0) or 0)
             total_content_queued += int(source_result.get("total_content_queued", 0) or 0)
             total_content_skipped += int(source_result.get("total_content_skipped", 0) or 0)
+            total_updated += int(source_result.get("total_updated", 0) or source_result.get("updated_count", 0) or 0)
+            total_duplicates += int(source_result.get("total_duplicates", 0) or source_result.get("duplicate_count", 0) or 0)
 
             if source_result.get("status") == "revoked":
                 break
@@ -769,6 +805,10 @@ def parse_all_sources_task(
                 "content_queued_count": total_content_queued,
                 "total_content_skipped": total_content_skipped,
                 "content_skipped_count": total_content_skipped,
+                "total_updated": total_updated,
+                "updated_count": total_updated,
+                "total_duplicates": total_duplicates,
+                "duplicate_count": total_duplicates,
                 "status": "Все источники обработаны",
             },
         )
@@ -785,6 +825,10 @@ def parse_all_sources_task(
             "content_queued_count": total_content_queued,
             "total_content_skipped": total_content_skipped,
             "content_skipped_count": total_content_skipped,
+            "total_updated": total_updated,
+            "updated_count": total_updated,
+            "total_duplicates": total_duplicates,
+            "duplicate_count": total_duplicates,
         }
     finally:
         task_id = _get_task_id(self)

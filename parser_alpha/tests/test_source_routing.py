@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from parsers_pkg.source_routing import SourceHealthStore, SourceRunTelemetry, adapt_query_for_source, resolve_route
 from parsers_pkg.sources import build_default_source_registry
@@ -25,6 +26,18 @@ class TestSourceRouting(unittest.TestCase):
         q4, r4 = adapt_query_for_source("CyberLeninka", "металлы никель")
         self.assertEqual(q4, "металлы никель")
         self.assertEqual(r4, "identity")
+
+    def test_query_translation_can_be_disabled_for_dry_run(self):
+        with patch("parsers_pkg.source_routing.get_shared_query_translator") as mocked_translator:
+            mocked_translator.side_effect = AssertionError("translator must not be called in dry-run routing")
+            query, reason = adapt_query_for_source(
+                "Crossref",
+                "никелевые жаропрочные сплавы",
+                allow_translation=False,
+            )
+
+        self.assertEqual(query, "никелевые жаропрочные сплавы")
+        self.assertIn("translation_skipped", reason)
 
     def test_health_penalty_affects_route(self):
         registry = build_default_source_registry()

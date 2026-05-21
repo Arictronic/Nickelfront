@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from parsers_pkg.pipelines.data_pipeline import process_papers
 from parsers_pkg.sources import build_default_source_registry
@@ -53,6 +54,25 @@ class TestPipelineAndDryRunSmoke(unittest.IsolatedAsyncioTestCase):
             self.assertIn("maturity", first)
             self.assertIn("access_mode", first)
             self.assertIn("compliance_notes", first)
+
+    async def test_dry_run_does_not_call_qwen_translation(self):
+        with patch("parsers_pkg.source_routing.get_shared_query_translator") as mocked_translator:
+            mocked_translator.side_effect = AssertionError("dry-run must not call translator/Qwen")
+            plan = _build_dry_run_plan(
+                source="Crossref",
+                query="никелевые жаропрочные сплавы",
+                limit=5,
+                disable_fragile_sources=False,
+                api_only=False,
+                stable_only=False,
+                allow_experimental=True,
+                out_dir="data",
+                max_fallback_sources=3,
+                strict_source=True,
+            )
+
+        self.assertEqual(plan["route_count"], 1)
+        self.assertIn("translation_skipped", plan["route_plan"][0]["route_reason"])
 
     async def test_dry_run_strict_source_disables_fallback(self):
         plan = _build_dry_run_plan(

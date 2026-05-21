@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -101,7 +102,12 @@ def _contains_non_ascii(text: str) -> bool:
     return any(ord(ch) > 127 for ch in text)
 
 
-def adapt_query_for_source(source: str, query: str) -> tuple[str, str]:
+def source_prefers_english_query(source: str) -> bool:
+    """Return True for sources where non-ASCII queries should be translated to English."""
+    return source in _ENGLISH_QUERY_SOURCES
+
+
+def adapt_query_for_source(source: str, query: str, *, allow_translation: bool = True) -> tuple[str, str]:
     raw = " ".join(query.split())
     if not raw:
         return raw, "empty_query"
@@ -128,7 +134,9 @@ def adapt_query_for_source(source: str, query: str) -> tuple[str, str]:
         normalized = rewritten
         reason = "ru_to_en_token_rewrite"
 
-    if source in _ENGLISH_QUERY_SOURCES and _contains_non_ascii(normalized):
+    if source_prefers_english_query(source) and _contains_non_ascii(normalized):
+        if not allow_translation:
+            return normalized, f"{reason}|translation_skipped"
         translator = get_shared_query_translator()
         translated = translator.translate(normalized, target_lang="en", source_lang="auto")
         if translated.translated:
@@ -175,9 +183,19 @@ class SourceHealthStore:
             return {"sources": {}, "updated_at": None}
 
     def save(self) -> None:
+        """Persist source health atomically.
+
+        Several parser subprocesses can run in parallel from different Celery workers.
+        A direct write can leave a half-written JSON file if a process is killed while
+        saving telemetry, which later breaks routing/fallback decisions.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._state["updated_at"] = _utc_now_iso()
-        self.path.write_text(json.dumps(self._state, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload = json.dumps(self._state, ensure_ascii=False, indent=2)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(self.path.parent)) as tmp:
+            tmp.write(payload)
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(self.path)
 
     def get(self, source: str) -> dict[str, Any]:
         return dict(self._state.get("sources", {}).get(source, {}))
@@ -237,6 +255,7 @@ def resolve_route(
     stable_only: bool = False,
     allow_experimental: bool = True,
     max_sources: int = 3,
+    allow_translation: bool = True,
 ) -> list[RoutedSource]:
     requested = requested_source.strip()
     preserve_input_order = False
@@ -269,7 +288,11 @@ def resolve_route(
         if not allow_experimental and source_meta.maturity == "experimental":
             continue
 
-        adapted_query, reason = adapt_query_for_source(source_meta.name, query)
+        adapted_query, reason = adapt_query_for_source(
+            source_meta.name,
+            query,
+            allow_translation=allow_translation,
+        )
         penalty = health_store.score_penalty(source_meta.name)
         score = float(source_meta.priority) + penalty
         routed.append(

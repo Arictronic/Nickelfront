@@ -21,11 +21,14 @@ import sys
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from threading import RLock
+from collections.abc import Callable
 from typing import Any
 
 import uvicorn
 from dotenv import load_dotenv, set_key
 from fastapi import FastAPI, HTTPException, Security
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -165,6 +168,24 @@ active_sessions: dict[str, dict[str, Any]] = {}
 
 # Трекинг авто-продолжений: session_id -> {message_ids: set, count: int, last_message_id: int}
 auto_continue_tracker: dict[str, dict[str, Any]] = {}
+
+# The standalone Qwen client keeps mutable state (session_id, last_message_id,
+# requests.Session and continuation tracker). Multiple gateway workers may call this
+# service concurrently, so serialize provider calls to avoid mixed sessions and
+# `chat is in progress` races. FastAPI endpoints run this locked work in a thread
+# pool so /health and /config remain responsive while Qwen is processing.
+qwen_request_lock = RLock()
+
+
+def _call_qwen_locked(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run any qwen_api operation under the shared provider lock."""
+    with qwen_request_lock:
+        return fn(*args, **kwargs)
+
+
+async def _run_qwen_locked(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run a locked qwen_api operation without blocking the FastAPI event loop."""
+    return await run_in_threadpool(_call_qwen_locked, fn, *args, **kwargs)
 
 
 # FastAPI приложение
@@ -759,8 +780,14 @@ def _continue_message_sync(
 
 @app.get("/health")
 async def health_check():
-    """Проверка здоровья сервиса"""
-    return {"status": "ok", "model": config.get("model", DEFAULT_MODEL)}
+    """Проверка здоровья сервиса."""
+    available = bool(qwen_api and config.get("token"))
+    return {
+        "status": "ok" if available else "error",
+        "model": config.get("model", DEFAULT_MODEL),
+        "available": available,
+        "has_token": bool(config.get("token")),
+    }
 
 
 @app.get("/config")
@@ -801,17 +828,18 @@ async def set_auto_continue_config(enabled: bool, max_continues: int | None = No
 
 @app.post("/config/token")
 async def set_token(token_config: TokenConfig):
-    """Установка токена Qwen"""
-    config["token"] = token_config.token
-    save_config(config)
-
-    # Переинициализация API
+    """Установка токена Qwen."""
     global qwen_api
-    qwen_api = QwenAPI(
-        token=token_config.token,
-        logger=lambda msg: logging.info(msg),
-        default_model=str(config.get("model", DEFAULT_MODEL)),
-    )
+    with qwen_request_lock:
+        config["token"] = token_config.token
+        save_config(config)
+
+        # Переинициализация API
+        qwen_api = QwenAPI(
+            token=token_config.token,
+            logger=lambda msg: logging.info(msg),
+            default_model=str(config.get("model", DEFAULT_MODEL)),
+        )
 
     return {"status": "ok", "message": "Токен установлен"}
 
@@ -832,18 +860,19 @@ async def get_model():
 
 @app.post("/config/model")
 async def set_model(model_config: ModelConfig):
-    """Настройка модели и параметров"""
-    config["model"] = model_config.model
-    config["thinking_enabled"] = model_config.thinking_enabled
-    config["search_enabled"] = model_config.search_enabled
-    if hasattr(model_config, "auto_continue_enabled"):
-        config["auto_continue_enabled"] = model_config.auto_continue_enabled
-    if hasattr(model_config, "max_continues"):
-        config["max_continues"] = model_config.max_continues
-    save_config(config)
+    """Настройка модели и параметров."""
+    with qwen_request_lock:
+        config["model"] = model_config.model
+        config["thinking_enabled"] = model_config.thinking_enabled
+        config["search_enabled"] = model_config.search_enabled
+        if hasattr(model_config, "auto_continue_enabled"):
+            config["auto_continue_enabled"] = model_config.auto_continue_enabled
+        if hasattr(model_config, "max_continues"):
+            config["max_continues"] = model_config.max_continues
+        save_config(config)
 
-    if qwen_api:
-        qwen_api.set_model(model_config.model)
+        if qwen_api:
+            qwen_api.set_model(model_config.model)
 
     return {"status": "ok", "model": model_config.model}
 
@@ -858,7 +887,7 @@ async def list_models(credentials: HTTPAuthorizationCredentials | None = Securit
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
 
     try:
-        models = qwen_api.fetch_models()
+        models = await _run_qwen_locked(qwen_api.fetch_models)
         return {"models": models}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -877,7 +906,7 @@ async def create_session(
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
 
     try:
-        session_id = qwen_api.create_session()
+        session_id = await _run_qwen_locked(qwen_api.create_session)
         logging.info(f"create_session returned: {session_id}")
         if not session_id:
             logging.error("create_session returned None")
@@ -886,7 +915,7 @@ async def create_session(
         title = (request.title.strip() if request and request.title else "") or "Новый чат"
         if request and request.title:
             try:
-                qwen_api.update_session_title(session_id, title)
+                await _run_qwen_locked(qwen_api.update_session_title, session_id, title)
             except Exception as rename_exc:
                 logging.warning("Failed to set session title for %s: %s", session_id, rename_exc)
 
@@ -916,7 +945,7 @@ async def list_sessions(
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
 
     try:
-        sessions, _ = qwen_api.fetch_sessions_page()
+        sessions, _ = await _run_qwen_locked(qwen_api.fetch_sessions_page)
         return {"sessions": sessions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -935,8 +964,11 @@ async def get_session(
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
 
     try:
-        qwen_api.session_id = session_id
-        history, messages = qwen_api.fetch_history(session_id)
+        def _get_history() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            qwen_api.session_id = session_id
+            return qwen_api.fetch_history(session_id)
+
+        history, messages = await _run_qwen_locked(_get_history)
         return {"session_id": session_id, "history": history, "messages": messages}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -955,7 +987,7 @@ async def delete_session(
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
 
     try:
-        success = qwen_api.delete_session(session_id)
+        success = await _run_qwen_locked(qwen_api.delete_session, session_id)
         if success and session_id in active_sessions:
             del active_sessions[session_id]
         return {"status": "ok", "deleted": success}
@@ -978,11 +1010,146 @@ async def rename_session(
 
     title = title_data.get("title", "Новый чат")
     try:
-        success = qwen_api.update_session_title(session_id, title)
+        success = await _run_qwen_locked(qwen_api.update_session_title, session_id, title)
         if success and session_id in active_sessions:
             active_sessions[session_id]["title"] = title
         return {"status": "ok", "title": title}
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+def _send_message_impl(request: SendMessageRequest) -> dict[str, Any]:
+    """Synchronous implementation of /messages protected by qwen_request_lock."""
+    try:
+        with qwen_request_lock:
+            # Сброс трекера для нового сообщения (не для продолжения)
+            _reset_continuation_tracker(request.session_id)
+
+            # Определение параметра авто-продолжения
+            auto_continue = request.auto_continue
+            if auto_continue is None:
+                auto_continue = config.get("auto_continue_enabled", DEFAULT_AUTO_CONTINUE_ENABLED)
+
+            # Первое отправление сообщения
+            thinking_text, response_text, message_id, can_continue = _send_message_sync(
+                session_id=request.session_id,
+                message=request.message,
+                thinking_enabled=request.thinking_enabled,
+                search_enabled=request.search_enabled,
+                ref_file_ids=request.file_ids,
+            )
+
+            logging.info(
+                "Message sent: session=%s, message_id=%s, can_continue=%s",
+                request.session_id[-6:],
+                message_id,
+                can_continue,
+            )
+
+            if not response_text.strip() and message_id > 0:
+                logging.warning(
+                    "Initial response is empty, forcing one continue attempt: session=%s, message_id=%s",
+                    request.session_id[-6:],
+                    message_id,
+                )
+                forced_thinking, forced_response, forced_message_id, forced_can_continue = _continue_message_sync(
+                    session_id=request.session_id,
+                    message_id=message_id,
+                    thinking_enabled=request.thinking_enabled,
+                )
+                if forced_thinking:
+                    thinking_text = forced_thinking
+                if forced_response:
+                    response_text = forced_response
+                if forced_message_id > 0:
+                    message_id = forced_message_id
+                can_continue = forced_can_continue
+
+            # Авто-продолжение с использованием автоматического определения
+            continue_count = 0
+            all_thinking_parts = [thinking_text] if thinking_text else []
+            all_response_parts = [response_text] if response_text else []
+            last_message_id = message_id
+            last_response_text = response_text
+            no_progress_streak = 0
+
+            # Определяем необходимость продолжения автоматически
+            need_continue = auto_continue and _should_auto_continue(last_response_text, can_continue)
+
+            while need_continue and _can_auto_continue(request.session_id):
+                continue_count += 1
+                _track_continuation(request.session_id, last_message_id)
+
+                logging.info(
+                    "Auto-continue #%s for session=%s, message_id=%s",
+                    continue_count,
+                    request.session_id[-6:],
+                    last_message_id,
+                )
+
+                cont_thinking, cont_response, new_message_id, new_can_continue = _continue_message_sync(
+                    session_id=request.session_id,
+                    message_id=last_message_id,
+                    thinking_enabled=request.thinking_enabled,
+                )
+
+                if cont_thinking:
+                    all_thinking_parts.append(cont_thinking)
+                if cont_response:
+                    all_response_parts.append(cont_response)
+
+                # Stop infinite loop: no content and no message id progress.
+                if not (cont_response or "").strip() and new_message_id == last_message_id:
+                    no_progress_streak += 1
+                    logging.warning(
+                        "Auto-continue stopped due to no progress: session=%s, message_id=%s, continue_count=%s",
+                        request.session_id[-6:],
+                        last_message_id,
+                        continue_count,
+                    )
+                    if no_progress_streak >= 1:
+                        can_continue = False
+                        break
+                else:
+                    no_progress_streak = 0
+
+                last_message_id = new_message_id
+                last_response_text = cont_response or last_response_text
+                can_continue = new_can_continue
+                need_continue = auto_continue and _should_auto_continue(last_response_text, can_continue)
+
+                logging.info(
+                    "Continue #%s done: new_message_id=%s, can_continue=%s, need_continue=%s",
+                    continue_count,
+                    new_message_id,
+                    can_continue,
+                    need_continue,
+                )
+
+            full_thinking = "\n\n".join(filter(None, all_thinking_parts))
+            full_response = "\n\n".join(filter(None, all_response_parts))
+
+            return {
+                "session_id": request.session_id,
+                "message": request.message,
+                "response": full_response,
+                "thinking": full_thinking,
+                "thinking_enabled": request.thinking_enabled,
+                "search_enabled": request.search_enabled,
+                "auto_continue_performed": continue_count > 0,
+                "continue_count": continue_count,
+                "can_continue": can_continue,
+                # Backend and frontend expect `message_id` for manual continuation.
+                # Keep `last_message_id` as a backward-compatible alias.
+                "message_id": last_message_id,
+                "last_message_id": last_message_id,
+                "auto_continue_reason": "API flag" if can_continue else "content analysis" if continue_count > 0 else "none",
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.exception("Error sending message: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -998,123 +1165,124 @@ async def send_message(
     if not qwen_api:
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
 
+    return await run_in_threadpool(_send_message_impl, request)
+
+
+
+def _continue_message_impl(
+    request: ContinueMessageRequest,
+    auto_continue: bool | None = None,
+) -> dict[str, Any]:
+    """Synchronous implementation of /messages/continue protected by qwen_request_lock."""
     try:
-        # Сброс трекера для нового сообщения (не для продолжения)
-        _reset_continuation_tracker(request.session_id)
+        with qwen_request_lock:
+            # Определение параметра авто-продолжения
+            do_auto_continue = auto_continue
+            if do_auto_continue is None:
+                do_auto_continue = config.get("auto_continue_enabled", DEFAULT_AUTO_CONTINUE_ENABLED)
 
-        # Определение параметра авто-продолжения
-        auto_continue = request.auto_continue
-        if auto_continue is None:
-            auto_continue = config.get("auto_continue_enabled", DEFAULT_AUTO_CONTINUE_ENABLED)
+            # Инициализация трекера если нужно
+            if request.session_id not in auto_continue_tracker:
+                _reset_continuation_tracker(request.session_id)
 
-        # Первое отправление сообщения
-        thinking_text, response_text, message_id, can_continue = _send_message_sync(
-            session_id=request.session_id,
-            message=request.message,
-            thinking_enabled=request.thinking_enabled,
-            search_enabled=request.search_enabled,
-            ref_file_ids=request.file_ids,
-        )
+            all_thinking_parts: list[str] = []
+            all_response_parts: list[str] = []
+            last_message_id = request.message_id
+            continue_count = 0
+            can_continue = True
+            last_response_text = ""
+            no_progress_streak = 0
 
-        logging.info(f"Message sent: session={request.session_id[-6:]}, message_id={message_id}, can_continue={can_continue}")
-
-        if not response_text.strip() and message_id > 0:
-            logging.warning(
-                "Initial response is empty, forcing one continue attempt: session=%s, message_id=%s",
-                request.session_id[-6:],
-                message_id,
-            )
-            forced_thinking, forced_response, forced_message_id, forced_can_continue = _continue_message_sync(
-                session_id=request.session_id,
-                message_id=message_id,
-                thinking_enabled=request.thinking_enabled,
-            )
-            if forced_thinking:
-                thinking_text = forced_thinking
-            if forced_response:
-                response_text = forced_response
-            if forced_message_id > 0:
-                message_id = forced_message_id
-            can_continue = forced_can_continue
-
-        # Авто-продолнение с использованием автоматического определения
-        continue_count = 0
-        all_thinking_parts = [thinking_text] if thinking_text else []
-        all_response_parts = [response_text] if response_text else []
-        last_message_id = message_id
-        last_response_text = response_text
-        no_progress_streak = 0
-
-        # Определяем необходимость продолжения автоматически
-        need_continue = auto_continue and _should_auto_continue(last_response_text, can_continue)
-
-        while need_continue and _can_auto_continue(request.session_id):
-            continue_count += 1
-            _track_continuation(request.session_id, last_message_id)
-
-            logging.info(f"Auto-continue #{continue_count} for session={request.session_id[-6:]}, message_id={last_message_id} (detected by {'API flag' if can_continue else 'content analysis'})")
-
-            # Продолжение ответа
+            # Первое продолжение
             cont_thinking, cont_response, new_message_id, new_can_continue = _continue_message_sync(
                 session_id=request.session_id,
                 message_id=last_message_id,
                 thinking_enabled=request.thinking_enabled,
             )
 
-            # Накопление частей
             if cont_thinking:
                 all_thinking_parts.append(cont_thinking)
             if cont_response:
                 all_response_parts.append(cont_response)
 
-            # Stop infinite loop: no content and no message id progress.
-            if not (cont_response or "").strip() and new_message_id == last_message_id:
-                no_progress_streak += 1
-                logging.warning(
-                    "Auto-continue stopped due to no progress: session=%s, message_id=%s, continue_count=%s",
+            last_message_id = new_message_id
+            last_response_text = cont_response or ""
+            can_continue = new_can_continue
+            continue_count = 1
+
+            # Авто-продолжение с автоматическим определением
+            need_continue = do_auto_continue and _should_auto_continue(last_response_text, can_continue)
+
+            while need_continue and _can_auto_continue(request.session_id):
+                continue_count += 1
+                _track_continuation(request.session_id, last_message_id)
+
+                logging.info(
+                    "Auto-continue #%s for session=%s, message_id=%s",
+                    continue_count,
                     request.session_id[-6:],
                     last_message_id,
-                    continue_count,
                 )
-                if no_progress_streak >= 1:
-                    can_continue = False
-                    break
-            else:
-                no_progress_streak = 0
 
-            last_message_id = new_message_id
-            last_response_text = cont_response or last_response_text
-            can_continue = new_can_continue
+                cont_thinking, cont_response, new_message_id, new_can_continue = _continue_message_sync(
+                    session_id=request.session_id,
+                    message_id=last_message_id,
+                    thinking_enabled=request.thinking_enabled,
+                )
 
-            # Снова проверяем необходимость продолжения
-            need_continue = auto_continue and _should_auto_continue(last_response_text, can_continue)
+                if cont_thinking:
+                    all_thinking_parts.append(cont_thinking)
+                if cont_response:
+                    all_response_parts.append(cont_response)
 
-            logging.info(f"Continue #{continue_count} done: new_message_id={new_message_id}, can_continue={can_continue}, need_continue={need_continue}")
+                # Stop infinite loop: no content and no message id progress.
+                if not (cont_response or "").strip() and new_message_id == last_message_id:
+                    no_progress_streak += 1
+                    logging.warning(
+                        "Auto-continue stopped due to no progress: session=%s, message_id=%s, continue_count=%s",
+                        request.session_id[-6:],
+                        last_message_id,
+                        continue_count,
+                    )
+                    if no_progress_streak >= 1:
+                        can_continue = False
+                        break
+                else:
+                    no_progress_streak = 0
 
-        # Сборка полного ответа
-        full_thinking = "\n\n".join(filter(None, all_thinking_parts))
-        full_response = "\n\n".join(filter(None, all_response_parts))
+                last_message_id = new_message_id
+                last_response_text = cont_response or last_response_text
+                can_continue = new_can_continue
+                need_continue = do_auto_continue and _should_auto_continue(last_response_text, can_continue)
 
-        return {
-            "session_id": request.session_id,
-            "message": request.message,
-            "response": full_response,
-            "thinking": full_thinking,
-            "thinking_enabled": request.thinking_enabled,
-            "search_enabled": request.search_enabled,
-            "auto_continue_performed": continue_count > 0,
-            "continue_count": continue_count,
-            "can_continue": can_continue,
-            # Backend and frontend expect `message_id` for manual continuation.
-            # Keep `last_message_id` as a backward-compatible alias.
-            "message_id": last_message_id,
-            "last_message_id": last_message_id,
-            "auto_continue_reason": "API flag" if can_continue else "content analysis" if continue_count > 0 else "none",
-        }
+                logging.info(
+                    "Continue #%s done: new_message_id=%s, can_continue=%s, need_continue=%s",
+                    continue_count,
+                    new_message_id,
+                    can_continue,
+                    need_continue,
+                )
+
+            full_thinking = "\n\n".join(filter(None, all_thinking_parts))
+            full_response = "\n\n".join(filter(None, all_response_parts))
+
+            return {
+                "session_id": request.session_id,
+                # Return the newest message id, not the original request id, so callers
+                # can continue from the correct provider message.
+                "message_id": last_message_id,
+                "response": full_response,
+                "thinking": full_thinking,
+                "auto_continue_performed": continue_count > 0,
+                "continue_count": continue_count,
+                "can_continue": can_continue,
+                "last_message_id": last_message_id,
+                "auto_continue_reason": "API flag" if can_continue else "content analysis" if continue_count > 1 else "none",
+            }
     except HTTPException:
         raise
     except Exception as e:
-        logging.exception(f"Error sending message: {e}")
+        logging.exception("Error continuing message: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1131,109 +1299,7 @@ async def continue_message(
     if not qwen_api:
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
 
-    try:
-        # Определение параметра авто-продолжения
-        do_auto_continue = auto_continue
-        if do_auto_continue is None:
-            do_auto_continue = config.get("auto_continue_enabled", DEFAULT_AUTO_CONTINUE_ENABLED)
-
-        # Инициализация трекера если нужно
-        if request.session_id not in auto_continue_tracker:
-            _reset_continuation_tracker(request.session_id)
-
-        all_thinking_parts = []
-        all_response_parts = []
-        last_message_id = request.message_id
-        continue_count = 0
-        can_continue = True
-        last_response_text = ""
-        no_progress_streak = 0
-
-        # Первое продолжение
-        cont_thinking, cont_response, new_message_id, new_can_continue = _continue_message_sync(
-            session_id=request.session_id,
-            message_id=last_message_id,
-            thinking_enabled=request.thinking_enabled,
-        )
-
-        if cont_thinking:
-            all_thinking_parts.append(cont_thinking)
-        if cont_response:
-            all_response_parts.append(cont_response)
-
-        last_message_id = new_message_id
-        last_response_text = cont_response or ""
-        can_continue = new_can_continue
-        continue_count = 1
-
-        # Авто-продолжение с автоматическим определением
-        need_continue = do_auto_continue and _should_auto_continue(last_response_text, can_continue)
-
-        while need_continue and _can_auto_continue(request.session_id):
-            continue_count += 1
-            _track_continuation(request.session_id, last_message_id)
-
-            logging.info(f"Auto-continue #{continue_count} for session={request.session_id[-6:]}, message_id={last_message_id} (detected by {'API flag' if can_continue else 'content analysis'})")
-
-            # Продолжение ответа
-            cont_thinking, cont_response, new_message_id, new_can_continue = _continue_message_sync(
-                session_id=request.session_id,
-                message_id=last_message_id,
-                thinking_enabled=request.thinking_enabled,
-            )
-
-            # Накопление частей
-            if cont_thinking:
-                all_thinking_parts.append(cont_thinking)
-            if cont_response:
-                all_response_parts.append(cont_response)
-
-            # Stop infinite loop: no content and no message id progress.
-            if not (cont_response or "").strip() and new_message_id == last_message_id:
-                no_progress_streak += 1
-                logging.warning(
-                    "Auto-continue stopped due to no progress: session=%s, message_id=%s, continue_count=%s",
-                    request.session_id[-6:],
-                    last_message_id,
-                    continue_count,
-                )
-                if no_progress_streak >= 1:
-                    can_continue = False
-                    break
-            else:
-                no_progress_streak = 0
-
-            last_message_id = new_message_id
-            last_response_text = cont_response or last_response_text
-            can_continue = new_can_continue
-
-            # Проверяем необходимость следующего продолжения
-            need_continue = do_auto_continue and _should_auto_continue(last_response_text, can_continue)
-
-            logging.info(f"Continue #{continue_count} done: new_message_id={new_message_id}, can_continue={can_continue}, need_continue={need_continue}")
-
-        # Сборка полного ответа
-        full_thinking = "\n\n".join(filter(None, all_thinking_parts))
-        full_response = "\n\n".join(filter(None, all_response_parts))
-
-        return {
-            "session_id": request.session_id,
-            # Return the newest message id, not the original request id, so callers
-            # can continue from the correct provider message.
-            "message_id": last_message_id,
-            "response": full_response,
-            "thinking": full_thinking,
-            "auto_continue_performed": continue_count > 0,
-            "continue_count": continue_count,
-            "can_continue": can_continue,
-            "last_message_id": last_message_id,
-            "auto_continue_reason": "API flag" if can_continue else "content analysis" if continue_count > 1 else "none",
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.exception(f"Error continuing message: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return await run_in_threadpool(_continue_message_impl, request, auto_continue)
 
 
 @app.post("/files/upload")
@@ -1252,11 +1318,19 @@ async def upload_file(
     if not file_path:
         raise HTTPException(status_code=400, detail="Не указан путь к файлу")
 
+    if not hasattr(qwen_api, "upload_file"):
+        raise HTTPException(
+            status_code=501,
+            detail="Qwen provider file upload is not implemented in the standalone client",
+        )
+
     try:
-        file_info = qwen_api.upload_file(file_path)
+        file_info = await _run_qwen_locked(qwen_api.upload_file, file_path)
         if not file_info:
             raise HTTPException(status_code=500, detail="Не удалось загрузить файл")
         return {"file_id": file_info.get("id"), "file_info": file_info}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1273,11 +1347,19 @@ async def get_file(
     if not qwen_api:
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
 
+    if not hasattr(qwen_api, "fetch_files"):
+        raise HTTPException(
+            status_code=501,
+            detail="Qwen provider file lookup is not implemented in the standalone client",
+        )
+
     try:
-        file_info = qwen_api.fetch_files([file_id])
+        file_info = await _run_qwen_locked(qwen_api.fetch_files, [file_id])
         if not file_info:
             raise HTTPException(status_code=404, detail="Файл не найден")
         return {"file_info": file_info[0]}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1294,7 +1376,7 @@ async def get_user_info(
         raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
 
     try:
-        user_info = qwen_api.get_user_info()
+        user_info = await _run_qwen_locked(qwen_api.get_user_info)
         return {"user_info": user_info}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

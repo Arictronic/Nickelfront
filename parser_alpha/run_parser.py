@@ -18,7 +18,13 @@ from parsers_pkg.base import Deduplicator, derive_article_url, normalize_url
 from parsers_pkg.errors import MisconfigurationError, SourceError
 from parsers_pkg.source_config import SourceRuntimeConfig, load_source_runtime_config_with_metadata
 from parsers_pkg.source_executor import execute_source_search
-from parsers_pkg.source_routing import RoutedSource, SourceHealthStore, SourceRunTelemetry, resolve_route
+from parsers_pkg.source_routing import (
+    RoutedSource,
+    SourceHealthStore,
+    SourceRunTelemetry,
+    resolve_route,
+    source_prefers_english_query,
+)
 from parsers_pkg.sources import SourceMetadata, build_default_source_registry
 from parsers_pkg.translate import get_shared_query_translator
 
@@ -38,6 +44,16 @@ def _translate_query_for_fallback(query: str) -> tuple[str | None, str]:
     if result.translated and result.translated_text != query:
         return result.translated_text, f"translation_fallback:{result.used_engine}"
     return None, f"translation_fallback_skipped:{result.reason}"
+
+
+def _should_translate_retry_for_source(source: str, attempted_query: str) -> bool:
+    """Only retry non-ASCII queries through English for English-first sources.
+
+    Russian-first sources such as CyberLeninka/eLibrary/Rospatent usually work better
+    with Russian queries. Retrying them with English wastes the shared Qwen queue and
+    can turn a temporary source issue into a worse query.
+    """
+    return source_prefers_english_query(source) and _contains_non_ascii(attempted_query)
 
 
 def _paper_to_dict(paper: Any) -> dict[str, Any]:
@@ -385,7 +401,7 @@ async def _execute_routed_source(
             sample_limit=fixture_sample_size,
         )
     except SourceError as first_exc:
-        if not _contains_non_ascii(attempted_query):
+        if not _should_translate_retry_for_source(source, attempted_query):
             raise
         translated_query, fallback_reason = _translate_query_for_fallback(attempted_query)
         if not translated_query:
@@ -406,7 +422,7 @@ async def _execute_routed_source(
         attempted_query = translated_query
         route_reason = f"{route_reason}|{fallback_reason}|retry_after_error:{type(first_exc).__name__}"
 
-    if len(execution.papers) == 0 and _contains_non_ascii(attempted_query):
+    if len(execution.papers) == 0 and _should_translate_retry_for_source(source, attempted_query):
         translated_query, fallback_reason = _translate_query_for_fallback(attempted_query)
         if translated_query and translated_query != attempted_query:
             logger.info(
@@ -711,6 +727,7 @@ def _build_dry_run_plan(
         stable_only=stable_only,
         allow_experimental=allow_experimental,
         max_sources=effective_max_sources,
+        allow_translation=False,
     )
 
     route_plan: list[dict[str, Any]] = []
