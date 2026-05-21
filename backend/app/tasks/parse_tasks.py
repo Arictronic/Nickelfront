@@ -3,6 +3,7 @@
 import asyncio
 import html
 import json
+import os
 import re
 import subprocess
 import sys
@@ -41,14 +42,30 @@ ARXIV_SEARCH_QUERIES = [
     "hastelloy",
 ]
 
+RUSSIAN_SEARCH_QUERIES = [
+    "никелевые сплавы",
+    "суперсплавы",
+    "жаропрочные сплавы",
+    "никелевые суперсплавы",
+    "коррозия никелевых сплавов",
+]
+
+RUSSIAN_PATENT_SEARCH_QUERIES = [
+    "никелевый сплав",
+    "жаропрочный сплав",
+    "суперсплав",
+    "сплав на основе никеля",
+    "коррозионностойкий никелевый сплав",
+]
+
 EXTERNAL_SEARCH_QUERIES = {
     "OpenAlex": DEFAULT_SEARCH_QUERIES,
     "Crossref": DEFAULT_SEARCH_QUERIES,
     "EuropePMC": DEFAULT_SEARCH_QUERIES,
-    "CyberLeninka": DEFAULT_SEARCH_QUERIES,
-    "eLibrary": DEFAULT_SEARCH_QUERIES,
-    "Rospatent": DEFAULT_SEARCH_QUERIES,
-    "FreePatent": DEFAULT_SEARCH_QUERIES,
+    "CyberLeninka": RUSSIAN_SEARCH_QUERIES,
+    "eLibrary": RUSSIAN_SEARCH_QUERIES,
+    "Rospatent": RUSSIAN_PATENT_SEARCH_QUERIES,
+    "FreePatent": RUSSIAN_PATENT_SEARCH_QUERIES,
     "PATENTSCOPE": DEFAULT_SEARCH_QUERIES,
 }
 
@@ -58,7 +75,68 @@ PARSER_ALPHA_ROOT = Path(__file__).resolve().parents[3] / "parser_alpha"
 PARSER_ALPHA_RUNNER = PARSER_ALPHA_ROOT / "run_parser.py"
 PARSER_ALPHA_DATA_DIR = PARSER_ALPHA_ROOT / "data"
 PARSER_ALPHA_VENV_PYTHON = PARSER_ALPHA_ROOT / ".venv" / "Scripts" / "python.exe"
+PARSER_ALPHA_DEFAULT_TIMEOUT_SECONDS = 1800.0
+
+
+def _get_parser_alpha_timeout() -> float:
+    """Timeout for the whole parser_alpha subprocess.
+
+    Individual HTTP clients inside parser_alpha have their own per-request timeout,
+    but the backend Celery task also needs a hard boundary. Otherwise a stuck
+    source/browser/session can keep a regular worker busy until Celery kills the
+    process by soft/hard time limit, leaving poorer diagnostics in the UI.
+    """
+    raw = (
+        os.getenv("PARSER_ALPHA_SUBPROCESS_TIMEOUT")
+        or os.getenv("PARSER_TASK_TIMEOUT_SECONDS")
+        or str(PARSER_ALPHA_DEFAULT_TIMEOUT_SECONDS)
+    )
+    try:
+        timeout = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return PARSER_ALPHA_DEFAULT_TIMEOUT_SECONDS
+    return max(30.0, timeout)
+
+
+def _format_parser_output_for_error(stdout_text: str, stderr_text: str, limit: int = 1200) -> str:
+    combined = "\n".join(part for part in [stderr_text, stdout_text] if part).strip()
+    if not combined:
+        return "<empty output>"
+    return combined[-limit:]
+
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+_CONTENT_PROCESSING_ACTIVE_OR_DONE_STATUSES = {
+    "queued_for_content_processing",
+    "pdf_pending",
+    "downloading_pdf",
+    "pdf_downloaded",
+    "pdf_parsed",
+    "fulltext_fallback_parsed",
+    "formatting_markdown",
+    "analyzing_ru",
+    "extracting_keywords",
+    "indexing_vector",
+    "ready",
+    "ready_with_fallback",
+}
+
+
+def _should_queue_content_processing(paper: Any) -> bool:
+    """Return True only when paper still needs content/Qwen post-processing.
+
+    Re-parsing the same source can return an existing DB row. Without this guard we
+    enqueue expensive PDF/Qwen processing again for papers that are already queued,
+    in progress, or ready.
+    """
+    status = str(getattr(paper, "processing_status", "") or "").strip().lower()
+    task_id = str(getattr(paper, "content_task_id", "") or "").strip()
+
+    if status in _CONTENT_PROCESSING_ACTIVE_OR_DONE_STATUSES:
+        return False
+    if task_id and status != "failed":
+        return False
+    return True
 
 
 def _get_task_id(task) -> str | None:
@@ -98,6 +176,10 @@ def _mark_revoked(task, query: str, source: str, current: int = 0, total: int = 
         "saved_count": 0,
         "embedded_count": 0,
         "content_queued_count": 0,
+        "content_skipped_count": 0,
+        "total_saved": 0,
+        "total_content_queued": 0,
+        "total_content_skipped": 0,
         "errors": ["cancelled"],
     }
 
@@ -107,13 +189,32 @@ def _extract_json_payload(stdout_text: str) -> dict[str, Any]:
     if not text:
         raise RuntimeError("parser_alpha produced empty stdout")
 
-    start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end < start:
-        raise RuntimeError(f"parser_alpha returned unexpected payload: {text[:300]}")
+    decoder = json.JSONDecoder()
+    last_valid: dict[str, Any] | None = None
+    last_error: Exception | None = None
 
-    return json.loads(text[start : end + 1])
+    # parser_alpha with --explain prints a JSON object, but some libraries may
+    # write extra text before it. Try every JSON-object start and keep the last
+    # object that looks like the parser report. This is safer than slicing from
+    # first '{' to last '}', which breaks when logs contain braces.
+    for idx, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            payload, _ = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            continue
+        if isinstance(payload, dict):
+            last_valid = payload
+            if payload.get("out_path"):
+                return payload
 
+    if last_valid is not None:
+        return last_valid
+
+    detail = f": {last_error}" if last_error else ""
+    raise RuntimeError(f"parser_alpha returned unexpected payload{detail}: {text[:300]}")
 
 def _run_parser_alpha_sync(query: str, limit: int, source: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if not PARSER_ALPHA_RUNNER.exists():
@@ -138,21 +239,39 @@ def _run_parser_alpha_sync(query: str, limit: int, source: str) -> tuple[dict[st
         "--explain",
     ]
 
-    process = subprocess.run(
-        cmd,
-        cwd=str(PARSER_ALPHA_ROOT.parent),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    timeout_seconds = _get_parser_alpha_timeout()
+    try:
+        process = subprocess.run(
+            cmd,
+            cwd=str(PARSER_ALPHA_ROOT.parent),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        out_text = exc.stdout or ""
+        err_text = exc.stderr or ""
+        if isinstance(out_text, bytes):
+            out_text = out_text.decode("utf-8", errors="replace")
+        if isinstance(err_text, bytes):
+            err_text = err_text.decode("utf-8", errors="replace")
+        raise RuntimeError(
+            "parser_alpha timed out "
+            f"after {timeout_seconds:.0f}s for source={source}, query='{query}'. "
+            f"Last output: {_format_parser_output_for_error(out_text, err_text)}"
+        ) from exc
 
     out_text = process.stdout or ""
     err_text = process.stderr or ""
 
     if process.returncode != 0:
-        raise RuntimeError(f"parser_alpha failed ({process.returncode}): {(err_text or out_text)[-1200:]}")
+        raise RuntimeError(
+            f"parser_alpha failed ({process.returncode}) for source={source}, query='{query}': "
+            f"{_format_parser_output_for_error(out_text, err_text)}"
+        )
 
     report = _extract_json_payload(out_text)
     out_path_raw = report.get("out_path")
@@ -186,6 +305,28 @@ def _to_str_list(value: Any) -> list[str]:
     return [text] if text else []
 
 
+def _to_str_dict(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key, item in value.items():
+        key_text = str(key).strip()
+        item_text = str(item).strip()
+        if key_text and item_text:
+            result[key_text] = item_text
+    return result
+
+
+def _normalize_parse_confidence(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(1.0, confidence))
+
+
 def _clean_text(value: Any) -> str | None:
     if value is None:
         return None
@@ -195,7 +336,7 @@ def _clean_text(value: Any) -> str | None:
     return text or None
 
 
-def _normalize_publication_date(value: Any) -> datetime | str | None:
+def _normalize_publication_date(value: Any) -> datetime | None:
     if value is None:
         return None
 
@@ -209,13 +350,129 @@ def _normalize_publication_date(value: Any) -> datetime | str | None:
         try:
             dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         except ValueError:
-            return value
+            for fmt in ("%Y-%m-%d", "%Y%m%d", "%Y"):
+                try:
+                    dt = datetime.strptime(raw[:10] if fmt == "%Y-%m-%d" else raw, fmt)
+                    break
+                except ValueError:
+                    continue
+            if dt is None:
+                return None
     else:
-        return value
+        return None
 
     if dt.tzinfo is not None:
         return dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt
+
+
+def _run_parse_query_for_task(task, query: str, limit: int, source: str) -> dict:
+    """Run one parser query using the current Celery task context.
+
+    Do not call another Celery task as a plain function from aggregate tasks:
+    it creates a nested task context without the parent task id, so progress and
+    cancellation become unreliable. This helper keeps all state updates attached
+    to the task that the user sees in the UI/Flower.
+    """
+    if _is_cancelled(task):
+        return _mark_revoked(task, query=query, source=source, current=0, total=limit)
+
+    _safe_update_state(
+        task,
+        state="STARTED",
+        meta={
+            "query": query,
+            "source": source,
+            "limit": limit,
+            "current": 0,
+            "total": limit,
+            "status": "Инициализация...",
+        },
+    )
+    return run_async(_parse_async(task, query, limit, source))
+
+
+def _parse_queries_for_task(
+    task,
+    *,
+    queries: list[str],
+    limit_per_query: int,
+    source: str,
+) -> dict:
+    """Run several queries sequentially inside one visible Celery task."""
+    total_queries = len(queries)
+    results: list[dict] = []
+    total_saved = 0
+    total_content_queued = 0
+    total_content_skipped = 0
+
+    for idx, query in enumerate(queries):
+        if _is_cancelled(task):
+            return _mark_revoked(task, query=str(query), source=source, current=idx, total=total_queries)
+        try:
+            _safe_update_state(
+                task,
+                state="STARTED",
+                meta={
+                    "type": "multiple_queries",
+                    "source": source,
+                    "current_query": idx + 1,
+                    "total_queries": total_queries,
+                    "current_query_text": query,
+                    "total_saved": total_saved,
+                    "total_content_queued": total_content_queued,
+                    "total_content_skipped": total_content_skipped,
+                    "status": f"Обработка запроса {idx + 1}/{total_queries}: '{query}'",
+                },
+            )
+
+            result = _run_parse_query_for_task(
+                task,
+                query=query,
+                limit=limit_per_query,
+                source=source,
+            )
+            results.append(result)
+            total_saved += int(result.get("saved_count", 0) or 0)
+            total_content_queued += int(result.get("content_queued_count", 0) or 0)
+            total_content_skipped += int(result.get("content_skipped_count", 0) or 0)
+
+            if result.get("status") == "revoked":
+                break
+
+        except Exception as e:
+            logger.error(f"Ошибка при парсинге запроса '{query}': {e}")
+            results.append({"query": query, "error": str(e)})
+
+    _safe_update_state(
+        task,
+        state="SUCCESS",
+        meta={
+            "type": "multiple_queries",
+            "source": source,
+            "current_query": total_queries,
+            "total_queries": total_queries,
+            "total_saved": total_saved,
+            "saved_count": total_saved,
+            "total_content_queued": total_content_queued,
+            "content_queued_count": total_content_queued,
+            "total_content_skipped": total_content_skipped,
+            "content_skipped_count": total_content_skipped,
+            "status": "Все запросы обработаны",
+        },
+    )
+
+    return {
+        "total_queries": total_queries,
+        "source": source,
+        "results": results,
+        "total_saved": total_saved,
+        "saved_count": total_saved,
+        "total_content_queued": total_content_queued,
+        "content_queued_count": total_content_queued,
+        "total_content_skipped": total_content_skipped,
+        "content_skipped_count": total_content_skipped,
+    }
 
 
 @celery_app.task(bind=True)
@@ -226,22 +483,7 @@ def parse_papers_task(
     source: str = "CORE",
 ):
     try:
-        if _is_cancelled(self):
-            return _mark_revoked(self, query=query, source=source, current=0, total=limit)
-
-        _safe_update_state(
-            self,
-            state="STARTED",
-            meta={
-                "query": query,
-                "source": source,
-                "limit": limit,
-                "current": 0,
-                "total": limit,
-                "status": "Инициализация...",
-            },
-        )
-        return run_async(_parse_async(self, query, limit, source))
+        return _run_parse_query_for_task(self, query=query, limit=limit, source=source)
     except Exception:
         logger.exception("Ошибка парсинга task_id={} source={} query='{}'", _get_task_id(self), source, query)
         raise
@@ -268,6 +510,7 @@ async def _parse_async(
         "saved_count": 0,
         "embedded_count": 0,
         "content_queued_count": 0,
+        "content_skipped_count": 0,
         "errors": [],
     }
 
@@ -321,6 +564,7 @@ async def _parse_async(
                             "total": len(papers),
                             "saved_count": stats["saved_count"],
                             "content_queued_count": stats["content_queued_count"],
+                            "content_skipped_count": stats["content_skipped_count"],
                             "status": f"Сохранение статей ({idx}/{len(papers)})...",
                         },
                     )
@@ -338,32 +582,49 @@ async def _parse_async(
                     source_id=_clean_text(paper.get("source_id")),
                     url=(str(paper.get("url")).strip() if paper.get("url") else None),
                     pdf_url=(str(paper.get("pdf_url")).strip() if paper.get("pdf_url") else None),
+                    parse_confidence=_normalize_parse_confidence(paper.get("parse_confidence")),
+                    provenance=_to_str_dict(paper.get("provenance")),
+                    quality_flags=[
+                        x
+                        for x in (_clean_text(flag) for flag in _to_str_list(paper.get("quality_flags")))
+                        if x
+                    ],
+                    schema_version=_clean_text(paper.get("schema_version")) or "2.0",
                 )
                 saved_paper = await paper_service.create_paper(paper_create)
                 stats["saved_count"] += 1
 
                 if saved_paper.id:
-                    try:
-                        inferred_pdf_url = resolve_pdf_url(
-                            source=saved_paper.source,
-                            source_id=saved_paper.source_id,
-                            url=saved_paper.url,
-                        )
-                        final_pdf_url = saved_paper.pdf_url or inferred_pdf_url
-
-                        content_task = process_paper_content_task.delay(saved_paper.id)
-                        await paper_service.update_paper(
+                    if not _should_queue_content_processing(saved_paper):
+                        stats["content_skipped_count"] += 1
+                        logger.debug(
+                            "Content/Qwen processing skipped for existing paper {}: status={}, task_id={}",
                             saved_paper.id,
-                            processing_status="queued_for_content_processing",
-                            content_task_id=content_task.id,
-                            pdf_url=final_pdf_url,
-                            processing_error=None,
+                            getattr(saved_paper, "processing_status", None),
+                            getattr(saved_paper, "content_task_id", None),
                         )
-                        stats["content_queued_count"] += 1
-                    except Exception as e:
-                        logger.warning(
-                            f"Не удалось поставить content-task для статьи {saved_paper.id}: {e}"
-                        )
+                    else:
+                        try:
+                            inferred_pdf_url = resolve_pdf_url(
+                                source=saved_paper.source,
+                                source_id=saved_paper.source_id,
+                                url=saved_paper.url,
+                            )
+                            final_pdf_url = saved_paper.pdf_url or inferred_pdf_url
+
+                            content_task = process_paper_content_task.delay(saved_paper.id)
+                            await paper_service.update_paper(
+                                saved_paper.id,
+                                processing_status="queued_for_content_processing",
+                                content_task_id=content_task.id,
+                                pdf_url=final_pdf_url,
+                                processing_error=None,
+                            )
+                            stats["content_queued_count"] += 1
+                        except Exception as e:
+                            logger.warning(
+                                f"Не удалось поставить content-task для статьи {saved_paper.id}: {e}"
+                            )
 
             except Exception as e:
                 paper_title = str(paper.get("title") or "")[:50]
@@ -383,6 +644,7 @@ async def _parse_async(
             "saved_count": stats["saved_count"],
             "embedded_count": stats["embedded_count"],
             "content_queued_count": stats["content_queued_count"],
+            "content_skipped_count": stats["content_skipped_count"],
             "status": "Завершено",
         },
     )
@@ -390,7 +652,8 @@ async def _parse_async(
     logger.info(
         f"Парсинг '{query}' ({source}): найдено={stats['found_count']}, "
         f"распарсено={stats['parsed_count']}, сохранено={stats['saved_count']}, "
-        f"в очереди на AI/PDF={stats['content_queued_count']}"
+        f"в очереди на AI/PDF={stats['content_queued_count']}, "
+        f"пропущено AI/PDF={stats['content_skipped_count']}"
     )
 
     return stats
@@ -403,67 +666,26 @@ def parse_multiple_queries_task(
     limit_per_query: int = 50,
     source: str = "CORE",
 ):
-    if queries is None:
-        if source == "arXiv":
-            queries = ARXIV_SEARCH_QUERIES
-        elif source == "CORE":
-            queries = DEFAULT_SEARCH_QUERIES
-        else:
-            queries = EXTERNAL_SEARCH_QUERIES.get(source, DEFAULT_SEARCH_QUERIES)
+    try:
+        if queries is None:
+            if source == "arXiv":
+                queries = ARXIV_SEARCH_QUERIES
+            elif source == "CORE":
+                queries = DEFAULT_SEARCH_QUERIES
+            else:
+                queries = EXTERNAL_SEARCH_QUERIES.get(source, DEFAULT_SEARCH_QUERIES)
 
-    total_queries = len(queries)
-    results = []
-    total_saved = 0
-
-    for idx, query in enumerate(queries):
-        if _is_cancelled(self):
-            return _mark_revoked(self, query=str(query), source=source, current=idx, total=total_queries)
-        try:
-            _safe_update_state(
-                self,
-                state="STARTED",
-                meta={
-                    "type": "multiple_queries",
-                    "source": source,
-                    "current_query": idx + 1,
-                    "total_queries": total_queries,
-                    "current_query_text": query,
-                    "total_saved": total_saved,
-                    "status": f"Обработка запроса {idx + 1}/{total_queries}: '{query}'",
-                },
-            )
-
-            result = parse_papers_task(
-                query=query,
-                limit=limit_per_query,
-                source=source,
-            )
-            results.append(result)
-            total_saved += result.get("saved_count", 0)
-
-        except Exception as e:
-            logger.error(f"Ошибка при парсинге запроса '{query}': {e}")
-            results.append({"query": query, "error": str(e)})
-
-    _safe_update_state(
-        self,
-        state="SUCCESS",
-        meta={
-            "type": "multiple_queries",
-            "source": source,
-            "current_query": total_queries,
-            "total_queries": total_queries,
-            "total_saved": total_saved,
-            "status": "Все запросы обработаны",
-        },
-    )
-
-    return {
-        "total_queries": total_queries,
-        "source": source,
-        "results": results,
-        "total_saved": total_saved,
-    }
+        normalized_queries = [str(q).strip() for q in queries if str(q).strip()]
+        return _parse_queries_for_task(
+            self,
+            queries=normalized_queries,
+            limit_per_query=limit_per_query,
+            source=source,
+        )
+    finally:
+        task_id = _get_task_id(self)
+        if task_id:
+            clear_cancel_flag(task_id)
 
 
 @celery_app.task(bind=True)
@@ -473,72 +695,98 @@ def parse_all_sources_task(
     query: str | None = None,
     queries: list[str] | None = None,
 ):
-    if _is_cancelled(self):
-        return _mark_revoked(self, query="all_sources", source="CORE", current=0, total=len(AVAILABLE_SOURCES))
+    try:
+        if _is_cancelled(self):
+            return _mark_revoked(self, query="all_sources", source="CORE", current=0, total=len(AVAILABLE_SOURCES))
 
-    logger.info("Запуск парсинга по всем источникам: {}", AVAILABLE_SOURCES)
+        logger.info("Запуск парсинга по всем источникам: {}", AVAILABLE_SOURCES)
 
-    total_sources = len(AVAILABLE_SOURCES)
-    results_by_source: dict[str, dict] = {}
-    total_saved = 0
+        total_sources = len(AVAILABLE_SOURCES)
+        results_by_source: dict[str, dict] = {}
+        total_saved = 0
+        total_content_queued = 0
+        total_content_skipped = 0
 
-    if queries is not None:
-        user_queries = [str(q).strip() for q in queries if str(q).strip()]
-    else:
-        user_queries = []
-    if not user_queries and query is not None and str(query).strip():
-        user_queries = [str(query).strip()]
+        if queries is not None:
+            user_queries = [str(q).strip() for q in queries if str(q).strip()]
+        else:
+            user_queries = []
+        if not user_queries and query is not None and str(query).strip():
+            user_queries = [str(query).strip()]
 
-    for idx, source in enumerate(AVAILABLE_SOURCES, start=1):
+        for idx, source in enumerate(AVAILABLE_SOURCES, start=1):
+            _safe_update_state(
+                self,
+                state="STARTED",
+                meta={
+                    "type": "all_sources",
+                    "current_source": idx,
+                    "total_sources": total_sources,
+                    "source": source,
+                    "total_saved": total_saved,
+                    "total_content_queued": total_content_queued,
+                    "total_content_skipped": total_content_skipped,
+                    "status": f"Парсинг источника {source}...",
+                },
+            )
+
+            if _is_cancelled(self):
+                return _mark_revoked(self, query="all_sources", source=source, current=idx - 1, total=total_sources)
+
+            if user_queries:
+                source_queries = user_queries
+            elif source == "arXiv":
+                source_queries = ARXIV_SEARCH_QUERIES
+            elif source == "CORE":
+                source_queries = DEFAULT_SEARCH_QUERIES
+            else:
+                source_queries = EXTERNAL_SEARCH_QUERIES.get(source, DEFAULT_SEARCH_QUERIES)
+
+            source_result = _parse_queries_for_task(
+                self,
+                queries=source_queries,
+                limit_per_query=limit_per_query,
+                source=source,
+            )
+            results_by_source[source] = source_result
+            total_saved += int(source_result.get("total_saved", 0) or 0)
+            total_content_queued += int(source_result.get("total_content_queued", 0) or 0)
+            total_content_skipped += int(source_result.get("total_content_skipped", 0) or 0)
+
+            if source_result.get("status") == "revoked":
+                break
+
         _safe_update_state(
             self,
-            state="STARTED",
+            state="SUCCESS",
             meta={
                 "type": "all_sources",
-                "current_source": idx,
+                "current_source": total_sources,
                 "total_sources": total_sources,
-                "source": source,
-                "status": f"Парсинг источника {source}...",
+                "total_saved": total_saved,
+                "saved_count": total_saved,
+                "total_content_queued": total_content_queued,
+                "content_queued_count": total_content_queued,
+                "total_content_skipped": total_content_skipped,
+                "content_skipped_count": total_content_skipped,
+                "status": "Все источники обработаны",
             },
         )
 
-        if _is_cancelled(self):
-            return _mark_revoked(self, query="all_sources", source=source, current=idx - 1, total=total_sources)
-
-        if user_queries:
-            source_queries = user_queries
-        elif source == "arXiv":
-            source_queries = ARXIV_SEARCH_QUERIES
-        elif source == "CORE":
-            source_queries = DEFAULT_SEARCH_QUERIES
-        else:
-            source_queries = EXTERNAL_SEARCH_QUERIES.get(source, DEFAULT_SEARCH_QUERIES)
-
-        source_result = parse_multiple_queries_task(
-            queries=source_queries,
-            limit_per_query=limit_per_query,
-            source=source,
-        )
-        results_by_source[source] = source_result
-        total_saved += source_result.get("total_saved", 0)
-
-    _safe_update_state(
-        self,
-        state="SUCCESS",
-        meta={
-            "type": "all_sources",
-            "current_source": total_sources,
-            "total_sources": total_sources,
+        legacy_core = results_by_source.get("CORE", {"total_saved": 0, "results": []})
+        legacy_arxiv = results_by_source.get("arXiv", {"total_saved": 0, "results": []})
+        return {
+            "core": legacy_core,
+            "arxiv": legacy_arxiv,
+            "sources": results_by_source,
             "total_saved": total_saved,
-            "status": "Все источники обработаны",
-        },
-    )
-
-    legacy_core = results_by_source.get("CORE", {"total_saved": 0, "results": []})
-    legacy_arxiv = results_by_source.get("arXiv", {"total_saved": 0, "results": []})
-    return {
-        "core": legacy_core,
-        "arxiv": legacy_arxiv,
-        "sources": results_by_source,
-        "total_saved": total_saved,
-    }
+            "saved_count": total_saved,
+            "total_content_queued": total_content_queued,
+            "content_queued_count": total_content_queued,
+            "total_content_skipped": total_content_skipped,
+            "content_skipped_count": total_content_skipped,
+        }
+    finally:
+        task_id = _get_task_id(self)
+        if task_id:
+            clear_cancel_flag(task_id)

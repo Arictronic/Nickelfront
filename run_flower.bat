@@ -6,6 +6,13 @@ if exist .venv\Scripts\activate.bat (
   call .venv\Scripts\activate.bat
 ) else if exist venv\Scripts\activate.bat (
   call venv\Scripts\activate.bat
+) else (
+  echo Python virtual environment not found.
+  echo Create it from project root:
+  echo   python -m venv .venv
+  echo   .venv\Scripts\activate
+  echo   pip install -r requirements.txt
+  exit /b 1
 )
 
 rem Load FLOWER_UNAUTHENTICATED_API from root .env
@@ -18,5 +25,5 @@ set "FLOWER_API_FLAG="
 if /I "%FLOWER_UNAUTHENTICATED_API%"=="true" set "FLOWER_API_FLAG=--unauthenticated_api=true"
 if /I "%FLOWER_UNAUTHENTICATED_API%"=="1" set "FLOWER_API_FLAG=--unauthenticated_api=true"
 
-celery -A app.tasks.celery_app flower --port=5555 %FLOWER_API_FLAG%
+python -m celery -A app.tasks.celery_app flower --port=5555 %FLOWER_API_FLAG%
 endlocal

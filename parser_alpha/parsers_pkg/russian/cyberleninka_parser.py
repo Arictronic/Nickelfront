@@ -47,12 +47,18 @@ class CyberLeninkaParser(BaseParser):
         try:
             # Дата публикации
             publication_date = None
-            published = item.get("published_date")
+            published = item.get("published_date") or item.get("publication_date")
             if published:
+                raw_date = str(published).strip().replace("Z", "+00:00")
                 try:
-                    publication_date = datetime.fromisoformat(str(published).replace("Z", ""))
+                    publication_date = datetime.fromisoformat(raw_date)
                 except Exception:
-                    publication_date = None
+                    for fmt in ("%Y-%m-%d", "%Y%m%d", "%Y"):
+                        try:
+                            publication_date = datetime.strptime(raw_date[:10] if fmt == "%Y-%m-%d" else raw_date, fmt)
+                            break
+                        except Exception:
+                            continue
             
             return Paper(
                 title=item.get("title") or "Без названия",
@@ -77,14 +83,22 @@ class CyberLeninkaParser(BaseParser):
         papers = await self.parse_search_results([metadata])
         if papers:
             papers[0].full_text = text
-            return papers[0]
+            return self.normalize_paper(papers[0])
         
-        return Paper(
+        return self.normalize_paper(Paper(
             title=metadata.get("title") or "Без названия",
-            authors=[],
+            authors=metadata.get("authors", []),
+            publication_date=metadata.get("publication_date") or metadata.get("published_date"),
+            journal=metadata.get("journal"),
+            doi=metadata.get("doi"),
+            abstract=metadata.get("abstract"),
             full_text=text,
-            source=self.source,
-        )
+            keywords=metadata.get("keywords", []),
+            source=metadata.get("source", self.source),
+            source_id=metadata.get("source_id"),
+            url=metadata.get("url"),
+            pdf_url=metadata.get("pdf_url"),
+        ))
     
     async def extract_keywords(self, paper: Paper) -> list[str]:
         """Извлечь ключевые слова из статьи."""

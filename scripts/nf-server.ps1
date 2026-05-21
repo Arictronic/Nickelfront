@@ -6,7 +6,9 @@ param(
     [int]$RedisPort = 6380,
     [int]$FlowerPort = 5555,
     [int]$FrontendPort = 5173,
-    [int]$CeleryWorkers = 3
+    [int]$CeleryWorkers = 3,
+    [int]$QwenWorkers = 5,
+    [string]$QwenQueue = 'qwen'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,7 +67,7 @@ $Services = @(
         Tag = 'NF_CELERY_1'
         WorkDir = Join-Path $RepoRoot 'backend'
         Ports = @()
-        Command = "`$host.UI.RawUI.WindowTitle='NF_CELERY_1'; Set-Location '$($RepoRoot.Replace("'", "''"))\\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app worker --loglevel=info --pool=solo --concurrency=1 -n worker-1@$env:COMPUTERNAME"
+        Command = "`$host.UI.RawUI.WindowTitle='NF_CELERY_1'; Set-Location '$($RepoRoot.Replace("'", "''"))\\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app worker --loglevel=info --pool=solo --concurrency=1 -Q celery -n worker-1@$env:COMPUTERNAME"
         Optional = $false
     },
     @{
@@ -91,13 +93,25 @@ $Services = @(
     }
 )
 
+if ($QwenWorkers -gt 0) {
+    for ($i = 1; $i -le $QwenWorkers; $i++) {
+        $script:Services += @{
+            Tag = "NF_QWEN_GATEWAY_$i"
+            WorkDir = Join-Path $RepoRoot 'backend'
+            Ports = @()
+            Command = "`$host.UI.RawUI.WindowTitle='NF_QWEN_GATEWAY_$i'; Set-Location '$($RepoRoot.Replace("'", "''"))\backend'; `$env:PYTHONIOENCODING='utf-8'; `$env:QWEN_GATEWAY_WORKER='1'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app worker --loglevel=info --pool=solo --concurrency=1 -Q $QwenQueue -n qwen-$i@`$env:COMPUTERNAME"
+            Optional = $false
+        }
+    }
+}
+
 if ($CeleryWorkers -gt 1) {
     for ($i = 2; $i -le $CeleryWorkers; $i++) {
         $script:Services += @{
             Tag = "NF_CELERY_$i"
             WorkDir = Join-Path $RepoRoot 'backend'
             Ports = @()
-            Command = "`$host.UI.RawUI.WindowTitle='NF_CELERY_$i'; Set-Location '$($RepoRoot.Replace("'", "''"))\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app worker --loglevel=info --pool=solo --concurrency=1 -n worker-$i@`$env:COMPUTERNAME"
+            Command = "`$host.UI.RawUI.WindowTitle='NF_CELERY_$i'; Set-Location '$($RepoRoot.Replace("'", "''"))\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app worker --loglevel=info --pool=solo --concurrency=1 -Q celery -n worker-$i@`$env:COMPUTERNAME"
             Optional = $false
         }
     }

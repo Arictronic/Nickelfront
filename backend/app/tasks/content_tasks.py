@@ -63,7 +63,11 @@ async def _process_paper_content_async(self, paper_id: int) -> dict[str, Any]:
 
             await _set_stage(paper_service, paper_id, "pdf_pending", task_id=task_id, error=None)
 
-            pdf_url = resolve_pdf_url(paper.source, paper.source_id, paper.url)
+            # Prefer explicit PDF URL captured by parser_alpha.
+            # resolve_pdf_url() can only infer PDFs from source/url and would otherwise
+            # accidentally ignore parser-provided pdf_url for CORE/eLibrary/PATENTSCOPE/etc.
+            inferred_pdf_url = resolve_pdf_url(paper.source, paper.source_id, paper.url)
+            pdf_url = (paper.pdf_url or inferred_pdf_url or "").strip() or None
             if pdf_url and pdf_url != paper.pdf_url:
                 await paper_service.update_paper(paper_id, pdf_url=pdf_url)
 

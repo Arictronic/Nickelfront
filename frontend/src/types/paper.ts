@@ -34,6 +34,10 @@ export interface Paper {
   summaryRu: string | null;
   analysisRu: string | null;
   translationRu: string | null;
+  parseConfidence: number | null;
+  provenance: Record<string, string>;
+  qualityFlags: string[];
+  schemaVersion: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 }

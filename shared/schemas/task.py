@@ -37,6 +37,11 @@ class CeleryTaskStatus(BaseModel):
     total: int | None = None
     saved_count: int | None = None
     embedded_count: int | None = None
+    content_queued_count: int | None = None
+    content_skipped_count: int | None = None
+    total_saved: int | None = None
+    total_content_queued: int | None = None
+    total_content_skipped: int | None = None
     errors: list[str] | None = None
 
     # Метаданные

@@ -2,9 +2,11 @@
 
 import asyncio
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.api.deps import get_current_user, require_admin_user
 from app.services.qwen_service import get_qwen_service
+from shared.schemas.auth import UserResponse
 from shared.schemas.paper import (
     QwenConfigResponse,
     QwenConfigUpdateRequest,
@@ -43,7 +45,9 @@ async def health_check():
 
 
 @router.get("/config", response_model=QwenConfigResponse)
-async def get_config():
+async def get_config(
+    _current_user: UserResponse = Depends(get_current_user),
+):
     """
     Получить текущую конфигурацию Qwen сервиса.
 
@@ -57,7 +61,9 @@ async def get_config():
 
 
 @router.get("/stats")
-async def get_stats():
+async def get_stats(
+    _current_user: UserResponse = Depends(get_current_user),
+):
     """
     Получить статистику Qwen сервиса.
 
@@ -81,7 +87,10 @@ async def get_stats():
 
 
 @router.post("/config", response_model=QwenConfigResponse)
-async def update_config(config_update: QwenConfigUpdateRequest):
+async def update_config(
+    config_update: QwenConfigUpdateRequest,
+    _admin: UserResponse = Depends(require_admin_user),
+):
     """
     Обновить конфигурацию Qwen сервиса.
 
@@ -107,7 +116,10 @@ async def update_config(config_update: QwenConfigUpdateRequest):
 
 
 @router.post("/sessions", response_model=QwenSessionCreateResponse)
-async def create_session(request: QwenSessionCreateRequest | None = None):
+async def create_session(
+    request: QwenSessionCreateRequest | None = None,
+    _current_user: UserResponse = Depends(get_current_user),
+):
     """
     Создать новую сессию чата.
 
@@ -146,7 +158,9 @@ async def create_session(request: QwenSessionCreateRequest | None = None):
 
 
 @router.get("/sessions", response_model=QwenSessionListResponse)
-async def list_sessions():
+async def list_sessions(
+    _current_user: UserResponse = Depends(get_current_user),
+):
     """
     Получить список всех сессий.
 
@@ -173,7 +187,10 @@ async def list_sessions():
 
 
 @router.get("/sessions/{session_id}")
-async def get_session(session_id: str):
+async def get_session(
+    session_id: str,
+    _current_user: UserResponse = Depends(get_current_user),
+):
     """
     Получить информацию о сессии.
 
@@ -203,7 +220,10 @@ async def get_session(session_id: str):
 
 
 @router.delete("/sessions/{session_id}", response_model=QwenDeleteResponse)
-async def delete_session(session_id: str):
+async def delete_session(
+    session_id: str,
+    _current_user: UserResponse = Depends(get_current_user),
+):
     """
     Удалить сессию.
 
@@ -230,7 +250,11 @@ async def delete_session(session_id: str):
 
 
 @router.post("/sessions/{session_id}/rename", response_model=QwenRenameResponse)
-async def rename_session(session_id: str, request: QwenRenameRequest):
+async def rename_session(
+    session_id: str,
+    request: QwenRenameRequest,
+    _current_user: UserResponse = Depends(get_current_user),
+):
     """
     Переименовать сессию.
 
@@ -264,7 +288,10 @@ async def rename_session(session_id: str, request: QwenRenameRequest):
 
 
 @router.post("/messages", response_model=QwenMessageResponse)
-async def send_message(request: QwenMessageRequest):
+async def send_message(
+    request: QwenMessageRequest,
+    _current_user: UserResponse = Depends(get_current_user),
+):
     """
     Отправить сообщение в Qwen чат.
 

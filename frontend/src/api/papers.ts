@@ -30,6 +30,10 @@ type PaperApiModel = {
   summary_ru: string | null;
   analysis_ru: string | null;
   translation_ru: string | null;
+  parse_confidence: number | null;
+  provenance: Record<string, string> | null;
+  quality_flags: string[] | null;
+  schema_version: string | null;
   created_at: string | null;
   updated_at: string | null;
 };
@@ -57,6 +61,10 @@ function mapPaper(apiPaper: PaperApiModel): Paper {
     summaryRu: apiPaper.summary_ru ?? null,
     analysisRu: apiPaper.analysis_ru ?? null,
     translationRu: apiPaper.translation_ru ?? null,
+    parseConfidence: apiPaper.parse_confidence ?? null,
+    provenance: apiPaper.provenance ?? {},
+    qualityFlags: apiPaper.quality_flags ?? [],
+    schemaVersion: apiPaper.schema_version ?? null,
     createdAt: apiPaper.created_at ?? null,
     updatedAt: apiPaper.updated_at ?? null,
   };
@@ -240,6 +248,11 @@ export type CeleryTaskStatus = {
     total?: number;
     saved_count?: number;
     embedded_count?: number;
+    content_queued_count?: number;
+    content_skipped_count?: number;
+    total_saved?: number;
+    total_content_queued?: number;
+    total_content_skipped?: number;
     errors?: string[];
     [key: string]: any;
   };
@@ -254,6 +267,11 @@ export type CeleryTaskStatus = {
   total?: number;
   saved_count?: number;
   embedded_count?: number;
+  content_queued_count?: number;
+  content_skipped_count?: number;
+  total_saved?: number;
+  total_content_queued?: number;
+  total_content_skipped?: number;
   errors?: string[];
   name?: string;
   args?: any[];

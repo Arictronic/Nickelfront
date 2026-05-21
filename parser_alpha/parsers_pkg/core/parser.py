@@ -72,11 +72,14 @@ class COREParser(BaseParser):
                 if isinstance(publisher, str) and publisher.strip():
                     journal = publisher.strip()
 
-            url = data.get("downloadUrl")
-            if not url:
-                source_urls = data.get("sourceFulltextUrls")
-                if isinstance(source_urls, list) and source_urls:
-                    url = source_urls[0]
+            pdf_url = data.get("downloadUrl")
+
+            url = None
+            source_urls = data.get("sourceFulltextUrls")
+            if isinstance(source_urls, list) and source_urls:
+                # CORE often returns full-text/PDF links here; keep them as PDF/full-text candidates,
+                # while the canonical article URL is derived later from source_id when needed.
+                pdf_url = pdf_url or source_urls[0]
 
             if not url:
                 links = data.get("links")
@@ -99,6 +102,7 @@ class COREParser(BaseParser):
                 source=self.source,
                 source_id=str(data.get("id", "")) or None,
                 url=url,
+                pdf_url=pdf_url,
             )
         except Exception as e:
             logger.error(f"Error parsing article data: {e}")
@@ -157,6 +161,7 @@ class COREParser(BaseParser):
             source=self.source,
             source_id=metadata.get("source_id"),
             url=metadata.get("url"),
+            pdf_url=metadata.get("pdf_url"),
         ))
 
     async def extract_keywords(self, paper: Paper) -> list[str]:
@@ -174,7 +179,7 @@ class COREParser(BaseParser):
             "и", "в", "на", "с", "для", "или", "а", "но",
         }
 
-        words = re.findall(r"[a-zA-Zа-яА-Я]{3,}", text.lower())
+        words = re.findall(r"\b[a-zA-Zа-яА-Я]{3,}\b", text.lower())
 
         word_freq: dict[str, int] = {}
         for word in words:

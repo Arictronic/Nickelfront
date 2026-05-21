@@ -95,6 +95,13 @@ class Settings(BaseSettings):
     QWEN_SERVICE_HOST: str = "127.0.0.1"
     QWEN_SERVICE_PORT: int = 8767
 
+    # Qwen gateway queue (shared Qwen load controller for background jobs)
+    QWEN_QUEUE_ENABLED: bool = True
+    QWEN_QUEUE_NAME: str = "qwen"
+    QWEN_QUEUE_TIMEOUT: float = 1000.0
+    QWEN_QUEUE_TASK_RATE_LIMIT: str = "300/h"
+    QWEN_QUEUE_WORKERS: int = 5
+
     # RAG Settings
     RAG_CHUNK_SIZE: int = 1000
     RAG_CHUNK_OVERLAP: int = 200

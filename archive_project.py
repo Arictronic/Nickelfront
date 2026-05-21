@@ -520,6 +520,25 @@ def is_secret_file(rel_path: str) -> bool:
     return matches_any(rel_path, SECRET_FILE_PATTERNS)
 
 
+def is_inside_hard_excluded_dir(rel_path: str) -> bool:
+    """Дополнительная защита: не включать файлы из мусорных директорий.
+
+    os.walk обычно отсекает такие директории до обхода файлов, но эта проверка
+    страхует архиватор от ошибок в allowlist/.gitignore и старых локальных артефактов.
+    """
+    rel_path = normalize_rel(rel_path)
+    if not rel_path:
+        return False
+
+    parts = rel_path.split("/")
+    for index, part in enumerate(parts[:-1]):
+        parent = "/".join(parts[: index + 1])
+        if is_hard_excluded_dir(parent, part):
+            return True
+
+    return False
+
+
 def is_hard_excluded_dir(rel_path: str, name: str) -> bool:
     if name in DEFAULT_EXCLUDE_DIR_NAMES:
         return True
@@ -619,6 +638,9 @@ def should_include_file(
     # Корневой .env включаем, даже если он в .gitignore.
     if is_root_env_file(rel_file):
         return True, "root-env"
+
+    if is_inside_hard_excluded_dir(rel_file):
+        return False, "inside-hard-excluded-dir"
 
     # Секреты не включаем.
     if is_secret_file(rel_file):
@@ -911,6 +933,7 @@ def main(argv: list[str] | None = None) -> int:
         "run_all.bat",
         "run_backend.bat",
         "run_worker.bat",
+        "run_qwen_worker.bat",
         "run_frontend.bat",
         "parser_alpha/run_parser.py",
         "qwen_service/service.py",
@@ -929,6 +952,21 @@ def main(argv: list[str] | None = None) -> int:
         exists = check in existing_rel_paths or check in existing_dirs
         marker = "OK " if exists else "MISS"
         print(f"{marker} {check}")
+
+    accidental_artifacts = [
+        rel_path
+        for rel_path in sorted(existing_rel_paths)
+        if "__pycache__/" in rel_path
+        or rel_path.endswith(".pyc")
+        or rel_path.endswith(".pyo")
+    ]
+    if accidental_artifacts:
+        print()
+        print("WARNING: Python cache artifacts would be archived:")
+        for rel_path in accidental_artifacts[:20]:
+            print(f"WARN {rel_path}")
+        if len(accidental_artifacts) > 20:
+            print(f"WARN ... and {len(accidental_artifacts) - 20} more")
 
     print()
 

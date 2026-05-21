@@ -23,8 +23,8 @@ class TestSourceRouting(unittest.TestCase):
         self.assertEqual(r3, "ru_to_en_token_rewrite")
 
         q4, r4 = adapt_query_for_source("CyberLeninka", "металлы никель")
-        self.assertEqual(q4, "metals nickel")
-        self.assertEqual(r4, "ru_to_en_token_rewrite")
+        self.assertEqual(q4, "металлы никель")
+        self.assertEqual(r4, "identity")
 
     def test_health_penalty_affects_route(self):
         registry = build_default_source_registry()

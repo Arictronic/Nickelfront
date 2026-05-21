@@ -37,6 +37,12 @@ def _utc_now_iso() -> str:
 _SOURCE_QUERY_REWRITE: dict[str, dict[str, str]] = {
     "arXiv": {
         "никель": "nickel",
+        "никеля": "nickel",
+        "никелевый": "nickel",
+        "никелевая": "nickel",
+        "никелевое": "nickel",
+        "никелевые": "nickel",
+        "никелевых": "nickel",
         "железо": "iron",
         "медь": "copper",
         "алюминий": "aluminum",
@@ -45,27 +51,32 @@ _SOURCE_QUERY_REWRITE: dict[str, dict[str, str]] = {
         "металлы": "metals",
         "металлургия": "metallurgy",
         "сплав": "alloy",
+        "сплава": "alloy",
         "сплавы": "alloys",
+        "сплавов": "alloys",
         "суперсплав": "superalloy",
         "суперсплавы": "superalloys",
+        "суперсплавов": "superalloys",
+        "жаропрочный": "heat-resistant",
+        "жаропрочная": "heat-resistant",
+        "жаропрочное": "heat-resistant",
+        "жаропрочные": "heat-resistant",
+        "жаропрочных": "heat-resistant",
+        "коррозия": "corrosion",
+        "коррозии": "corrosion",
+        "патент": "patent",
+        "патенты": "patents",
+        "патентов": "patents",
     },
-    "CyberLeninka": {
-        "никель": "nickel",
-        "железо": "iron",
-        "медь": "copper",
-        "алюминий": "aluminum",
-        "кобальт": "cobalt",
-        "металл": "metal",
-        "металлы": "metals",
-        "металлургия": "metallurgy",
-        "сплав": "alloy",
-        "сплавы": "alloys",
-        "суперсплав": "superalloy",
-        "суперсплавы": "superalloys",
-    },
+    "CORE": {},
+    "OpenAlex": {},
+    "Crossref": {},
+    "EuropePMC": {},
+    "PATENTSCOPE": {},
 }
 
-_ENGLISH_QUERY_SOURCES = {"arXiv", "CyberLeninka"}
+
+_ENGLISH_QUERY_SOURCES = {"arXiv", "CORE", "OpenAlex", "Crossref", "EuropePMC", "PATENTSCOPE"}
 
 
 def _rewrite_tokens_for_source(source: str, query: str) -> tuple[str, bool]:

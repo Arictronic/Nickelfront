@@ -1,6 +1,6 @@
 """Модель научной статьи."""
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, ForeignKey, Index
+from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, ForeignKey, Index, Float
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import TSVECTOR
@@ -51,6 +51,12 @@ class Paper(Base):
     summary_ru = Column(Text, nullable=True)
     analysis_ru = Column(Text, nullable=True)
     translation_ru = Column(Text, nullable=True)
+
+    # Метаданные качества парсинга parser_alpha
+    parse_confidence = Column(Float, nullable=True)
+    provenance = Column(JSON, nullable=False, default=dict)
+    quality_flags = Column(JSON, nullable=False, default=list)
+    schema_version = Column(String(20), nullable=True, default="2.0")
 
     # Индексы
     __table_args__ = (

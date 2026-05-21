@@ -6,6 +6,7 @@ Qwen Service Client - Клиент для standalone Qwen Service.
 """
 
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -37,6 +38,7 @@ class QwenServiceClient:
         base_url: str | None = None,
         api_key: str | None = None,
         timeout: float = 120.0,
+        queue_enabled: bool | None = None,
     ):
         """
         Инициализация клиента.
@@ -52,6 +54,7 @@ class QwenServiceClient:
         )
         self.api_key = api_key or settings.QWEN_API_KEY
         self.timeout = timeout
+        self.queue_enabled = settings.QWEN_QUEUE_ENABLED if queue_enabled is None else queue_enabled
         self._session_id: str | None = None
 
         logger.info(
@@ -260,6 +263,19 @@ class QwenServiceClient:
             return True
         return False
 
+    @staticmethod
+    def _queue_disabled_by_env() -> bool:
+        value = os.getenv("QWEN_QUEUE_ENABLED", "").strip().lower()
+        return value in {"0", "false", "no", "off"}
+
+    def _should_use_queue(self, purpose: str | None = None) -> bool:
+        if not self.queue_enabled or self._queue_disabled_by_env():
+            return False
+        # qwen_queue worker itself must call qwen_service directly, otherwise it recurses.
+        if os.getenv("QWEN_GATEWAY_WORKER", "").strip().lower() in {"1", "true", "yes", "on"}:
+            return False
+        return True
+
     def send_message(
         self,
         message: str,
@@ -286,6 +302,31 @@ class QwenServiceClient:
             Ответ от сервиса.
         """
         sid = session_id or self._session_id
+
+        if self._should_use_queue():
+            try:
+                from app.services.qwen_queue_client import send_qwen_message_via_queue
+
+                result = send_qwen_message_via_queue(
+                    message=message,
+                    session_id=sid,
+                    thinking_enabled=thinking_enabled,
+                    search_enabled=search_enabled,
+                    file_ids=file_ids or [],
+                    auto_continue=auto_continue,
+                    timeout=timeout,
+                    purpose="backend-qwen-client",
+                )
+                if result.get("session_id"):
+                    self._session_id = str(result["session_id"])
+                return result
+            except Exception as exc:
+                logger.exception("Failed to enqueue Qwen request")
+                return {
+                    "error": f"Failed to enqueue Qwen request: {exc}",
+                    "response": "",
+                    "thinking": "",
+                }
 
         if not sid:
             # Создаём новую сессию если нет
@@ -321,6 +362,8 @@ class QwenServiceClient:
         )
 
         if result:
+            if not result.get("message_id") and result.get("last_message_id"):
+                result["message_id"] = result.get("last_message_id")
             # Сохраняем session_id для последующих запросов
             self._session_id = sid
             logger.info(

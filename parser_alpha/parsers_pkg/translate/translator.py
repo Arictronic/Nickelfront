@@ -8,6 +8,9 @@ from functools import lru_cache
 
 from loguru import logger
 
+from .cache import TranslationCache
+from .qwen_adapter import QwenTranslationAdapter
+
 
 @dataclass(frozen=True)
 class QueryTranslationResult:
@@ -21,13 +24,17 @@ class QueryTranslationResult:
 
 
 class QueryTranslator:
-    """Best-effort query translator with graceful fallback."""
+    """Best-effort query translator with persistent cache and queued Qwen fallback."""
 
     def __init__(self, *, enabled: bool = True, default_target_lang: str = "en"):
         self.enabled = enabled
         self.default_target_lang = default_target_lang
+        self.cache_enabled = os.getenv("PARSER_TRANSLATION_CACHE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+        self.qwen_enabled = os.getenv("PARSER_TRANSLATE_QWEN_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
         self._engine_name = "none"
         self._google_translator_cls = None
+        self.cache = TranslationCache(enabled=self.cache_enabled)
+        self.qwen = QwenTranslationAdapter()
         self._init_engine()
 
     def _init_engine(self) -> None:
@@ -42,7 +49,7 @@ class QueryTranslator:
             self._engine_name = "deep-translator/google"
         except Exception as exc:
             self._engine_name = "unavailable"
-            logger.warning("Translation backend unavailable: {}", exc)
+            logger.debug("Translation backend unavailable: {}", exc)
 
     @staticmethod
     def _looks_ascii(text: str) -> bool:
@@ -53,7 +60,7 @@ class QueryTranslator:
         return " ".join(text.split()).strip()
 
     @lru_cache(maxsize=512)
-    def _translate_cached(self, text: str, source_lang: str, target_lang: str) -> str:
+    def _translate_cached_local(self, text: str, source_lang: str, target_lang: str) -> str:
         if self._google_translator_cls is None:
             return text
         translator = self._google_translator_cls(source=source_lang, target=target_lang)
@@ -61,6 +68,18 @@ class QueryTranslator:
         if not isinstance(translated, str):
             return text
         return self._sanitize(translated) or text
+
+    def _result(self, raw: str, translated: str, source_lang: str, target: str, engine: str, reason: str) -> QueryTranslationResult:
+        translated = self._sanitize(translated) or raw
+        return QueryTranslationResult(
+            original_text=raw,
+            translated_text=translated,
+            source_lang=source_lang,
+            target_lang=target,
+            used_engine=engine,
+            translated=translated != raw,
+            reason=reason,
+        )
 
     def translate(
         self,
@@ -73,72 +92,44 @@ class QueryTranslator:
         target = (target_lang or self.default_target_lang).strip() or self.default_target_lang
 
         if not raw:
-            return QueryTranslationResult(
-                original_text=text,
-                translated_text=text,
-                source_lang=source_lang,
-                target_lang=target,
-                used_engine=self._engine_name,
-                translated=False,
-                reason="empty_query",
-            )
-
+            return self._result(text, text, source_lang, target, self._engine_name, "empty_query")
         if not self.enabled:
-            return QueryTranslationResult(
-                original_text=raw,
-                translated_text=raw,
-                source_lang=source_lang,
-                target_lang=target,
-                used_engine=self._engine_name,
-                translated=False,
-                reason="translation_disabled",
-            )
-
+            return self._result(raw, raw, source_lang, target, self._engine_name, "translation_disabled")
         if self._looks_ascii(raw) and target.lower() == "en":
-            return QueryTranslationResult(
-                original_text=raw,
-                translated_text=raw,
-                source_lang=source_lang,
-                target_lang=target,
-                used_engine=self._engine_name,
-                translated=False,
-                reason="already_ascii",
-            )
+            return self._result(raw, raw, source_lang, target, self._engine_name, "already_ascii")
 
-        if self._google_translator_cls is None:
-            return QueryTranslationResult(
-                original_text=raw,
-                translated_text=raw,
-                source_lang=source_lang,
-                target_lang=target,
-                used_engine=self._engine_name,
-                translated=False,
-                reason="engine_unavailable",
-            )
+        cached = self.cache.get(raw, source_lang=source_lang, target_lang=target)
+        if cached and cached.translated_text:
+            return self._result(raw, cached.translated_text, source_lang, target, f"cache:{cached.engine}", "cache_hit")
 
-        try:
-            translated = self._translate_cached(raw, source_lang, target)
-            changed = translated != raw
-            return QueryTranslationResult(
-                original_text=raw,
-                translated_text=translated,
-                source_lang=source_lang,
-                target_lang=target,
-                used_engine=self._engine_name,
-                translated=changed,
-                reason="translated" if changed else "identity_after_translation",
-            )
-        except Exception as exc:
-            logger.warning("Query translation failed for '{}': {}", raw, exc)
-            return QueryTranslationResult(
-                original_text=raw,
-                translated_text=raw,
-                source_lang=source_lang,
-                target_lang=target,
-                used_engine=self._engine_name,
-                translated=False,
-                reason="translation_error",
-            )
+        if self._google_translator_cls is not None:
+            try:
+                translated = self._translate_cached_local(raw, source_lang, target)
+                if translated and translated != raw:
+                    self.cache.set(
+                        original_text=raw,
+                        translated_text=translated,
+                        source_lang=source_lang,
+                        target_lang=target,
+                        engine=self._engine_name,
+                    )
+                    return self._result(raw, translated, source_lang, target, self._engine_name, "translated")
+            except Exception as exc:
+                logger.warning("Local query translation failed for '{}': {}", raw, exc)
+
+        if self.qwen_enabled:
+            translated = self.qwen.translate(raw, target_lang=target, source_lang=source_lang)
+            if translated and translated != raw:
+                self.cache.set(
+                    original_text=raw,
+                    translated_text=translated,
+                    source_lang=source_lang,
+                    target_lang=target,
+                    engine="qwen-queue",
+                )
+                return self._result(raw, translated, source_lang, target, "qwen-queue", "translated")
+
+        return self._result(raw, raw, source_lang, target, self._engine_name, "translation_unavailable")
 
 
 def _env_enabled() -> bool:
@@ -154,4 +145,3 @@ def get_shared_query_translator() -> QueryTranslator:
     if _SHARED_TRANSLATOR is None:
         _SHARED_TRANSLATOR = QueryTranslator(enabled=_env_enabled(), default_target_lang="en")
     return _SHARED_TRANSLATOR
-

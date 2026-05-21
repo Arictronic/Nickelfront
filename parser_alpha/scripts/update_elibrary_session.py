@@ -6,6 +6,11 @@ from collections import Counter
 from pathlib import Path
 
 
+PARSER_ALPHA_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = PARSER_ALPHA_ROOT.parent
+DEFAULT_SESSION_DIR = PARSER_ALPHA_ROOT / "session" / "elibrary"
+
+
 def _normalize(value: str | None) -> str | None:
     if value is None:
         return None
@@ -63,9 +68,13 @@ def _resolve_har_path(cli_har: str | None) -> Path:
             raise FileNotFoundError(f"HAR file not found: {path}")
         return path
 
-    candidates = sorted(Path(".").glob("www.elibrary.ru_Archive*.har"), key=lambda p: p.stat().st_mtime, reverse=True)
+    candidates = []
+    candidates.extend(PROJECT_ROOT.glob("www.elibrary.ru_Archive*.har"))
+    candidates.extend(PARSER_ALPHA_ROOT.glob("www.elibrary.ru_Archive*.har"))
+    candidates.extend((PARSER_ALPHA_ROOT / "session" / "elibrary").glob("*.har"))
+    candidates = sorted(set(candidates), key=lambda p: p.stat().st_mtime, reverse=True)
     if not candidates:
-        raise FileNotFoundError("No HAR found. Put HAR in project root or pass --har.")
+        raise FileNotFoundError("No HAR found. Put HAR in project root/parser_alpha or pass --har.")
     return candidates[0]
 
 
@@ -74,8 +83,8 @@ def main() -> int:
     parser.add_argument("--har", help="Path to HAR file. If omitted, uses latest www.elibrary.ru_Archive*.har in project root.")
     parser.add_argument(
         "--session-dir",
-        default="session/elibrary",
-        help="Session directory to write files into (default: session/elibrary).",
+        default=str(DEFAULT_SESSION_DIR),
+        help=f"Session directory to write files into (default: {DEFAULT_SESSION_DIR}).",
     )
     parser.add_argument(
         "--copy-har",

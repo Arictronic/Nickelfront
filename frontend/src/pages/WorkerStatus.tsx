@@ -113,7 +113,7 @@ export default function WorkerStatus() {
           const now = Date.now();
           const isCompleted = celeryStatus.status === "SUCCESS" || celeryStatus.status === "FAILURE";
           const isRevoked = celeryStatus.status === "REVOKED";
-          const savedCount = celeryStatus.saved_count || celeryStatus.result?.saved_count || 0;
+          const savedCount = celeryStatus.saved_count || celeryStatus.total_saved || celeryStatus.result?.saved_count || celeryStatus.result?.total_saved || 0;
 
           if (celeryStatus.status === "PENDING") {
             const source = job.source === "all" ? "all" : job.source;
@@ -364,7 +364,7 @@ export default function WorkerStatus() {
               {jobs.slice(0, 30).map((j) => {
                 const progress = getProgressPercent(j);
                 const statusText = getStatusText(j);
-                const savedCount = j.celeryStatus?.saved_count || j.celeryStatus?.result?.saved_count || (j.lastObservedCount - j.initialCount);
+                const savedCount = j.celeryStatus?.saved_count || j.celeryStatus?.total_saved || j.celeryStatus?.result?.saved_count || j.celeryStatus?.result?.total_saved || (j.lastObservedCount - j.initialCount);
 
                 return (
                   <tr key={j.jobId}>

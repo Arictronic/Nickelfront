@@ -2,13 +2,15 @@
 
 import asyncio
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from app.api.deps import get_current_user, require_admin_user
 from app.services.rag_chain import process_query
 from app.services.rag_parser import pdf_parser
 from app.services.rag_vector_store import get_rag_vector_store
+from shared.schemas.auth import UserResponse
 
 router = APIRouter(prefix="/rag", tags=["rag"])
 
@@ -49,7 +51,10 @@ class StatsResponse(BaseModel):
 
 
 @router.post("/ask", response_model=AskResponse)
-async def ask_question(request: AskRequest):
+async def ask_question(
+    request: AskRequest,
+    _current_user: UserResponse = Depends(get_current_user),
+):
     """
     Задать вопрос по загруженным документам.
 
@@ -98,7 +103,10 @@ async def ask_question(request: AskRequest):
 
 
 @router.post("/upload", response_model=UploadResponse)
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(
+    file: UploadFile = File(...),
+    _current_user: UserResponse = Depends(get_current_user),
+):
     """
     Загрузить PDF документ для RAG.
 
@@ -158,7 +166,9 @@ async def upload_document(file: UploadFile = File(...)):
 
 
 @router.get("/stats", response_model=StatsResponse)
-async def get_stats():
+async def get_stats(
+    _current_user: UserResponse = Depends(get_current_user),
+):
     """Получить статистику RAG системы."""
     vector_store = get_rag_vector_store()
     stats = await asyncio.to_thread(vector_store.get_stats)
@@ -171,7 +181,9 @@ async def get_stats():
 
 
 @router.post("/clear")
-async def clear_store():
+async def clear_store(
+    _admin: UserResponse = Depends(require_admin_user),
+):
     """
     Очистить векторное хранилище RAG.
 

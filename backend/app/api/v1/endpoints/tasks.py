@@ -39,6 +39,17 @@ class AlloyPromptUpdateRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=30000)
 
 
+
+
+def _get_result_value(result: dict | None, *keys: str):
+    if not isinstance(result, dict):
+        return None
+    for key in keys:
+        value = result.get(key)
+        if value is not None:
+            return value
+    return None
+
 def _extract_inspected_task_id(item: dict) -> str | None:
     request = item.get("request") if isinstance(item.get("request"), dict) else {}
     task_id = item.get("id") or request.get("id")
@@ -144,8 +155,13 @@ async def get_celery_task_status_endpoint(
         source=result.get("source") if isinstance(result, dict) else None,
         current=result.get("current") if isinstance(result, dict) else None,
         total=result.get("total") if isinstance(result, dict) else None,
-        saved_count=result.get("saved_count") if isinstance(result, dict) else None,
-        embedded_count=result.get("embedded_count") if isinstance(result, dict) else None,
+        saved_count=_get_result_value(result, "saved_count", "total_saved"),
+        embedded_count=_get_result_value(result, "embedded_count"),
+        content_queued_count=_get_result_value(result, "content_queued_count", "total_content_queued"),
+        content_skipped_count=_get_result_value(result, "content_skipped_count", "total_content_skipped"),
+        total_saved=_get_result_value(result, "total_saved", "saved_count"),
+        total_content_queued=_get_result_value(result, "total_content_queued", "content_queued_count"),
+        total_content_skipped=_get_result_value(result, "total_content_skipped", "content_skipped_count"),
         errors=result.get("errors") if isinstance(result, dict) else None,
         name=task_info.get("name"),
         args=task_info.get("args"),

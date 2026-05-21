@@ -37,6 +37,10 @@ class PaperService:
             "summary_ru",
             "analysis_ru",
             "translation_ru",
+            "parse_confidence",
+            "provenance",
+            "quality_flags",
+            "schema_version",
         )
 
         for field_name in fields_to_fill:
@@ -103,6 +107,10 @@ class PaperService:
             summary_ru=paper_data.summary_ru,
             analysis_ru=paper_data.analysis_ru,
             translation_ru=paper_data.translation_ru,
+            parse_confidence=paper_data.parse_confidence,
+            provenance=paper_data.provenance or {},
+            quality_flags=paper_data.quality_flags or [],
+            schema_version=paper_data.schema_version or "2.0",
         )
 
         self.db.add(db_paper)

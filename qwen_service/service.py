@@ -1105,6 +1105,9 @@ async def send_message(
             "auto_continue_performed": continue_count > 0,
             "continue_count": continue_count,
             "can_continue": can_continue,
+            # Backend and frontend expect `message_id` for manual continuation.
+            # Keep `last_message_id` as a backward-compatible alias.
+            "message_id": last_message_id,
             "last_message_id": last_message_id,
             "auto_continue_reason": "API flag" if can_continue else "content analysis" if continue_count > 0 else "none",
         }
@@ -1215,7 +1218,9 @@ async def continue_message(
 
         return {
             "session_id": request.session_id,
-            "message_id": request.message_id,
+            # Return the newest message id, not the original request id, so callers
+            # can continue from the correct provider message.
+            "message_id": last_message_id,
             "response": full_response,
             "thinking": full_thinking,
             "auto_continue_performed": continue_count > 0,

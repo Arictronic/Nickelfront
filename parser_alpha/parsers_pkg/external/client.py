@@ -476,7 +476,8 @@ class EuropePMCClient(_RetryingClient):
 class ELibraryClient(_RetryingClient):
     BASE_URL = "https://www.elibrary.ru"
     SOURCE_NAME = "eLibrary"
-    SESSION_DIR = Path("session/elibrary")
+    PARSER_ALPHA_ROOT = Path(__file__).resolve().parents[2]
+    SESSION_DIR = PARSER_ALPHA_ROOT / "session" / "elibrary"
     COOKIE_HEADER_FILE = SESSION_DIR / "cookie_header.txt"
     COOKIES_JSON_FILE = SESSION_DIR / "cookies.json"
 
@@ -538,7 +539,8 @@ class ELibraryClient(_RetryingClient):
         ]
         candidates: list[Path] = [p for p in har_patterns if p.exists()]
         candidates.extend(ELibraryClient.SESSION_DIR.glob("*.har"))
-        candidates.extend(Path(".").glob("www.elibrary.ru_Archive*.har"))
+        candidates.extend(ELibraryClient.PARSER_ALPHA_ROOT.glob("www.elibrary.ru_Archive*.har"))
+        candidates.extend(ELibraryClient.PARSER_ALPHA_ROOT.parent.glob("www.elibrary.ru_Archive*.har"))
         candidates = sorted(set(candidates), key=lambda p: p.stat().st_mtime, reverse=True)
         if not candidates:
             return None

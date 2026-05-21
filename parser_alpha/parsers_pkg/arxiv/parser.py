@@ -48,7 +48,7 @@ class ArxivParser(BaseParser):
             try:
                 paper = self._parse_article(item)
                 if paper:
-                    papers.append(paper)
+                    papers.append(self.normalize_paper(paper))
             except Exception as e:
                 logger.error(f"Error parsing arXiv article: {e}")
                 continue
@@ -64,14 +64,14 @@ class ArxivParser(BaseParser):
             if "published_date" in data and data["published_date"]:
                 try:
                     pub_date_str = data["published_date"]
-                    publication_date = datetime.fromisoformat(pub_date_str)
+                    publication_date = datetime.fromisoformat(str(pub_date_str).replace("Z", "+00:00"))
                 except Exception:
                     pass
 
             # Ключевые слова из категорий
             keywords = data.get("categories", [])
 
-            return Paper(
+            return self.normalize_paper(Paper(
                 title=data.get("title", "") or "Без названия",
                 authors=data.get("authors", []) or [],
                 publication_date=publication_date,
@@ -84,7 +84,7 @@ class ArxivParser(BaseParser):
                 source_id=data.get("arxiv_id", ""),
                 url=data.get("url"),
                 pdf_url=data.get("pdf_url"),
-            )
+            ))
 
         except Exception as e:
             logger.error(f"Error parsing article data: {e}")
@@ -100,14 +100,22 @@ class ArxivParser(BaseParser):
 
         if papers:
             papers[0].full_text = text
-            return papers[0]
+            return self.normalize_paper(papers[0])
 
-        return Paper(
+        return self.normalize_paper(Paper(
             title=metadata.get("title", "Без названия"),
-            authors=[],
+            authors=metadata.get("authors", []),
+            publication_date=metadata.get("publication_date") or metadata.get("published_date"),
+            journal=metadata.get("journal"),
+            doi=metadata.get("doi"),
+            abstract=metadata.get("abstract"),
             full_text=text,
-            source="arXiv",
-        )
+            keywords=metadata.get("keywords") or metadata.get("categories", []),
+            source=metadata.get("source", "arXiv"),
+            source_id=metadata.get("source_id") or metadata.get("arxiv_id"),
+            url=metadata.get("url"),
+            pdf_url=metadata.get("pdf_url"),
+        ))
 
     async def extract_keywords(self, paper: Paper) -> list[str]:
         """Извлечь ключевые слова из статьи."""

@@ -346,6 +346,8 @@ class QwenService:
                 result = self._request("POST", "/messages", json_data=json_data, timeout=timeout)
 
                 if result:
+                    if not result.get("message_id") and result.get("last_message_id"):
+                        result["message_id"] = result.get("last_message_id")
                     self._session_id = sid
 
                     # Локальное авто-продолжение (если сервис не сделал сам)

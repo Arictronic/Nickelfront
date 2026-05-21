@@ -6,9 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.services.paper_service import PaperService
 from app.services.report_service import generate_paper_docx, generate_paper_pdf
+from shared.schemas.auth import UserResponse
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -16,6 +18,7 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 @router.get("/paper/{paper_id}/pdf")
 async def export_paper_pdf(
     paper_id: int = Path(..., description="ID статьи"),
+    _current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -72,6 +75,7 @@ async def export_paper_pdf(
 @router.get("/paper/{paper_id}/docx")
 async def export_paper_docx(
     paper_id: int = Path(..., description="ID статьи"),
+    _current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -128,6 +132,7 @@ async def export_paper_docx(
 @router.get("/paper/{paper_id}")
 async def get_paper_report(
     paper_id: int = Path(..., description="ID статьи"),
+    _current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """

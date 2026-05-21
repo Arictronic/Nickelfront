@@ -24,6 +24,7 @@ celery_app = Celery(
         "app.tasks.parse_tasks",
         "app.tasks.content_tasks",
         "app.tasks.alloy_analysis_tasks",
+        "app.tasks.qwen_tasks",
     ],
 )
 
@@ -49,6 +50,10 @@ celery_app.conf.update(
     # Celery Beat periodic tasks
     beat_schedule_filename=settings.resolve_path(settings.CELERY_BEAT_SCHEDULE_FILENAME),
     beat_schedule={},
+    task_routes={
+        "app.tasks.qwen.*": {"queue": settings.QWEN_QUEUE_NAME},
+    },
+
 )
 
 

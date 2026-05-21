@@ -48,6 +48,7 @@ class BaseParser(ABC):
                 source=metadata.get("source", self.source),
                 source_id=metadata.get("source_id"),
                 url=metadata.get("url"),
+                pdf_url=metadata.get("pdf_url"),
                 parse_confidence=metadata.get("parse_confidence"),
                 provenance=metadata.get("provenance", {}),
                 quality_flags=metadata.get("quality_flags", []),
@@ -73,6 +74,7 @@ class BaseParser(ABC):
             source_id=paper.source_id,
         )
         paper.url = normalize_url(paper.url)
+        paper.pdf_url = normalize_url(paper.pdf_url)
         paper.doi = normalize_doi(paper.doi)
         paper.publication_date = normalize_datetime(paper.publication_date)
 
