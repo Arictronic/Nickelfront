@@ -196,8 +196,8 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 
 
 # Подключение роутеров
-app.include_router(tasks_router.router, prefix="/api/v1")
 app.include_router(admin_settings_router.router, prefix="/api/v1")
+app.include_router(tasks_router.router, prefix="/api/v1")
 app.include_router(parse_router.router, prefix="/api/v1")
 app.include_router(auth_router.router, prefix="/api/v1")
 app.include_router(vector_router.router, prefix="/api/v1")

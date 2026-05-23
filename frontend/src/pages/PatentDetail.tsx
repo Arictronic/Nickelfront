@@ -13,6 +13,7 @@ import {
   regeneratePaperContentPart,
   reprocessPaperContent,
 } from "../api/papers";
+import { getPublicDisplaySettings } from "../api/settings";
 import { useToast } from "../components/ui/Toast";
 import type { Paper, PaperContentPart } from "../types/paper";
 import {
@@ -23,6 +24,14 @@ import {
 
 type Tab = "main" | "parts" | "report";
 type BusyAction = "delete" | "reprocess" | null;
+type TextViewMode = "raw" | "ai";
+
+type PartLayerStatus = {
+  key: string;
+  label: string;
+  tone: "neutral" | "pending" | "processing" | "success" | "warning" | "error";
+  detail?: string;
+};
 
 type DisplayPart = {
   id: number | null;
@@ -36,6 +45,10 @@ type DisplayPart = {
   regenerationCount: number;
   rawTextChars: number;
   markdownTextChars: number;
+  extractionMethod: string | null;
+  extractionQualityScore: number | null;
+  extractionWarnings: string[];
+  extractionMetadata: Record<string, unknown> | null;
 };
 
 const RU = {
@@ -57,15 +70,15 @@ const RU = {
   openPdf: "Открыть PDF",
   workerTask: "Worker task",
   tabMain: "Главная",
-  tabParts: "Оцифровка по частям",
+  tabParts: "Страницы по частям",
   tabReport: "Отчет",
   gist: "Суть статьи",
-  gistNotReady: "Суть статьи пока не готова.",
-  pdfLen: "PDF / markdown (кол. символов",
+  gistNotReady: "Здесь будет короткий пересказ всего документа: о чём он, какие ключевые результаты и почему он полезен для анализа.",
+  pdfLen: "PDF",
   articleText: "Текст статьи",
   reportBtn: "Открыть отчет на отдельной странице",
   reprocessBtn: "Перезапустить обработку всего документа",
-  parts: "Части документа",
+  parts: "Страницы по частям",
   emptyText: "Текст пуст.",
   selectedPart: "Выбранная часть",
   localMetrics: "Локальные метрики (эвристики)",
@@ -92,14 +105,58 @@ const RU = {
   regenerate: "Перегенерировать",
   regenerating: "Перегенерация...",
   actionInProgress: "Выполняется...",
-  rawText: "Сырой PDF-текст",
-  markdownText: "Markdown от Qwen",
+  rawText: "Текст из файла",
+  markdownText: "Текст после ИИ",
+  textFromFile: "Текст из файла",
+  textAfterAi: "Текст после ИИ",
+  rawLayer: "Текст из файла",
+  aiLayer: "Текст после ИИ",
+  rawNotAvailable: "Текст из файла недоступен.",
+  aiNotAvailable: "Текст после ИИ ещё не готов.",
+  partsStatus: "Статус частей",
+  quality: "Целостность",
+  extractionDiagnostics: "Диагностика извлечения",
+  extractionDiagnosticsHidden: "Диагностика извлечения скрыта настройками.",
   noStoredParts: "Сохранённых частей пока нет. Показываю legacy-разбиение полного текста.",
   confirmDelete: "Удалить статью из базы?",
   unknown: "—",
 };
 
 const LEGACY_PAGE_BLOCK_RE = /(?:^|\n)\s*#{1,6}\s*Pages\s+(\d+)\s*-\s*(\d+)\s*\n+/gi;
+
+function isMarkdownStructuralLine(line: string): boolean {
+  const value = line.trim();
+  if (!value) return true;
+  return (
+    /^(```|~~~)/.test(value) ||
+    /^(#{1,6}\s+)/.test(value) ||
+    /^([-*+]\s+|\d+[.)]\s+)/.test(value) ||
+    /^>\s?/.test(value) ||
+    /^\|.*\|$/.test(value) ||
+    /^\$\$/.test(value) ||
+    /^\[[^\]]*(table|formula|page)[^\]]*\]/i.test(value)
+  );
+}
+
+function reflowSoftLineBreaks(text: string): string {
+  const value = (text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const blocks = value.split(/\n{2,}/);
+
+  return blocks
+    .map((block) => {
+      const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
+      if (!lines.length) return "";
+      if (lines.some(isMarkdownStructuralLine)) return lines.join("\n");
+
+      return lines.reduce((acc, line) => {
+        if (!acc) return line;
+        if (/[-‐‑‒–—]$/.test(acc)) return acc.replace(/[-‐‑‒–—]$/, "") + line;
+        return `${acc} ${line}`;
+      }, "");
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
 
 function normalizeMarkdownForDisplay(text: string): string {
   let value = (text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
@@ -109,6 +166,7 @@ function normalizeMarkdownForDisplay(text: string): string {
   value = value.replace(/\\\((.+?)\\\)/gs, (_, body: string) => `$${body.trim()}$`);
   value = value.replace(/\\\[(.+?)\\\]/gs, (_, body: string) => `$$\n${body.trim()}\n$$`);
   value = value.replace(/([^\n])\s+(#{1,6}\s+)/g, "$1\n\n$2");
+  value = reflowSoftLineBreaks(value);
   value = value.replace(/\n{3,}/g, "\n\n");
   return value;
 }
@@ -138,6 +196,10 @@ function splitLegacyMarkdownParts(text: string): DisplayPart[] {
           regenerationCount: 0,
           rawTextChars: 0,
           markdownTextChars: markdown.length,
+          extractionMethod: null,
+          extractionQualityScore: null,
+          extractionWarnings: [],
+          extractionMetadata: null,
         };
       })
       .filter((part) => part.markdown.trim().length > 0);
@@ -160,6 +222,10 @@ function splitLegacyMarkdownParts(text: string): DisplayPart[] {
       regenerationCount: 0,
       rawTextChars: 0,
       markdownTextChars: markdown.length,
+      extractionMethod: null,
+      extractionQualityScore: null,
+      extractionWarnings: [],
+      extractionMetadata: null,
     });
   }
   return chunks;
@@ -172,13 +238,17 @@ function mapStoredPart(part: PaperContentPart): DisplayPart {
     title,
     pageStart: part.pageStart,
     pageEnd: part.pageEnd,
-    markdown: part.markdownText || part.rawText || "",
+    markdown: part.markdownText || "",
     rawText: part.rawText,
     status: part.status,
     error: part.error,
     regenerationCount: part.regenerationCount,
     rawTextChars: part.rawTextChars,
     markdownTextChars: part.markdownTextChars,
+    extractionMethod: part.extractionMethod ?? null,
+    extractionQualityScore: part.extractionQualityScore ?? null,
+    extractionWarnings: part.extractionWarnings ?? [],
+    extractionMetadata: part.extractionMetadata ?? null,
   };
 }
 
@@ -216,8 +286,141 @@ function localExtractMetrics(text: string) {
   return { topKeywords, temps };
 }
 
+
+function normalizePartStatus(status: string | null | undefined): string {
+  return (status || "").trim().toLowerCase();
+}
+
+const PDF_WARNING_LABELS: Record<string, string> = {
+  low_text_density: "мало текста",
+  possible_scan: "возможный скан",
+  scanned_page: "сканированная страница",
+  ocr_used: "OCR",
+  ocr_dependencies_missing: "OCR недоступен",
+  possible_two_columns: "две колонки",
+  tables_detected: "таблицы",
+  table_extraction_failed: "таблицы извлечены не полностью",
+  noisy_text: "шумный текст",
+  many_control_chars: "служебные символы",
+  short_page: "короткая страница",
+  empty_page: "пустая страница",
+  extraction_failed: "текст не извлечён",
+};
+
+const EXTRACTION_METHOD_LABELS: Record<string, string> = {
+  auto: "авто",
+  pdfplumber_auto: "авто",
+  pdfplumber_layout: "layout-режим",
+  pdfplumber_simple: "простой режим",
+  pdfplumber_columns: "двухколоночный режим",
+  columns: "двухколоночный режим",
+  layout: "layout-режим",
+  simple: "простой режим",
+  ocr: "OCR",
+};
+
+function warningLabel(warning: string): string {
+  const key = (warning || "").trim();
+  return PDF_WARNING_LABELS[key] ?? key.replace(/_/g, " ");
+}
+
+function methodLabel(method: string | null | undefined): string | null {
+  const key = (method || "").trim();
+  if (!key) return null;
+  return EXTRACTION_METHOD_LABELS[key] ?? key.replace(/_/g, " ");
+}
+
+function formatQuality(score: number | null | undefined): string | null {
+  if (score === null || score === undefined || Number.isNaN(Number(score))) return null;
+  const value = Number(score);
+  const percent = value <= 1 ? value * 100 : value;
+  return `${Math.max(0, Math.min(100, Math.round(percent)))}%`;
+}
+
+function getRawPartStatus(part: DisplayPart | null): PartLayerStatus {
+  if (!part) return { key: "none", label: "В очереди", tone: "neutral" };
+  const status = normalizePartStatus(part.status);
+  const quality = formatQuality(part.extractionQualityScore);
+  const method = methodLabel(part.extractionMethod);
+  const detail = [quality ? `${RU.quality}: ${quality}` : null, method ? `метод: ${method}` : null]
+    .filter(Boolean)
+    .join(" · ");
+
+  if (part.rawText?.trim()) {
+    return { key: "raw_ready", label: "Готово", tone: "success", detail };
+  }
+
+  if (["processing", "extracting", "extracting_pdf_text"].includes(status)) {
+    return { key: "raw_processing", label: "В обработке", tone: "processing", detail };
+  }
+  if (status === "failed" || part.error) {
+    return { key: "raw_unavailable", label: "В очереди", tone: "pending", detail: part.error || detail };
+  }
+  if (["raw_extracted", "ready"].includes(status) && !part.rawText?.trim()) {
+    return { key: "raw_empty", label: "В очереди", tone: "pending", detail };
+  }
+  if (status === "legacy") return { key: "raw_legacy", label: "В очереди", tone: "neutral" };
+  return { key: "raw_pending", label: "В очереди", tone: "pending" };
+}
+
+function getAiPartStatus(part: DisplayPart | null): PartLayerStatus {
+  if (!part) return { key: "none", label: "В очереди", tone: "neutral" };
+  const status = normalizePartStatus(part.status);
+  if (part.markdown?.trim() && part.markdownTextChars > 0) {
+    return { key: "ai_ready", label: "Готово", tone: "success" };
+  }
+  if (status === "processing") return { key: "ai_processing", label: "В обработке", tone: "processing" };
+  if (status === "failed" || part.error) return { key: "ai_pending_after_error", label: "В очереди", tone: "pending", detail: part.error || undefined };
+  if (status === "raw_extracted") return { key: "ai_waiting_raw", label: "В очереди", tone: "pending" };
+  if (status === "ready" && !part.markdownTextChars) return { key: "ai_skipped", label: "В очереди", tone: "neutral" };
+  if (status === "legacy" && part.markdown?.trim()) return { key: "ai_legacy", label: "Готово", tone: "success" };
+  return { key: "ai_pending", label: "В очереди", tone: "pending" };
+}
+
+function integrityLabel(score: number | null): string {
+  if (score === null || Number.isNaN(score)) return "не оценена";
+  if (score >= 80) return "высокая";
+  if (score >= 55) return "средняя";
+  return "низкая";
+}
+
+function getOverallLayerStatus(parts: DisplayPart[], mode: TextViewMode): PartLayerStatus {
+  if (!parts.length) return { key: "empty", label: "В очереди", tone: "neutral" };
+  const statuses = parts.map((part) => (mode === "raw" ? getRawPartStatus(part) : getAiPartStatus(part)));
+  const total = statuses.length;
+  const ready = statuses.filter((s) => s.tone === "success").length;
+  const processing = statuses.filter((s) => s.tone === "processing").length;
+
+  if (mode === "raw") {
+    const scores = parts
+      .map((part) => part.extractionQualityScore)
+      .filter((score): score is number => score !== null && score !== undefined && !Number.isNaN(Number(score)))
+      .map((score) => (score <= 1 ? score * 100 : score));
+    const avg = scores.length ? scores.reduce((sum, value) => sum + value, 0) / scores.length : null;
+    const detail = avg !== null
+      ? `целостность текста: ${integrityLabel(avg)} · среднее качество ${Math.round(avg)}%`
+      : "целостность текста: не оценена";
+
+    if (processing) return { key: "processing", label: "В обработке", tone: "processing", detail };
+    if (ready === total) return { key: "ready", label: "Готово", tone: "success", detail };
+    return { key: "pending", label: "В очереди", tone: "pending", detail };
+  }
+
+  if (processing) return { key: "processing", label: "В обработке", tone: "processing" };
+  if (ready === total) return { key: "ready", label: "Готово", tone: "success" };
+  return { key: "pending", label: "В очереди", tone: "pending" };
+}
+
+function StatusPill({ status }: { status: PartLayerStatus }) {
+  return (
+    <span className={`status-pill status-pill-${status.tone}`} title={status.detail || undefined}>
+      {status.label}
+    </span>
+  );
+}
+
 function partStatusLabel(status: string) {
-  const value = (status || "").toLowerCase();
+  const value = normalizePartStatus(status);
   if (value === "ready") return "Готово";
   if (value === "processing") return "Оцифровка файла";
   if (value === "failed") return "Ошибка";
@@ -240,6 +443,135 @@ function MarkdownText({ text }: { text: string }) {
   );
 }
 
+
+function PartExtractionInfo({ part, compact = false }: { part: DisplayPart; compact?: boolean }) {
+  const quality = formatQuality(part.extractionQualityScore);
+  const method = methodLabel(part.extractionMethod);
+  const warnings = part.extractionWarnings || [];
+  const hasInfo = quality || method || warnings.length || part.error;
+  if (!hasInfo) return null;
+
+  return (
+    <div className={`part-extraction-info${compact ? " compact" : ""}`}>
+      <div className="part-extraction-info-main">
+        {quality && <span>целостность {quality}</span>}
+        {method && <span>метод: {method}</span>}
+        {part.error && <span>замечание: {part.error}</span>}
+      </div>
+      {warnings.length > 0 && (
+        <div className="part-warning-list">
+          {warnings.map((warning) => (
+            <span key={warning} className="part-warning-chip">{warningLabel(warning)}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+type PlainTextBlock = {
+  type: "paragraph" | "heading";
+  text: string;
+};
+
+function isRawTableLine(line: string): boolean {
+  const value = line.trim();
+  if (!value) return false;
+  if (/^\[[^\]]*table[^\]]*\]/i.test(value)) return true;
+  if (/^\|.+\|$/.test(value)) return true;
+
+  const pipeColumns = value.split("|").map((item) => item.trim()).filter(Boolean);
+  if (pipeColumns.length >= 3) return true;
+
+  const spacedColumns = value.split(/\s{3,}/).map((item) => item.trim()).filter(Boolean);
+  if (spacedColumns.length < 3) return false;
+
+  const shortColumns = spacedColumns.filter((item) => item.length <= 40).length;
+  return shortColumns >= 3 && value.length <= 180;
+}
+
+function looksLikeRawHeading(line: string): boolean {
+  const value = line.trim();
+  if (!value || value.length > 120) return false;
+  if (/\.$/.test(value)) return false;
+  return (
+    /^(abstract|keywords|introduction|conclusion|references|acknowledg(e)?ments)$/i.test(value) ||
+    /^([IVX]+|\d+(\.\d+)*)[.)]?\s+[A-ZА-ЯЁ]/.test(value) ||
+    (value === value.toUpperCase() && /[A-ZА-ЯЁ]{3,}/.test(value))
+  );
+}
+
+function joinTextLines(lines: string[]): string {
+  return lines
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .reduce((acc, line) => {
+      if (!acc) return line;
+      if (/[-‐‑‒–—]$/.test(acc)) return acc.replace(/[-‐‑‒–—]$/, "") + line;
+      return `${acc} ${line}`;
+    }, "");
+}
+
+function stripPlainTextTechnicalMarker(line: string): string {
+  return line
+    .replace(/^\[(?:Formula|Table) candidate[^\]]*\]\s*/i, "")
+    .replace(/^\[(?:Page|Страница)\s+\d+[^\]]*\]\s*/i, "")
+    .trim();
+}
+
+function parsePlainTextForReading(text: string): PlainTextBlock[] {
+  const rawLines = (text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n");
+
+  const blocks: PlainTextBlock[] = [];
+  let paragraph: string[] = [];
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    const normalized = joinTextLines(paragraph);
+    if (normalized) blocks.push({ type: "paragraph", text: normalized });
+    paragraph = [];
+  };
+
+  for (const rawLine of rawLines) {
+    const line = stripPlainTextTechnicalMarker(rawLine);
+
+    if (!line) {
+      flushParagraph();
+      continue;
+    }
+
+    if (looksLikeRawHeading(line)) {
+      flushParagraph();
+      blocks.push({ type: "heading", text: line });
+      continue;
+    }
+
+    paragraph.push(line);
+  }
+
+  flushParagraph();
+  return blocks;
+}
+
+function PlainTextDocument({ text }: { text: string }) {
+  const blocks = parsePlainTextForReading(text);
+
+  if (!blocks.length) return <p className="muted">{RU.emptyText}</p>;
+
+  return (
+    <div className="plain-document-body">
+      {blocks.map((block, index) => (
+        block.type === "heading"
+          ? <h4 className="plain-document-heading" key={index}>{block.text}</h4>
+          : <p className="plain-document-paragraph" key={index}>{block.text}</p>
+      ))}
+    </div>
+  );
+}
+
 export default function PatentDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -253,7 +585,8 @@ export default function PatentDetail() {
   const [pollingWarning, setPollingWarning] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("main");
   const [activePartIndex, setActivePartIndex] = useState(0);
-  const [showRawText, setShowRawText] = useState(false);
+  const [textViewMode, setTextViewMode] = useState<TextViewMode>("ai");
+  const [showExtractionDiagnostics, setShowExtractionDiagnostics] = useState(true);
   const [actionBusy, setActionBusy] = useState<BusyAction>(null);
   const [regeneratingPartId, setRegeneratingPartId] = useState<number | null>(null);
 
@@ -291,6 +624,9 @@ export default function PatentDetail() {
 
   useEffect(() => {
     loadPaper();
+    getPublicDisplaySettings()
+      .then((value) => setShowExtractionDiagnostics(value.show_extraction_diagnostics ?? true))
+      .catch(() => setShowExtractionDiagnostics(true));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
@@ -322,10 +658,19 @@ export default function PatentDetail() {
     if (activePartIndex >= displayParts.length) setActivePartIndex(0);
   }, [activePartIndex, displayParts.length]);
 
+  const activeLayerStatus = useMemo(
+    () => (textViewMode === "raw" ? getRawPartStatus(selectedPart) : getAiPartStatus(selectedPart)),
+    [selectedPart, textViewMode],
+  );
+
+  const rawOverallStatus = useMemo(() => getOverallLayerStatus(displayParts, "raw"), [displayParts]);
+  const aiOverallStatus = useMemo(() => getOverallLayerStatus(displayParts, "ai"), [displayParts]);
+
   const partMetrics = useMemo(() => {
     if (!selectedPart) return null;
-    return localExtractMetrics(selectedPart.markdown || selectedPart.rawText || "");
-  }, [selectedPart]);
+    const text = textViewMode === "raw" ? selectedPart.rawText || "" : selectedPart.markdown || "";
+    return localExtractMetrics(text || selectedPart.markdown || selectedPart.rawText || "");
+  }, [selectedPart, textViewMode]);
 
   const onDelete = async () => {
     if (!paper || actionBusy) return;
@@ -442,48 +787,110 @@ export default function PatentDetail() {
       </div>
 
       {tab === "main" && (
-        <article className="panel">
-          {paper.summaryRu ? (
-            <>
-              <h3 style={{ marginTop: 0 }}>{RU.gist}</h3>
-              <p style={{ whiteSpace: "pre-wrap" }}>{paper.summaryRu}</p>
-            </>
-          ) : <p className="muted">{RU.gistNotReady}</p>}
+        <article className="panel article-main-panel">
+          <section className="article-section article-summary-section">
+            <h2 className="article-section-title">{RU.gist}</h2>
+            {paper.summaryRu ? (
+              <p className="article-summary-text">{paper.summaryRu}</p>
+            ) : (
+              <p className="article-summary-placeholder">{RU.gistNotReady}</p>
+            )}
+          </section>
 
           {(paper.pdfUrl || paper.pdfLocalPath) && (
-            <>
-              <h3 style={{ marginTop: 18 }}>{RU.pdfLen}: {paper.fullText?.length ?? 0})</h3>
+            <section className="article-section">
+              <h2 className="article-section-title">{RU.pdfLen}</h2>
               <iframe
                 title="paper-pdf"
                 src={getPaperPdfUrl(paper.id)}
-                style={{ width: "100%", height: 640, border: "1px solid #e5e7eb", borderRadius: 8 }}
+                className="article-pdf-frame"
               />
-              {paper.fullText && (
-                <>
-                  <h3 style={{ marginTop: 18 }}>{RU.articleText}</h3>
-                  {displayParts.length ? (
-                    <div className="markdown-parts-readable">
-                      {displayParts.map((part, idx) => (
-                        <section className="markdown-part-readonly" key={`${part.id ?? "legacy"}-${idx}`}>
-                          <div className="markdown-part-header compact">
-                            <h4>{part.title}</h4>
-                            <span className="muted">{partStatusLabel(part.status)}</span>
-                          </div>
-                          <MarkdownText text={part.markdown} />
-                        </section>
-                      ))}
-                    </div>
-                  ) : (
-                    <MarkdownText text={paper.fullText} />
-                  )}
-                </>
-              )}
-            </>
+            </section>
           )}
 
-          <div style={{ marginTop: 12 }}>
+          {(paper.fullText || displayParts.length > 0) && (
+            <section className="article-section article-text-section">
+              <div className="article-section-head">
+                <h2 className="article-section-title">{RU.articleText}</h2>
+                <StatusPill status={textViewMode === "raw" ? rawOverallStatus : aiOverallStatus} />
+              </div>
+
+              {displayParts.length ? (
+                <>
+                  <div className="article-text-tabs" role="tablist" aria-label={RU.articleText}>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={textViewMode === "raw"}
+                      className={`article-text-tab ${textViewMode === "raw" ? "active" : ""}`}
+                      onClick={() => setTextViewMode("raw")}
+                    >
+                      {RU.textFromFile}
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={textViewMode === "ai"}
+                      className={`article-text-tab ${textViewMode === "ai" ? "active" : ""}`}
+                      onClick={() => setTextViewMode("ai")}
+                    >
+                      {RU.textAfterAi}
+                    </button>
+                  </div>
+
+                  {textViewMode === "raw" && showExtractionDiagnostics && rawOverallStatus.detail && (
+                    <p className="article-text-integrity">{rawOverallStatus.detail}</p>
+                  )}
+
+                  <div className="article-text-scroll-panel">
+                    <div className="markdown-parts-readable">
+                      {displayParts.map((part, idx) => {
+                        const rawStatus = getRawPartStatus(part);
+                        const aiStatus = getAiPartStatus(part);
+                        const text = textViewMode === "raw" ? part.rawText || "" : part.markdown || "";
+                        return (
+                          <section className="markdown-part-readonly" key={`${part.id ?? "legacy"}-${idx}`}>
+                            <div className="markdown-part-header compact">
+                              <div>
+                                <h4>{part.title}</h4>
+                                <div className="part-status-row compact-row">
+                                  <StatusPill status={textViewMode === "raw" ? rawStatus : aiStatus} />
+                                </div>
+                                {textViewMode === "raw" && showExtractionDiagnostics && (
+                                  <PartExtractionInfo part={part} compact />
+                                )}
+                              </div>
+                              {textViewMode === "ai" && (
+                                <button
+                                  className="btn btn-primary"
+                                  disabled={!part.id || regeneratingPartId === part.id}
+                                  onClick={() => onRegeneratePart(part)}
+                                  title={!part.id ? "Перегенерация доступна только для сохранённых частей" : undefined}
+                                >
+                                  {regeneratingPartId === part.id ? RU.regenerating : RU.regenerate}
+                                </button>
+                              )}
+                            </div>
+                            {textViewMode === "raw" ? (
+                              text.trim() ? <PlainTextDocument text={text} /> : <p className="muted">{RU.rawNotAvailable}</p>
+                            ) : (
+                              text.trim() ? <MarkdownText text={text} /> : <p className="muted">{RU.aiNotAvailable}</p>
+                            )}
+                          </section>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <MarkdownText text={paper.fullText} />
+              )}
+            </section>
+          )}
+
+          <div className="article-actions-row">
             <button className="btn" onClick={() => navigate(`/papers/${paper.id}/report`)}>{RU.reportBtn}</button>
-            <button className="btn" style={{ marginLeft: 10 }} onClick={onReprocess} disabled={actionBusy === "reprocess"}>
+            <button className="btn" onClick={onReprocess} disabled={actionBusy === "reprocess"}>
               {actionBusy === "reprocess" ? RU.actionInProgress : RU.reprocessBtn}
             </button>
           </div>
@@ -505,7 +912,7 @@ export default function PatentDetail() {
                       onClick={() => setActivePartIndex(idx)}
                     >
                       <span>{part.title}</span>
-                      <small>{partStatusLabel(part.status)}</small>
+                      <small>{textViewMode === "raw" ? getRawPartStatus(part).label : getAiPartStatus(part).label}</small>
                     </button>
                   ))}
                 </div>
@@ -518,17 +925,30 @@ export default function PatentDetail() {
                   <div className="markdown-part-header">
                     <div>
                       <h3 style={{ margin: 0 }}>{selectedPart.title}</h3>
+                      <div className="part-status-row" style={{ marginTop: 8 }}>
+                        <StatusPill status={textViewMode === "raw" ? getRawPartStatus(selectedPart) : getAiPartStatus(selectedPart)} />
+                      </div>
                       <p className="muted" style={{ margin: "6px 0 0" }}>
-                        {partStatusLabel(selectedPart.status)} · raw {selectedPart.rawTextChars || selectedPart.rawText?.length || 0} chars · markdown {selectedPart.markdownTextChars || selectedPart.markdown.length} chars
+                        текст из файла: {selectedPart.rawTextChars || selectedPart.rawText?.length || 0} симв. · после ИИ: {selectedPart.markdownTextChars || selectedPart.markdown.length} симв.
                         {selectedPart.regenerationCount ? ` · регенераций: ${selectedPart.regenerationCount}` : ""}
                       </p>
+                      {textViewMode === "raw" && showExtractionDiagnostics && (
+                        <PartExtractionInfo part={selectedPart} />
+                      )}
                     </div>
                     <div className="markdown-part-actions">
-                      {selectedPart.rawText && (
-                        <button className="btn" onClick={() => setShowRawText((value) => !value)}>
-                          {showRawText ? RU.markdownText : RU.rawText}
-                        </button>
-                      )}
+                      <button
+                        className={`btn ${textViewMode === "raw" ? "btn-primary" : ""}`}
+                        onClick={() => setTextViewMode("raw")}
+                      >
+                        {RU.textFromFile}
+                      </button>
+                      <button
+                        className={`btn ${textViewMode === "ai" ? "btn-primary" : ""}`}
+                        onClick={() => setTextViewMode("ai")}
+                      >
+                        {RU.textAfterAi}
+                      </button>
                       <button
                         className="btn btn-primary"
                         disabled={!selectedPart.id || regeneratingPartId === selectedPart.id}
@@ -542,10 +962,17 @@ export default function PatentDetail() {
 
                   {selectedPart.error && <p className="error">{selectedPart.error}</p>}
 
-                  {showRawText && selectedPart.rawText ? (
-                    <pre className="raw-text-box">{selectedPart.rawText}</pre>
+                  <div className="selected-layer-status">
+                    <StatusPill status={activeLayerStatus} />
+                    {textViewMode === "raw" && showExtractionDiagnostics && activeLayerStatus.detail && (
+                      <span className="muted">{activeLayerStatus.detail}</span>
+                    )}
+                  </div>
+
+                  {textViewMode === "raw" ? (
+                    selectedPart.rawText?.trim() ? <PlainTextDocument text={selectedPart.rawText} /> : <p className="muted">{RU.rawNotAvailable}</p>
                   ) : (
-                    <MarkdownText text={selectedPart.markdown} />
+                    selectedPart.markdown?.trim() ? <MarkdownText text={selectedPart.markdown} /> : <p className="muted">{RU.aiNotAvailable}</p>
                   )}
 
                   <hr style={{ border: "none", borderTop: "1px solid #e5e7eb", margin: "14px 0" }} />
@@ -604,6 +1031,15 @@ export default function PatentDetail() {
         <button className="btn" onClick={() => void copyGist()}>{RU.copyGist}</button>
         <button className="btn" onClick={() => navigate("/papers")}>{RU.backToList}</button>
       </div>
+
+      <button
+        type="button"
+        className="back-to-top-button"
+        aria-label="Наверх"
+        onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+      >
+        ↑
+      </button>
     </div>
   );
 }

@@ -20,14 +20,17 @@ from app.db.session import async_session_maker
 from app.services.embedding_service import get_embedding_service
 from app.services.paper_content_service import (
     download_pdf_bytes,
-    extract_pdf_pages,
+    extract_pdf_page_items,
     fetch_additional_full_text,
     resolve_pdf_url,
     save_pdf_locally,
 )
 from app.services.paper_service import PaperService
-from app.services.system_settings_service import SystemSettingsService
 from app.services.paper_content_part_service import PaperContentPartService
+from app.services.system_settings_service import (
+    get_pdf_markdown_settings_safe,
+    get_postprocess_settings_safe,
+)
 from app.services.vector_service import get_vector_service
 from app.tasks.async_runner import run_async
 from app.tasks.celery_app import celery_app
@@ -81,19 +84,12 @@ def _merge_previous(previous: Any, **updates: Any) -> dict[str, Any]:
     return payload
 
 
-async def _get_postprocess_settings(db) -> dict[str, bool]:
-    try:
-        return await SystemSettingsService(db).get_postprocess_settings()
-    except Exception as exc:
-        logger.warning("Failed to load postprocess settings, using defaults: {}", exc)
-        return {
-            "download_pdf": True,
-            "extract_pdf_text": True,
-            "qwen_markdown": True,
-            "qwen_ru_analysis": True,
-            "qwen_keywords": True,
-            "embedding": True,
-        }
+async def _get_postprocess_settings(db=None) -> dict[str, bool]:
+    return await get_postprocess_settings_safe(db)
+
+
+async def _get_pdf_markdown_settings(db=None) -> dict[str, Any]:
+    return await get_pdf_markdown_settings_safe(db)
 
 
 async def _set_stage(
@@ -187,13 +183,13 @@ async def _download_pdf_async(
 
         postprocess = await _get_postprocess_settings(db)
         if not postprocess.get("download_pdf", True):
-            await _set_stage(paper_service, paper_id, "pdf_unavailable", task_id=task_id, error="pdf_download_disabled")
+            await _set_stage(paper_service, paper_id, "pdf_download_skipped", task_id=task_id, error="download_pdf_disabled")
             return {
                 "status": "ok",
                 "paper_id": paper_id,
                 "root_task_id": root_task_id,
                 "pdf_downloaded": False,
-                "pdf_download_skipped": True,
+                "pdf_skipped": True,
                 "pipeline": PIPELINE_VERSION,
             }
 
@@ -278,28 +274,50 @@ async def _extract_pdf_text_async(
 
         postprocess = await _get_postprocess_settings(db)
         if not postprocess.get("extract_pdf_text", True):
-            await _set_stage(paper_service, paper_id, "fulltext_unavailable", task_id=task_id, error="pdf_text_extraction_disabled")
+            await _set_stage(paper_service, paper_id, "pdf_text_skipped", task_id=task_id, error="extract_pdf_text_disabled")
             return _merge_previous(
                 previous,
                 status="ok",
                 paper_id=paper_id,
                 root_task_id=root_task_id,
                 text_available=bool((paper.full_text or paper.abstract or "").strip()),
-                text_source="disabled",
+                text_source="existing_or_abstract",
+                text_skipped=True,
             )
 
+        pdf_markdown = await _get_pdf_markdown_settings(db)
+        save_raw_parts = bool(pdf_markdown.get("save_raw_parts", True))
+        pages_per_part = max(1, int(pdf_markdown.get("pages_per_request") or settings.QWEN_MARKDOWN_PAGES_PER_REQUEST or 1))
+
+        extracted_page_items: list[dict[str, Any]] = []
         extracted_pages: list[str] = []
         extracted_text = ""
         pdf_local_path = (paper.pdf_local_path or "").strip()
         if pdf_local_path and Path(pdf_local_path).exists():
             await _set_stage(paper_service, paper_id, "extracting_pdf_text", task_id=task_id, error=None)
             pdf_bytes = await asyncio.to_thread(Path(pdf_local_path).read_bytes)
-            extracted_pages = await asyncio.to_thread(extract_pdf_pages, pdf_bytes)
+            extraction_options = {
+                "extraction_mode": pdf_markdown.get("extraction_mode", "auto"),
+                "detect_columns": pdf_markdown.get("detect_columns", True),
+                "extract_tables": pdf_markdown.get("extract_tables", True),
+                "remove_headers_footers": pdf_markdown.get("remove_headers_footers", True),
+                "merge_hyphenated_words": pdf_markdown.get("merge_hyphenated_words", True),
+                "normalize_math": pdf_markdown.get("normalize_math", True),
+                "mark_formula_candidates": pdf_markdown.get("mark_formula_candidates", True),
+                "ocr_enabled": pdf_markdown.get("ocr_enabled", False),
+                "ocr_dpi": pdf_markdown.get("ocr_dpi", 220),
+                "ocr_languages": pdf_markdown.get("ocr_languages", "eng+rus"),
+                "min_text_chars": pdf_markdown.get("min_text_chars", 300),
+                "max_page_chars": pdf_markdown.get("max_page_chars", 60000),
+            }
+            extracted_page_items = await asyncio.to_thread(extract_pdf_page_items, pdf_bytes, extraction_options)
+            extracted_pages = [str(item.get("text") or "") for item in extracted_page_items]
             extracted_text = "\n\n".join(page for page in extracted_pages if page and page.strip()).strip()
 
         if extracted_text:
-            part_service = PaperContentPartService(db)
-            await part_service.replace_raw_parts(paper_id, extracted_pages or [extracted_text], source="pdf")
+            if save_raw_parts:
+                part_service = PaperContentPartService(db)
+                await part_service.replace_raw_parts(paper_id, extracted_page_items or extracted_pages or [extracted_text], source="pdf", pages_per_part=pages_per_part)
             await paper_service.update_paper(paper_id, full_text=extracted_text)
             await _set_stage(paper_service, paper_id, "pdf_parsed", task_id=task_id, error=None)
             return _merge_previous(
@@ -320,8 +338,9 @@ async def _extract_pdf_text_async(
             paper.abstract or "",
         )
         if fallback_text:
-            part_service = PaperContentPartService(db)
-            await part_service.replace_raw_parts(paper_id, [fallback_text], source="fallback_fulltext")
+            if save_raw_parts:
+                part_service = PaperContentPartService(db)
+                await part_service.replace_raw_parts(paper_id, [fallback_text], source="fallback_fulltext", pages_per_part=1)
             await paper_service.update_paper(paper_id, full_text=fallback_text)
             await _set_stage(paper_service, paper_id, "fulltext_fallback_parsed", task_id=task_id, error=None)
             return _merge_previous(
@@ -378,7 +397,7 @@ async def _build_embedding_async(
         postprocess = await _get_postprocess_settings(db)
         if not postprocess.get("embedding", True):
             await _set_stage(paper_service, paper_id, "embedding_skipped", task_id=task_id, error="embedding_disabled")
-            return _merge_previous(previous, status="ok", paper_id=paper_id, root_task_id=root_task_id, embedded=False)
+            return _merge_previous(previous, status="ok", paper_id=paper_id, root_task_id=root_task_id, embedded=False, embedding_skipped=True)
 
         await _set_stage(paper_service, paper_id, "indexing_vector", task_id=task_id, error=None)
 

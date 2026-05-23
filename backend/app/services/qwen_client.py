@@ -111,6 +111,28 @@ class QwenServiceClient:
         except httpx.TimeoutException as e:
             logger.error(f"Timeout запроса к {endpoint}: {e}")
             return None, "timeout"
+        except httpx.HTTPStatusError as e:
+            detail: Any = None
+            try:
+                payload = e.response.json()
+                detail = payload.get("detail") if isinstance(payload, dict) else payload
+            except Exception:
+                detail = e.response.text
+
+            detail_text = detail if isinstance(detail, str) else str(detail or e)
+            lowered = detail_text.lower()
+            if "qwen_token_expired" in lowered or "token has expired" in lowered or "please log in again" in lowered:
+                logger.error("Qwen auth error on %s: token expired", endpoint)
+                return {
+                    "error": "qwen_token_expired",
+                    "message": "Qwen токен истёк. Обновите QWEN_TOKEN.",
+                    "response": "",
+                    "thinking": "",
+                    "can_continue": False,
+                }, "auth_expired"
+
+            logger.error(f"HTTP ошибка запроса к {endpoint}: {e}; detail={detail_text}")
+            return None, "http"
         except httpx.HTTPError as e:
             logger.error(f"HTTP ошибка запроса к {endpoint}: {e}")
             return None, "http"
@@ -152,6 +174,63 @@ class QwenServiceClient:
         # Keep this check short to avoid blocking task workers when Qwen is busy.
         result = self._request("GET", "/health", timeout=3.0)
         return result or {"status": "error", "available": False}
+
+
+    def get_auth_status(self) -> dict[str, Any]:
+        """Check Qwen provider token status through qwen_service."""
+        result = self._request("GET", "/auth/status", timeout=10.0)
+        if not result:
+            return {
+                "status": "service_unavailable",
+                "valid": False,
+                "expired": False,
+                "token_configured": False,
+                "message": "Qwen Service недоступен или не вернул статус.",
+            }
+        return result
+
+    def update_token(self, token: str) -> dict[str, Any]:
+        """Set a new Qwen provider token in running qwen_service and persist it to .env."""
+        result = self._request("POST", "/config/token", json_data={"token": token}, timeout=15.0)
+        if not result:
+            return {"status": "error", "message": "Не удалось обновить Qwen токен в qwen_service."}
+        return result
+
+    def update_token_from_har_bytes(
+        self,
+        content: bytes,
+        filename: str = "qwen.har",
+        *,
+        validate: bool = True,
+    ) -> dict[str, Any]:
+        """Upload HAR to qwen_service so it extracts and applies QWEN_TOKEN itself."""
+        url = f"{self.base_url}/config/token/update-from-har"
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        params = {"validate": str(validate).lower()}
+        safe_filename = filename or "qwen.har"
+
+        try:
+            with httpx.Client(timeout=60.0, trust_env=False) as client:
+                response = client.post(
+                    url,
+                    headers=headers,
+                    params=params,
+                    files={"har_file": (safe_filename, content, "application/json")},
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as exc:
+            detail: Any
+            try:
+                payload = exc.response.json()
+                detail = payload.get("detail") if isinstance(payload, dict) else payload
+            except Exception:
+                detail = exc.response.text
+            logger.error("Qwen HAR token update failed: %s", detail)
+            return {"status": "error", "message": str(detail or exc)}
+        except Exception as exc:
+            logger.error("Qwen HAR token update failed: %s", exc)
+            return {"status": "error", "message": str(exc)}
 
     def get_config(self) -> dict[str, Any]:
         """

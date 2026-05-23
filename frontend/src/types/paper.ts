@@ -58,6 +58,10 @@ export interface PaperContentPart {
   regenerationCount: number;
   rawTextChars: number;
   markdownTextChars: number;
+  extractionMethod: string | null;
+  extractionQualityScore: number | null;
+  extractionWarnings: string[];
+  extractionMetadata: Record<string, unknown> | null;
   createdAt: string | null;
   updatedAt: string | null;
 }

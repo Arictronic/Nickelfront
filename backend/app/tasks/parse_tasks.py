@@ -21,7 +21,7 @@ from app.db.session import async_session_maker
 from app.services.celery_cancel import clear_cancel_flag, is_cancelled
 from app.services.paper_content_service import resolve_pdf_url
 from app.services.paper_service import PaperService
-from app.services.system_settings_service import SystemSettingsService
+from app.services.system_settings_service import get_parser_settings_safe, get_postprocess_settings_safe
 from app.tasks.content_tasks import process_paper_content_task
 from shared.schemas.paper import PaperCreate
 
@@ -83,14 +83,18 @@ PARSER_ALPHA_VENV_PYTHON = PARSER_ALPHA_ROOT / ".venv" / "Scripts" / "python.exe
 PARSER_ALPHA_DEFAULT_TIMEOUT_SECONDS = 1800.0
 
 
-def _get_parser_alpha_timeout() -> float:
+def _get_parser_alpha_timeout(parser_settings: dict[str, Any] | None = None) -> float:
     """Timeout for the whole parser_alpha subprocess.
 
-    Individual HTTP clients inside parser_alpha have their own per-request timeout,
-    but the backend Celery task also needs a hard boundary. Otherwise a stuck
-    source/browser/session can keep a regular worker busy until Celery kills the
-    process by soft/hard time limit, leaving poorer diagnostics in the UI.
+    DB technical settings have priority. Env variables remain as fallback for
+    early startup and scripts that call parser tasks before migrations/settings exist.
     """
+    if parser_settings:
+        try:
+            return max(30.0, float(parser_settings.get("subprocess_timeout_seconds") or 300))
+        except (TypeError, ValueError):
+            pass
+
     raw = (
         os.getenv("PARSER_ALPHA_SUBPROCESS_TIMEOUT")
         or os.getenv("PARSER_TASK_TIMEOUT_SECONDS")
@@ -103,48 +107,29 @@ def _get_parser_alpha_timeout() -> float:
     return max(30.0, timeout)
 
 
-async def _get_parser_settings() -> dict[str, Any]:
-    async with async_session_maker() as db:
-        return await SystemSettingsService(db).get_parser_settings()
-
-
-async def _get_postprocess_settings() -> dict[str, bool]:
-    parser_settings = await _get_parser_settings()
-    postprocess = parser_settings.get("postprocess") or {}
-    return {
-        "download_pdf": bool(postprocess.get("download_pdf", True)),
-        "extract_pdf_text": bool(postprocess.get("extract_pdf_text", True)),
-        "qwen_markdown": bool(postprocess.get("qwen_markdown", True)),
-        "qwen_ru_analysis": bool(postprocess.get("qwen_ru_analysis", True)),
-        "qwen_keywords": bool(postprocess.get("qwen_keywords", True)),
-        "embedding": bool(postprocess.get("embedding", True)),
-    }
-
-
-async def _should_postprocess_content() -> bool:
-    postprocess = await _get_postprocess_settings()
-    return any(postprocess.values())
-
-
-async def _get_source_enabled(source: str) -> bool:
-    parser_settings = await _get_parser_settings()
-    enabled_sources = parser_settings.get("enabled_sources") or {}
-    return bool(parser_settings.get("enabled", True)) and bool(enabled_sources.get(source, True))
-
-
-async def _get_source_limit(source: str, requested_limit: int) -> int:
-    parser_settings = await _get_parser_settings()
-    max_limit = int(parser_settings.get("max_limit") or requested_limit or 100)
-    source_limits = parser_settings.get("source_limits") or {}
-    source_limit = int(source_limits.get(source) or max_limit)
-    return max(1, min(int(requested_limit or 1), max_limit, source_limit))
-
-
 def _format_parser_output_for_error(stdout_text: str, stderr_text: str, limit: int = 1200) -> str:
     combined = "\n".join(part for part in [stderr_text, stdout_text] if part).strip()
     if not combined:
         return "<empty output>"
     return combined[-limit:]
+
+
+async def _get_runtime_parser_settings() -> dict[str, Any]:
+    return await get_parser_settings_safe()
+
+
+async def _get_runtime_postprocess_settings() -> dict[str, bool]:
+    return await get_postprocess_settings_safe()
+
+
+def _is_source_enabled_by_settings(parser_settings: dict[str, Any], source: str) -> bool:
+    return bool((parser_settings.get("enabled_sources") or {}).get(source, True))
+
+
+def _limit_by_settings(limit: int, parser_settings: dict[str, Any], source: str) -> int:
+    max_limit = int(parser_settings.get("max_limit") or 100)
+    source_limit = int((parser_settings.get("source_limits") or {}).get(source) or max_limit)
+    return max(1, min(int(limit or parser_settings.get("default_limit") or 10), max_limit, source_limit))
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
@@ -407,7 +392,7 @@ def _run_parser_alpha_sync(
     source: str,
     task=None,
     task_id: str | None = None,
-    timeout_seconds: float | None = None,
+    parser_settings: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if not PARSER_ALPHA_RUNNER.exists():
         raise RuntimeError(f"parser_alpha runner not found: {PARSER_ALPHA_RUNNER}")
@@ -431,7 +416,7 @@ def _run_parser_alpha_sync(
         "--explain",
     ]
 
-    timeout_seconds = float(timeout_seconds or _get_parser_alpha_timeout())
+    timeout_seconds = _get_parser_alpha_timeout(parser_settings)
     started_at = time.monotonic()
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
@@ -602,18 +587,41 @@ async def _run_parser_alpha(
     source: str,
     task=None,
     task_id: str | None = None,
+    parser_settings: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    parser_settings = await _get_parser_settings()
-    timeout_seconds = float(parser_settings.get("subprocess_timeout_seconds") or _get_parser_alpha_timeout())
-    return await asyncio.to_thread(
-        _run_parser_alpha_sync,
-        query,
-        limit,
-        source,
-        task,
-        task_id,
-        timeout_seconds,
-    )
+    retry_count = int((parser_settings or {}).get("retry_count") or 0)
+    retry_delay = int((parser_settings or {}).get("retry_delay_seconds") or 0)
+    last_error: Exception | None = None
+
+    for attempt in range(1, retry_count + 2):
+        try:
+            return await asyncio.to_thread(_run_parser_alpha_sync, query, limit, source, task, task_id, parser_settings)
+        except ParserAlphaCancelled:
+            raise
+        except Exception as exc:
+            last_error = exc
+            if attempt > retry_count:
+                break
+            _safe_update_state(
+                task,
+                state="STARTED",
+                task_id=task_id,
+                meta={
+                    "query": query,
+                    "source": source,
+                    "current": 0,
+                    "total": limit,
+                    "stage": "parser_alpha_retry",
+                    "attempt": attempt,
+                    "retry_count": retry_count,
+                    "status": f"Ошибка источника {source}, повтор {attempt}/{retry_count} через {retry_delay} сек...",
+                    "error": str(exc),
+                },
+            )
+            if retry_delay > 0:
+                await asyncio.sleep(retry_delay)
+
+    raise last_error or RuntimeError("parser_alpha failed")
 
 
 _LIST_TEXT_OBJECT_KEYS = (
@@ -917,38 +925,15 @@ async def _parse_async(
     task_id: str | None = None,
 ) -> dict:
     task_id = _resolve_task_id(self, task_id)
-
-    if not await _get_source_enabled(source):
-        _safe_update_state(
-            self,
-            state="FAILURE",
-            task_id=task_id,
-            meta={
-                "query": query,
-                "source": source,
-                "status": f"Источник {source} отключён в технических настройках",
-                "errors": ["source_disabled"],
-            },
-        )
-        return {
-            "query": query,
-            "source": source,
-            "found_count": 0,
-            "parsed_count": 0,
-            "saved_count": 0,
-            "updated_count": 0,
-            "duplicate_count": 0,
-            "embedded_count": 0,
-            "content_queued_count": 0,
-            "content_skipped_count": 0,
-            "errors": ["source_disabled"],
-        }
-
-    limit = await _get_source_limit(source, limit)
-    postprocess_enabled = await _should_postprocess_content()
-
     if _is_cancelled(self, task_id):
         return _mark_revoked(self, query=query, source=source, current=0, total=limit, task_id=task_id)
+
+    parser_settings = await _get_runtime_parser_settings()
+    if not parser_settings.get("enabled", True):
+        raise RuntimeError("Парсинг отключён в технических настройках")
+    if not _is_source_enabled_by_settings(parser_settings, source):
+        raise RuntimeError(f"Источник {source} отключён в технических настройках")
+    limit = _limit_by_settings(limit, parser_settings, source)
 
     stats = {
         "query": query,
@@ -978,7 +963,7 @@ async def _parse_async(
     )
 
     try:
-        report, papers = await _run_parser_alpha(query=query, limit=limit, source=source, task=self, task_id=task_id)
+        report, papers = await _run_parser_alpha(query=query, limit=limit, source=source, task=self, task_id=task_id, parser_settings=parser_settings)
     except ParserAlphaCancelled:
         return _mark_revoked(self, query=query, source=source, current=0, total=limit, task_id=task_id)
 
@@ -1060,20 +1045,17 @@ async def _parse_async(
                     stats["duplicate_count"] += 1
 
                 if saved_paper.id:
-                    if not _should_queue_content_processing(saved_paper):
+                    postprocess_enabled = any((await _get_runtime_postprocess_settings()).values())
+                    if not postprocess_enabled:
+                        stats["content_skipped_count"] += 1
+                        logger.debug("Content/Qwen processing skipped by technical settings for paper {}", saved_paper.id)
+                    elif not _should_queue_content_processing(saved_paper):
                         stats["content_skipped_count"] += 1
                         logger.debug(
                             "Content/Qwen processing skipped for existing paper {}: status={}, task_id={}",
                             saved_paper.id,
                             getattr(saved_paper, "processing_status", None),
                             getattr(saved_paper, "content_task_id", None),
-                        )
-                    elif not postprocess_enabled:
-                        stats["content_skipped_count"] += 1
-                        await paper_service.update_paper(
-                            saved_paper.id,
-                            processing_status="ready",
-                            processing_error=None,
                         )
                     else:
                         try:
@@ -1180,9 +1162,13 @@ def parse_all_sources_task(
         if _is_cancelled(self, task_id):
             return _mark_revoked(self, query="all_sources", source="CORE", current=0, total=len(AVAILABLE_SOURCES), task_id=task_id)
 
-        selected_sources = [src for src in (sources or AVAILABLE_SOURCES) if src in AVAILABLE_SOURCES]
+        parser_settings = run_async(_get_runtime_parser_settings())
+        selected_sources = [s for s in (sources or AVAILABLE_SOURCES) if s in AVAILABLE_SOURCES]
+        selected_sources = [s for s in selected_sources if _is_source_enabled_by_settings(parser_settings, s)]
         if not selected_sources:
-            selected_sources = AVAILABLE_SOURCES
+            selected_sources = [s for s in AVAILABLE_SOURCES if _is_source_enabled_by_settings(parser_settings, s)]
+        if not selected_sources:
+            raise RuntimeError("Все источники отключены в технических настройках")
 
         logger.info("Запуск парсинга по источникам: {}", selected_sources)
 

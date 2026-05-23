@@ -3,6 +3,7 @@ import { ToastContainer, useToast } from "../ui/Toast";
 import Header from "./Header";
 import Sidebar from "./Sidebar";
 import Footer from "./Footer";
+import QwenTokenWatcher from "../QwenTokenWatcher";
 
 export function useGlobalToast() {
   return useToast();
@@ -13,6 +14,7 @@ export default function Layout() {
 
   return (
     <div className="app-shell">
+      <QwenTokenWatcher />
       <Header />
       <div className="app-body">
         <Sidebar />

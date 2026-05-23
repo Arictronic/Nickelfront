@@ -59,23 +59,83 @@ class PaperContentPartService:
     async def replace_raw_parts(
         self,
         paper_id: int,
-        pages: Iterable[str],
+        pages: Iterable[str | dict],
         *,
         source: str = "pdf",
+        pages_per_part: int = 1,
     ) -> list[PaperContentPart]:
-        """Replace all existing parts with one part per extracted page/chunk."""
+        """Replace all existing parts with raw PDF chunks.
+
+        ``pages`` may be either plain strings or structured page dictionaries
+        returned by ``PDFParser.extract_pages_from_bytes``. Structured input
+        preserves extraction method, quality score, warnings and metadata.
+        """
         await self.db.execute(delete(PaperContentPart).where(PaperContentPart.paper_id == paper_id))
 
+        page_items: list[dict] = []
+        for idx, item in enumerate(pages, start=1):
+            if isinstance(item, dict):
+                page_no = int(item.get("page_number") or item.get("page") or idx)
+                text = str(item.get("text") or "").strip()
+                page_items.append(
+                    {
+                        "page_number": page_no,
+                        "text": text,
+                        "method": item.get("method"),
+                        "quality_score": item.get("quality_score"),
+                        "warnings": list(item.get("warnings") or []),
+                        "metadata": dict(item.get("metadata") or {}),
+                    }
+                )
+            else:
+                text = str(item or "").strip()
+                page_items.append(
+                    {
+                        "page_number": idx,
+                        "text": text,
+                        "method": "legacy_text",
+                        "quality_score": 0.35 if text else 0.0,
+                        "warnings": ["legacy_text_part"],
+                        "metadata": {"chars": len(text)},
+                    }
+                )
+
+        page_items = [item for item in page_items if item["text"]]
+        pages_per_part = max(1, int(pages_per_part or 1))
+
         output: list[PaperContentPart] = []
-        for index, raw_text in enumerate(pages, start=1):
-            text = (raw_text or "").strip()
+        for start in range(0, len(page_items), pages_per_part):
+            chunk = page_items[start : start + pages_per_part]
+            if not chunk:
+                continue
+            page_start = int(chunk[0]["page_number"])
+            page_end = int(chunk[-1]["page_number"])
+            text = "\n\n".join(str(item["text"]).strip() for item in chunk if str(item.get("text") or "").strip()).strip()
             if not text:
                 continue
+
+            methods = [str(item.get("method") or "unknown") for item in chunk]
+            scores = [float(item.get("quality_score") or 0.0) for item in chunk]
+            warnings: list[str] = []
+            metadata_pages: list[dict] = []
+            for item in chunk:
+                warnings.extend(str(w) for w in (item.get("warnings") or []) if w)
+                metadata_pages.append(
+                    {
+                        "page_number": item.get("page_number"),
+                        "method": item.get("method"),
+                        "quality_score": item.get("quality_score"),
+                        "metadata": item.get("metadata") or {},
+                    }
+                )
+
+            method = methods[0] if len(set(methods)) == 1 else "mixed"
+            quality = round(sum(scores) / max(1, len(scores)), 3) if scores else None
             part = PaperContentPart(
                 paper_id=paper_id,
                 part_index=len(output) + 1,
-                page_start=index,
-                page_end=index,
+                page_start=page_start,
+                page_end=page_end,
                 raw_text=text,
                 markdown_text=None,
                 status="raw_extracted",
@@ -83,6 +143,10 @@ class PaperContentPartService:
                 source=source,
                 raw_text_chars=len(text),
                 markdown_text_chars=0,
+                extraction_method=method,
+                extraction_quality_score=quality,
+                extraction_warnings=sorted(set(warnings)),
+                extraction_metadata={"pages": metadata_pages, "pages_per_part": len(chunk)},
             )
             self.db.add(part)
             output.append(part)
@@ -138,6 +202,16 @@ class PaperContentPartService:
     async def set_part_failed(self, part: PaperContentPart, error: str) -> PaperContentPart:
         part.status = "failed"
         part.error = (error or "unknown_error")[:4000]
+        await self.db.commit()
+        await self.db.refresh(part)
+        return part
+
+    async def set_part_ready_without_markdown(self, part: PaperContentPart) -> PaperContentPart:
+        """Mark part as processed while keeping markdown_text empty by settings policy."""
+        part.status = "ready"
+        part.error = None
+        part.markdown_text = None
+        part.markdown_text_chars = 0
         await self.db.commit()
         await self.db.refresh(part)
         return part

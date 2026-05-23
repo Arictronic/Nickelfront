@@ -14,7 +14,7 @@ from typing import Any
 
 import uvicorn
 from dotenv import load_dotenv, set_key
-from fastapi import FastAPI, HTTPException, Security
+from fastapi import FastAPI, File, HTTPException, Security, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -37,6 +37,7 @@ try:
         SendRequest,
         StreamCallbacks,
     )
+    from .har_token_scanner import extract_latest_qwen_token_from_har_bytes, mask_token
 except ImportError:
     from qwen_api import (
         QwenAPI,
@@ -47,6 +48,7 @@ except ImportError:
         SendRequest,
         StreamCallbacks,
     )
+    from har_token_scanner import extract_latest_qwen_token_from_har_bytes, mask_token
 
 try:
     from requests.exceptions import ChunkedEncodingError, ConnectionError as RequestsConnectionError, ReadTimeout
@@ -354,6 +356,91 @@ def _require_service_token(credentials: HTTPAuthorizationCredentials | None) -> 
     """Guard mutable qwen_service endpoints with the configured API key."""
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
+
+
+
+
+def _is_qwen_token_expired_error(message: str | None) -> bool:
+    value = str(message or "").lower()
+    return any(
+        marker in value
+        for marker in (
+            "token has expired",
+            "please log in again",
+            "token expired",
+            "login again",
+            "not logged in",
+            "unauthorized",
+        )
+    )
+
+
+def _auth_status_payload(
+    *,
+    status: str,
+    valid: bool,
+    expired: bool = False,
+    message: str = "",
+    user: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "valid": valid,
+        "expired": expired,
+        "token_configured": bool(config.get("token")),
+        "has_api_key": bool(config.get("api_key")),
+        "model": config.get("model", DEFAULT_MODEL),
+        "message": message,
+        "user": user or None,
+    }
+
+
+async def _check_qwen_auth_status() -> dict[str, Any]:
+    if not str(config.get("token") or "").strip():
+        return _auth_status_payload(
+            status="missing",
+            valid=False,
+            message="QWEN_TOKEN не задан.",
+        )
+
+    client = _new_qwen_api()
+    if client is None:
+        return _auth_status_payload(
+            status="missing",
+            valid=False,
+            message="Qwen API не инициализирован: токен отсутствует.",
+        )
+
+    try:
+        info = await run_in_threadpool(client.get_user_info)
+        user = {}
+        if isinstance(info, dict):
+            user = {
+                "id": info.get("id") or info.get("user_id"),
+                "name": info.get("name") or info.get("nickname") or info.get("username"),
+                "email": info.get("email"),
+            }
+            user = {key: value for key, value in user.items() if value}
+        return _auth_status_payload(
+            status="valid",
+            valid=True,
+            message="Qwen токен действителен.",
+            user=user,
+        )
+    except Exception as exc:
+        message = str(exc)
+        if _is_qwen_token_expired_error(message):
+            return _auth_status_payload(
+                status="expired",
+                valid=False,
+                expired=True,
+                message="Qwen токен истёк. Обновите QWEN_TOKEN.",
+            )
+        return _auth_status_payload(
+            status="invalid",
+            valid=False,
+            message=message or "Qwen токен не прошёл проверку.",
+        )
 
 
 def _public_config_payload() -> dict[str, Any]:
@@ -1198,6 +1285,20 @@ async def health_check():
     }
 
 
+
+
+@app.get("/auth/status")
+async def auth_status(credentials: HTTPAuthorizationCredentials | None = Security(security)):
+    """Check whether the configured Qwen provider token is usable.
+
+    The endpoint never returns the token itself. It is used by backend settings
+    and UI notifications to show a clear auth-expired state instead of a generic
+    500 from /sessions.
+    """
+    _require_service_token(credentials)
+    return await _check_qwen_auth_status()
+
+
 @app.get("/config")
 async def get_config():
     """Documentation updated."""
@@ -1258,6 +1359,58 @@ async def set_token(
             _control_qwen_api = _new_qwen_api() if token else None
 
     return {"status": "ok", "message": "Токен установлен" if token else "Токен очищен", "available": bool(qwen_api)}
+
+@app.post("/config/token/update-from-har")
+async def set_token_from_har(
+    har_file: UploadFile = File(...),
+    validate: bool = True,
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
+):
+    """Extract Qwen token from HAR and apply it inside qwen_service.
+
+    qwen_service owns this operation because it also owns provider auth state,
+    .env persistence and runtime QwenAPI client registry. The full token is
+    never returned in the response.
+    """
+    _require_service_token(credentials)
+    global _control_qwen_api
+
+    filename = har_file.filename or ""
+    if filename and not filename.lower().endswith(".har"):
+        raise HTTPException(status_code=400, detail="Загрузите HAR-файл с расширением .har")
+
+    content = await har_file.read()
+    if len(content) > 120 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="HAR-файл слишком большой: максимум 120 МБ")
+
+    try:
+        token, meta = extract_latest_qwen_token_from_har_bytes(content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    with qwen_request_lock:
+        config["token"] = token
+        save_config(config)
+        with _qwen_registry_lock:
+            _session_qwen_clients.clear()
+            _session_locks.clear()
+            auto_continue_tracker.clear()
+            _control_qwen_api = _new_qwen_api() if token else None
+
+    auth_status = await _check_qwen_auth_status() if validate else _auth_status_payload(
+        status="updated",
+        valid=False,
+        message="Токен установлен, проверка не выполнялась.",
+    )
+
+    return {
+        "status": "ok",
+        "updated": True,
+        "token_preview": mask_token(token),
+        "token_source": meta,
+        "qwen_status": auth_status,
+        "message": "Qwen токен обновлён из HAR." if auth_status.get("valid") else "Токен извлечён и установлен, но проверка не прошла.",
+    }
 
 
 @app.post("/config/api_key")
@@ -1357,7 +1510,16 @@ async def create_session(
         raise
     except Exception as e:
         logging.exception(f"Error creating session: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        message = str(e)
+        if _is_qwen_token_expired_error(message):
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": "qwen_token_expired",
+                    "message": "Qwen токен истёк. Обновите QWEN_TOKEN.",
+                },
+            ) from e
+        raise HTTPException(status_code=500, detail=message)
 
 
 @app.get("/sessions")

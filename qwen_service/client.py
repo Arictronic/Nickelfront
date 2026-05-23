@@ -50,6 +50,12 @@ class QwenServiceClient:
         """Documentation updated."""
         return self._request("POST", "/config/token", json={"token": token})
 
+    def set_token_from_har(self, har_path: str, validate: bool = True) -> dict:
+        """Extract Qwen token from HAR through qwen_service and apply it."""
+        endpoint = f"/config/token/update-from-har?validate={str(validate).lower()}"
+        with open(har_path, "rb") as file_obj:
+            return self._request("POST", endpoint, files={"har_file": (Path(har_path).name, file_obj, "application/json")})
+
     def set_api_key(self, api_key: str) -> dict:
         """Documentation updated."""
         return self._request("POST", "/config/api_key", json={"api_key": api_key})

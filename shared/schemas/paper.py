@@ -285,6 +285,10 @@ class PaperContentPart(BaseModel):
     regeneration_count: int = 0
     raw_text_chars: int = 0
     markdown_text_chars: int = 0
+    extraction_method: str | None = None
+    extraction_quality_score: float | None = None
+    extraction_warnings: list[str] = Field(default_factory=list)
+    extraction_metadata: dict = Field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

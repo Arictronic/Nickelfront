@@ -22,9 +22,14 @@ from app.services.paper_content_service import (
     PDF_MARKDOWN_PROMPT_VERSION,
 )
 from app.services.paper_service import PaperService
-from app.services.system_settings_service import SystemSettingsService
 from app.services.paper_content_part_service import PaperContentPartService
+from app.services.system_settings_service import (
+    get_pdf_markdown_settings_safe,
+    get_postprocess_settings_safe,
+    get_qwen_settings_safe,
+)
 from app.services.qwen_client import QwenServiceClient
+from app.services.qwen_token_tools import is_qwen_auth_expired_message
 from app.tasks.async_runner import run_async
 from app.tasks.celery_app import celery_app
 
@@ -85,19 +90,16 @@ def _merge_previous(previous: Any, **updates: Any) -> dict[str, Any]:
     return payload
 
 
-async def _get_postprocess_settings(db) -> dict[str, bool]:
-    try:
-        return await SystemSettingsService(db).get_postprocess_settings()
-    except Exception as exc:
-        logger.warning("Failed to load postprocess settings, using defaults: {}", exc)
-        return {
-            "download_pdf": True,
-            "extract_pdf_text": True,
-            "qwen_markdown": True,
-            "qwen_ru_analysis": True,
-            "qwen_keywords": True,
-            "embedding": True,
-        }
+async def _get_postprocess_settings(db=None) -> dict[str, bool]:
+    return await get_postprocess_settings_safe(db)
+
+
+async def _get_qwen_settings(db=None) -> dict[str, Any]:
+    return await get_qwen_settings_safe(db)
+
+
+async def _get_pdf_markdown_settings(db=None) -> dict[str, Any]:
+    return await get_pdf_markdown_settings_safe(db)
 
 
 async def _set_stage(
@@ -217,9 +219,16 @@ async def _qwen_markdown_async(
             return _merge_previous(previous, status="error", error="paper_not_found")
 
         postprocess = await _get_postprocess_settings(db)
-        if not postprocess.get("qwen_markdown", True):
+        qwen_settings = await _get_qwen_settings(db)
+        pdf_markdown_settings = await _get_pdf_markdown_settings(db)
+        if not postprocess.get("qwen_markdown", True) or not qwen_settings.get("markdown_enabled", True):
             await _set_stage(paper_service, paper_id, "markdown_skipped", task_id=task_id, error="qwen_markdown_disabled")
             return _merge_previous(previous, paper_id=paper_id, root_task_id=root_task_id, markdown_ready=False, markdown_skipped=True)
+
+        save_markdown_parts = bool(pdf_markdown_settings.get("save_markdown_parts", True))
+        page_char_limit = int(pdf_markdown_settings.get("page_chars") or settings.QWEN_MARKDOWN_PAGE_CHARS)
+        normalize_math = bool(pdf_markdown_settings.get("normalize_math", True))
+        qwen_timeout = float(qwen_settings.get("request_timeout_seconds") or settings.QWEN_QUEUE_TIMEOUT)
 
         content_text = (paper.full_text or "").strip()
         parts = await part_service.list_parts(paper_id)
@@ -234,6 +243,7 @@ async def _qwen_markdown_async(
         session_id = await asyncio.to_thread(create_qwen_session_for_paper, paper_id, paper.title)
         total_parts = len(parts)
         markdown_ready_count = 0
+        generated_blocks: list[str] = []
 
         for index, part in enumerate(parts, start=1):
             raw_text = (part.raw_text or part.markdown_text or "").strip()
@@ -275,8 +285,12 @@ async def _qwen_markdown_async(
                     part.page_end,
                     session_id,
                     include_full_instruction=(index == 1),
+                    page_char_limit=page_char_limit,
+                    timeout_seconds=qwen_timeout,
+                    normalize_math=normalize_math,
                 )
             except Exception as markdown_exc:
+                error_text = str(markdown_exc)
                 logger.warning(
                     "Qwen markdown normalization failed for paper {} part {} pages {}-{}: {}",
                     paper_id,
@@ -285,22 +299,41 @@ async def _qwen_markdown_async(
                     part.page_end,
                     markdown_exc,
                 )
-                await part_service.set_part_failed(part, str(markdown_exc))
+                if is_qwen_auth_expired_message(error_text):
+                    await part_service.set_part_failed(part, "qwen_token_expired")
+                    await paper_service.update_paper(
+                        paper_id,
+                        processing_status="qwen_auth_failed",
+                        content_task_id=task_id,
+                        processing_error="Токен Qwen истёк. Обновите QWEN_TOKEN.",
+                    )
+                    return _merge_previous(
+                        previous,
+                        paper_id=paper_id,
+                        root_task_id=root_task_id,
+                        markdown_ready=False,
+                        markdown_error="qwen_token_expired",
+                    )
+                await part_service.set_part_failed(part, error_text)
                 continue
 
             if markdown_text:
-                await part_service.set_part_markdown(
-                    part,
-                    markdown_text,
-                    qwen_model=settings.QWEN_MODEL,
-                    prompt_version=PDF_MARKDOWN_PROMPT_VERSION,
-                    increment_regeneration=False,
-                )
+                generated_blocks.append(f"### Pages {part.page_start}-{part.page_end}\n\n{markdown_text}".strip())
+                if save_markdown_parts:
+                    await part_service.set_part_markdown(
+                        part,
+                        markdown_text,
+                        qwen_model=str(qwen_settings.get("model") or settings.QWEN_MODEL),
+                        prompt_version=PDF_MARKDOWN_PROMPT_VERSION,
+                        increment_regeneration=False,
+                    )
+                else:
+                    await part_service.set_part_ready_without_markdown(part)
                 markdown_ready_count += 1
             else:
                 await part_service.set_part_failed(part, "qwen_markdown_empty")
 
-            current_markdown = await part_service.assemble_markdown(paper_id)
+            current_markdown = await part_service.assemble_markdown(paper_id) if save_markdown_parts else "\n\n".join(generated_blocks).strip()
             await paper_service.update_paper(
                 paper_id,
                 full_text=current_markdown or content_text,
@@ -324,7 +357,7 @@ async def _qwen_markdown_async(
                 },
             )
 
-        final_markdown = await part_service.assemble_markdown(paper_id)
+        final_markdown = await part_service.assemble_markdown(paper_id) if save_markdown_parts else "\n\n".join(generated_blocks).strip()
         if final_markdown and markdown_ready_count > 0:
             await paper_service.update_paper(paper_id, full_text=final_markdown)
             await _set_stage(paper_service, paper_id, "markdown_ready", task_id=task_id, error=None)
@@ -390,10 +423,12 @@ async def _qwen_ru_analysis_async(
             return _merge_previous(previous, status="error", error="paper_not_found")
 
         postprocess = await _get_postprocess_settings(db)
-        if not postprocess.get("qwen_ru_analysis", True):
-            await _set_stage(paper_service, paper_id, "ru_analysis_fallback", task_id=task_id, error="qwen_ru_analysis_disabled")
+        qwen_settings = await _get_qwen_settings(db)
+        if not postprocess.get("qwen_ru_analysis", True) or not qwen_settings.get("ru_analysis_enabled", True):
+            await _set_stage(paper_service, paper_id, "ru_analysis_skipped", task_id=task_id, error="qwen_ru_analysis_disabled")
             return _merge_previous(previous, paper_id=paper_id, root_task_id=root_task_id, ru_analysis_ready=False, qwen_analysis_skipped=True)
 
+        qwen_timeout = float(qwen_settings.get("request_timeout_seconds") or settings.QWEN_QUEUE_TIMEOUT)
         content_text = (paper.full_text or paper.abstract or "").strip()
         await _set_stage(paper_service, paper_id, "analyzing_ru", task_id=task_id, error=None)
         session_id = previous.get("session_id") if isinstance(previous, dict) else None
@@ -406,6 +441,7 @@ async def _qwen_ru_analysis_async(
             paper.abstract or "",
             content_text,
             session_id,
+            timeout_seconds=qwen_timeout,
         )
         fallback_reason = enrichment.fallback_reason if enrichment.used_fallback else None
         await paper_service.update_paper(
@@ -472,14 +508,16 @@ async def _qwen_keywords_async(
             return _merge_previous(previous, status="error", error="paper_not_found")
 
         postprocess = await _get_postprocess_settings(db)
-        if not postprocess.get("qwen_keywords", True):
-            await _set_stage(paper_service, paper_id, "keywords_failed", task_id=task_id, error="qwen_keywords_disabled")
+        qwen_settings = await _get_qwen_settings(db)
+        if not postprocess.get("qwen_keywords", True) or not qwen_settings.get("keywords_enabled", True):
+            await _set_stage(paper_service, paper_id, "keywords_skipped", task_id=task_id, error="qwen_keywords_disabled")
             return _merge_previous(previous, paper_id=paper_id, root_task_id=root_task_id, keywords_ready=False, qwen_keywords_skipped=True)
 
         await _set_stage(paper_service, paper_id, "extracting_keywords", task_id=task_id, error=None)
         session_id = previous.get("session_id") if isinstance(previous, dict) else None
         if not session_id:
             session_id = await asyncio.to_thread(create_qwen_session_for_paper, paper_id, paper.title)
+        qwen_timeout = float(qwen_settings.get("request_timeout_seconds") or settings.QWEN_QUEUE_TIMEOUT)
 
         try:
             keywords = await asyncio.to_thread(
@@ -498,6 +536,7 @@ async def _qwen_keywords_async(
                 analysis_ru=paper.analysis_ru,
                 translation_ru=paper.translation_ru,
                 session_id=session_id,
+                timeout_seconds=qwen_timeout,
             )
             if keywords:
                 await paper_service.update_paper(paper_id, keywords=keywords)
@@ -565,6 +604,16 @@ async def _regenerate_markdown_part_async(
         if not part:
             return {"status": "error", "paper_id": paper_id, "part_id": part_id, "error": "part_not_found"}
 
+        qwen_settings = await _get_qwen_settings(db)
+        pdf_markdown_settings = await _get_pdf_markdown_settings(db)
+        if not qwen_settings.get("markdown_enabled", True):
+            await part_service.set_part_failed(part, "qwen_markdown_disabled")
+            await paper_service.update_paper(paper_id, processing_status="markdown_skipped", content_task_id=task_id, processing_error="qwen_markdown_disabled")
+            return {"status": "error", "paper_id": paper_id, "part_id": part_id, "error": "qwen_markdown_disabled"}
+        page_char_limit = int(pdf_markdown_settings.get("page_chars") or settings.QWEN_MARKDOWN_PAGE_CHARS)
+        normalize_math = bool(pdf_markdown_settings.get("normalize_math", True))
+        qwen_timeout = float(qwen_settings.get("request_timeout_seconds") or settings.QWEN_QUEUE_TIMEOUT)
+
         raw_text = (part.raw_text or "").strip()
         if not raw_text:
             await part_service.set_part_failed(part, "empty_raw_text")
@@ -590,11 +639,24 @@ async def _regenerate_markdown_part_async(
                 part.page_end,
                 session_id,
                 include_full_instruction=True,
+                page_char_limit=page_char_limit,
+                timeout_seconds=qwen_timeout,
+                normalize_math=normalize_math,
             )
         except Exception as exc:
-            await part_service.set_part_failed(part, str(exc))
-            await paper_service.update_paper(paper_id, processing_status="markdown_failed", content_task_id=task_id, processing_error=str(exc))
-            return {"status": "error", "paper_id": paper_id, "part_id": part_id, "error": str(exc)}
+            error_text = str(exc)
+            if is_qwen_auth_expired_message(error_text):
+                await part_service.set_part_failed(part, "qwen_token_expired")
+                await paper_service.update_paper(
+                    paper_id,
+                    processing_status="qwen_auth_failed",
+                    content_task_id=task_id,
+                    processing_error="Токен Qwen истёк. Обновите QWEN_TOKEN.",
+                )
+                return {"status": "error", "paper_id": paper_id, "part_id": part_id, "error": "qwen_token_expired"}
+            await part_service.set_part_failed(part, error_text)
+            await paper_service.update_paper(paper_id, processing_status="markdown_failed", content_task_id=task_id, processing_error=error_text)
+            return {"status": "error", "paper_id": paper_id, "part_id": part_id, "error": error_text}
 
         if not markdown_text:
             await part_service.set_part_failed(part, "qwen_markdown_empty")
@@ -604,7 +666,7 @@ async def _regenerate_markdown_part_async(
         await part_service.set_part_markdown(
             part,
             markdown_text,
-            qwen_model=settings.QWEN_MODEL,
+            qwen_model=str(qwen_settings.get("model") or settings.QWEN_MODEL),
             prompt_version=PDF_MARKDOWN_PROMPT_VERSION,
             increment_regeneration=True,
         )

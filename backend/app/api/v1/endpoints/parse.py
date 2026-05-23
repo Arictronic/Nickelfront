@@ -100,6 +100,37 @@ async def _get_parser_settings(db: AsyncSession) -> dict:
     return await SystemSettingsService(db).get_parser_settings()
 
 
+def _count_active_parse_tasks() -> int:
+    """Best-effort count of running parse tasks across workers for UI-configured limit."""
+    try:
+        from app.tasks.celery_app import celery_app
+
+        active = celery_app.control.inspect(timeout=1.0).active() or {}
+    except Exception as exc:
+        logger.warning("Failed to inspect active parse tasks: {}", exc)
+        return 0
+
+    count = 0
+    for tasks in active.values():
+        for task in tasks or []:
+            task_name = str(task.get("name") or task.get("type") or "")
+            if task_name.startswith("app.tasks.parse_tasks."):
+                count += 1
+    return count
+
+
+def _ensure_parallel_parse_limit(parser_settings: dict) -> None:
+    max_parallel = int(parser_settings.get("max_parallel_parse_jobs") or 1)
+    if max_parallel <= 0:
+        return
+    active_count = _count_active_parse_tasks()
+    if active_count >= max_parallel:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Достигнут лимит активных parse-задач: {active_count}/{max_parallel}",
+        )
+
+
 async def _count_papers_for_source(db: AsyncSession, source: str | None) -> int:
     stmt = select(func.count()).select_from(PaperModel)
     if source and source != "all":
@@ -232,6 +263,7 @@ async def start_parsing(
         raise HTTPException(status_code=409, detail="Парсинг временно отключён в технических настройках")
     if not _is_source_enabled(parser_settings, source):
         raise HTTPException(status_code=409, detail=f"Источник {source} отключён в технических настройках")
+    _ensure_parallel_parse_limit(parser_settings)
     effective_limit = _effective_parse_limit(limit, parser_settings, source)
 
     task = parse_tasks.parse_papers_task.apply_async(
@@ -274,6 +306,7 @@ async def start_parsing_all(
     parser_settings = await _get_parser_settings(db)
     if not parser_settings.get("enabled", True):
         raise HTTPException(status_code=409, detail="Парсинг временно отключён в технических настройках")
+    _ensure_parallel_parse_limit(parser_settings)
 
     enabled_sources = [s for s in available_sources if _is_source_enabled(parser_settings, s)]
     allowed_with_all = [*available_sources, "all"]
@@ -290,9 +323,7 @@ async def start_parsing_all(
     user_queries = [normalized_query]
 
     if source == "all":
-        effective_limit = min(
-            _effective_parse_limit(limit_per_query, parser_settings, src) for src in enabled_sources
-        )
+        effective_limit = min(_effective_parse_limit(limit_per_query, parser_settings, src) for src in enabled_sources)
         task = parse_tasks.parse_all_sources_task.apply_async(
             kwargs={
                 "limit_per_query": effective_limit,
@@ -338,7 +369,7 @@ async def start_parsing_all(
         "Запущен массовый парсинг: sources={}, query='{}', limit_per_query={}, task_id={}",
         source_list,
         normalized_query or "<default_templates>",
-        limit_per_query,
+        effective_limit if source == "all" else _effective_parse_limit(limit_per_query, parser_settings, source),
         task.id,
     )
     initial_count = await _count_papers_for_source(db, "all" if source == "all" else source_list[0])
@@ -402,6 +433,10 @@ async def regenerate_paper_content_part(
     if not (part.raw_text or "").strip():
         raise HTTPException(status_code=400, detail="У части нет сохранённого сырого PDF-текста")
 
+    qwen_settings = await SystemSettingsService(db).get_qwen_settings()
+    if not qwen_settings.get("markdown_enabled", True):
+        raise HTTPException(status_code=409, detail="Markdown-оцифровка Qwen выключена в технических настройках")
+
     task = _get_regenerate_markdown_part_task().apply_async(
         args=[paper_id, part_id],
         queue=settings.QWEN_QUEUE_NAME,
@@ -443,6 +478,10 @@ async def regenerate_paper_markdown_pages(
     part = await part_service.get_part_by_pages(paper_id, page_start, page_end)
     if not part:
         raise HTTPException(status_code=404, detail="Часть с указанными страницами не найдена")
+
+    qwen_settings = await SystemSettingsService(db).get_qwen_settings()
+    if not qwen_settings.get("markdown_enabled", True):
+        raise HTTPException(status_code=409, detail="Markdown-оцифровка Qwen выключена в технических настройках")
 
     task = _get_regenerate_markdown_part_task().apply_async(
         args=[paper_id, part.id],

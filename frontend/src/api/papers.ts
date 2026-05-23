@@ -62,6 +62,10 @@ type PaperContentPartApiModel = {
   regeneration_count: number;
   raw_text_chars: number;
   markdown_text_chars: number;
+  extraction_method?: string | null;
+  extraction_quality_score?: number | null;
+  extraction_warnings?: string[] | null;
+  extraction_metadata?: Record<string, unknown> | null;
   created_at: string | null;
   updated_at: string | null;
 };
@@ -83,6 +87,10 @@ function mapPaperContentPart(apiPart: PaperContentPartApiModel): PaperContentPar
     regenerationCount: apiPart.regeneration_count ?? 0,
     rawTextChars: apiPart.raw_text_chars ?? 0,
     markdownTextChars: apiPart.markdown_text_chars ?? 0,
+    extractionMethod: apiPart.extraction_method ?? null,
+    extractionQualityScore: apiPart.extraction_quality_score ?? null,
+    extractionWarnings: Array.isArray(apiPart.extraction_warnings) ? apiPart.extraction_warnings : [],
+    extractionMetadata: apiPart.extraction_metadata ?? null,
     createdAt: apiPart.created_at ?? null,
     updatedAt: apiPart.updated_at ?? null,
   };

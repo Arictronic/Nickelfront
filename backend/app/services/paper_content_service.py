@@ -56,22 +56,23 @@ PDF_MARKDOWN_SYSTEM_PROMPT = _decode_cp1251_utf8_mojibake("""Ты — OCR/Markdo
 6. Если символ/формула распознаны плохо — сохрани максимально близко к исходнику, не угадывай.
 7. Заголовки статьи оформи через #, ##, ### только если они явно есть во входе.
 8. Abstract, Keywords, References, Figure captions и Table captions сохраняй отдельными блоками.
-9. Таблицы восстанавливай в Markdown-таблицы, если структура понятна; иначе сохраняй как preformatted text.
-10. Формулы оформляй так:
+9. Если во входе есть блоки [Table candidate N], используй их как основу таблиц и не удаляй числовые значения. Таблицы восстанавливай в Markdown-таблицы, если структура понятна; иначе сохраняй как preformatted text.
+10. Если во входе есть блок [Formula candidate], сохрани следующую строку как формулу или максимально близкий текст формулы; не преобразуй её в обычное предложение.
+11. Формулы оформляй так:
     - inline формулы: $...$
     - отдельные формулы: $$...$$
     - не используй \\( \\) и \\[ \\]
     - не выдумывай недостающие части формул.
-11. Между абзацами оставляй пустую строку.
-12. Не склеивай заголовки, абзацы, таблицы, подписи рисунков и references в одну строку.
-13. Сохраняй язык оригинала.
-14. Если часть текста невозможно восстановить надёжно, оставь её максимально близко к исходнику.
+12. Между абзацами оставляй пустую строку.
+13. Не склеивай заголовки, абзацы, таблицы, подписи рисунков и references в одну строку.
+14. Сохраняй язык оригинала.
+15. Если часть текста невозможно восстановить надёжно, оставь её максимально близко к исходнику.
 
 Формат ответа: только Markdown. Без дополнительного текста.""")
 
 PDF_MARKDOWN_CONTINUE_PROMPT = _decode_cp1251_utf8_mojibake("""Продолжай ту же OCR/Markdown-задачу для нового PDF-фрагмента.
 Верни только Markdown этого фрагмента. Не добавляй Page/Pages/Страница, комментарии или текст от себя.
-Формулы: inline $...$, отдельные $$...$$.""")
+Формулы: inline $...$, отдельные $$...$$. Блоки [Formula candidate] и [Table candidate] используй как технические подсказки, но не выводи эти маркеры в ответ.""")
 
 def _clean_arxiv_id(raw: str) -> str:
     value = (raw or "").strip()
@@ -173,11 +174,7 @@ def save_pdf_locally(paper_id: int, pdf_bytes: bytes) -> str:
 
 
 def extract_pdf_text(pdf_bytes: bytes) -> str:
-    """Извлечь текст из PDF.
-
-    PDFParser импортируется лениво: обычный старт FastAPI не должен
-    инициализировать PDF/RAG зависимости до первого реального PDF-запроса.
-    """
+    """Извлечь текст из PDF в legacy-формате одной строкой."""
     try:
         from app.services.rag_parser import pdf_parser
 
@@ -187,10 +184,37 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
         return ""
 
 
+def extract_pdf_page_items(pdf_bytes: bytes, options: dict | None = None) -> list[dict]:
+    """Извлечь PDF постранично с диагностикой качества.
+
+    Возвращает список dict, чтобы content task не зависел от конкретного
+    dataclass rag_parser и мог безопасно передавать данные в service-layer.
+    """
+    try:
+        from app.services.rag_parser import pdf_parser
+
+        pages = pdf_parser.extract_pages_from_bytes(pdf_bytes, options=options or {})
+        return [page.as_dict() if hasattr(page, "as_dict") else dict(page) for page in pages]
+    except Exception as exc:
+        logger.warning("Failed to extract structured PDF pages: {}", exc)
+        text = extract_pdf_text(pdf_bytes)
+        return [
+            {
+                "page_number": index,
+                "text": page_text,
+                "method": "legacy_split",
+                "quality_score": 0.35 if page_text.strip() else 0.0,
+                "warnings": ["legacy_pdf_extraction"],
+                "metadata": {"fallback": True, "chars": len(page_text or "")},
+            }
+            for index, page_text in enumerate(_split_pdf_text_into_pages(text), start=1)
+            if page_text.strip()
+        ]
+
+
 def extract_pdf_pages(pdf_bytes: bytes) -> list[str]:
-    """Извлечь PDF-текст и вернуть список страниц/частей с исходными маркерами."""
-    text = extract_pdf_text(pdf_bytes)
-    return _split_pdf_text_into_pages(text)
+    """Backward-compatible page text extraction."""
+    return [str(item.get("text") or "") for item in extract_pdf_page_items(pdf_bytes)]
 
 
 def _clean_html_text(raw: str) -> str:
@@ -311,7 +335,7 @@ def _split_pdf_text_into_pages(raw_text: str) -> list[str]:
 
 
 
-def _clean_markdown_response(text: str) -> str:
+def _clean_markdown_response(text: str, *, normalize_math: bool = True) -> str:
     """Small post-processing pass after Qwen Markdown normalization.
 
     Qwen usually does the semantic restoration, but PDF/OCR output can still come
@@ -335,8 +359,9 @@ def _clean_markdown_response(text: str) -> str:
     value = re.sub(r"(\|.+\|)\n(?!\n|\|)", r"\1\n\n", value)
 
     # Normalize common LaTeX delimiters for remark-math / KaTeX rendering.
-    value = re.sub(r"\\\((.+?)\\\)", lambda m: f"${m.group(1).strip()}$", value, flags=re.DOTALL)
-    value = re.sub(r"\\\[(.+?)\\\]", lambda m: f"$$\n{m.group(1).strip()}\n$$", value, flags=re.DOTALL)
+    if normalize_math:
+        value = re.sub(r"\\\((.+?)\\\)", lambda m: f"${m.group(1).strip()}$", value, flags=re.DOTALL)
+        value = re.sub(r"\\\[(.+?)\\\]", lambda m: f"$$\n{m.group(1).strip()}\n$$", value, flags=re.DOTALL)
 
     # Separate glued headings commonly returned by LLMs from compact PDF text.
     value = re.sub(r"(?<!\n)(#{1,6}\s+)", r"\n\n\1", value)
@@ -375,9 +400,14 @@ def normalize_pdf_text_part(
     session_id: str | None = None,
     *,
     include_full_instruction: bool = True,
+    page_char_limit: int | None = None,
+    timeout_seconds: float | None = None,
+    normalize_math: bool = True,
 ) -> str:
     """Normalize one stored PDF page/chunk through Qwen and return Markdown only."""
     source_text = (raw_text or "").strip()
+    if page_char_limit and page_char_limit > 0:
+        source_text = source_text[:page_char_limit]
     if not source_text:
         return ""
 
@@ -396,9 +426,9 @@ def normalize_pdf_text_part(
         thinking_enabled=True,
         search_enabled=False,
         auto_continue=False,
-        timeout=float(getattr(settings, "QWEN_CHAT_TIMEOUT_SECONDS", 300.0) or 300.0),
+        timeout=float(timeout_seconds or getattr(settings, "QWEN_CHAT_TIMEOUT_SECONDS", 300.0) or 300.0),
     )
-    response_text = _clean_markdown_response(result.get("response") or "")
+    response_text = _clean_markdown_response(result.get("response") or "", normalize_math=normalize_math)
     if response_text:
         return response_text
 
@@ -420,6 +450,11 @@ def normalize_pdf_text_markdown(
     raw_text: str,
     session_id: str | None = None,
     on_page_markdown: MarkdownProgressCallback | None = None,
+    *,
+    pages_per_request: int | None = None,
+    page_char_limit: int | None = None,
+    timeout_seconds: float | None = None,
+    normalize_math: bool = True,
 ) -> str:
     pages = _split_pdf_text_into_pages(raw_text)
     if not pages:
@@ -430,8 +465,8 @@ def normalize_pdf_text_markdown(
     active_session_id = session_id
     max_page_attempts = 3
     session_needs_prompt = True
-    pages_per_request = max(1, int(getattr(settings, "QWEN_MARKDOWN_PAGES_PER_REQUEST", 1) or 1))
-    page_char_limit = max(4000, int(getattr(settings, "QWEN_MARKDOWN_PAGE_CHARS", 14000) or 14000))
+    pages_per_request = max(1, int(pages_per_request or getattr(settings, "QWEN_MARKDOWN_PAGES_PER_REQUEST", 1) or 1))
+    page_char_limit = max(1000, int(page_char_limit or getattr(settings, "QWEN_MARKDOWN_PAGE_CHARS", 14000) or 14000))
     page_batches = [pages[i : i + pages_per_request] for i in range(0, len(pages), pages_per_request)]
     current_page = 1
 
@@ -456,9 +491,9 @@ def normalize_pdf_text_markdown(
                 thinking_enabled=True,
                 search_enabled=False,
                 auto_continue=False,
-                timeout=float(getattr(settings, "QWEN_CHAT_TIMEOUT_SECONDS", 300.0) or 300.0),
+                timeout=float(timeout_seconds or getattr(settings, "QWEN_CHAT_TIMEOUT_SECONDS", 300.0) or 300.0),
             )
-            response_text = _clean_markdown_response(result.get("response") or "")
+            response_text = _clean_markdown_response(result.get("response") or "", normalize_math=normalize_math)
             error_text = str(result.get("error") or "").strip()
 
             if response_text:
@@ -491,7 +526,7 @@ def normalize_pdf_text_markdown(
                             active_session_id,
                         )
 
-        page_payload = _clean_markdown_response(response_text or batch_text)
+        page_payload = _clean_markdown_response(response_text or batch_text, normalize_math=normalize_math)
         normalized_parts.append(f"### Pages {batch_range_start}-{batch_range_end}\n\n{page_payload}".strip())
         if on_page_markdown:
             try:
@@ -516,6 +551,8 @@ def generate_ai_enrichment_ru(
     abstract: str,
     text: str,
     session_id: str | None = None,
+    *,
+    timeout_seconds: float | None = None,
 ) -> AIEnrichmentResult:
     text_for_model = (text or abstract or "").strip()
     if not text_for_model:
@@ -549,7 +586,7 @@ def generate_ai_enrichment_ru(
         thinking_enabled=True,
         search_enabled=False,
         auto_continue=True,
-        timeout=float(getattr(settings, "QWEN_CHAT_TIMEOUT_SECONDS", 300.0) or 300.0),
+        timeout=float(timeout_seconds or getattr(settings, "QWEN_CHAT_TIMEOUT_SECONDS", 300.0) or 300.0),
     )
     response_text = (result.get("response") or "").strip()
     if not response_text:
@@ -677,6 +714,7 @@ def generate_article_keywords(
     analysis_ru: str | None = None,
     translation_ru: str | None = None,
     session_id: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> list[str]:
     """Generate 10-50 article keywords with Qwen, preserving useful existing keywords."""
     existing = _dedupe_keywords(existing_keywords or [])
@@ -727,7 +765,7 @@ def generate_article_keywords(
         thinking_enabled=True,
         search_enabled=False,
         auto_continue=True,
-        timeout=float(getattr(settings, "QWEN_CHAT_TIMEOUT_SECONDS", 300.0) or 300.0),
+        timeout=float(timeout_seconds or getattr(settings, "QWEN_CHAT_TIMEOUT_SECONDS", 300.0) or 300.0),
     )
 
     response_text = (result.get("response") or "").strip()

@@ -30,6 +30,18 @@ export type PdfMarkdownSettings = {
   save_raw_parts: boolean;
   save_markdown_parts: boolean;
   normalize_math: boolean;
+  show_extraction_diagnostics: boolean;
+  extraction_mode: "auto" | "layout" | "columns" | "simple" | "ocr" | string;
+  detect_columns: boolean;
+  extract_tables: boolean;
+  remove_headers_footers: boolean;
+  merge_hyphenated_words: boolean;
+  mark_formula_candidates: boolean;
+  ocr_enabled: boolean;
+  ocr_dpi: number;
+  ocr_languages: string;
+  min_text_chars: number;
+  max_page_chars: number;
 };
 
 export type QwenSettings = {
@@ -57,4 +69,32 @@ export type SystemSettingsSchema = {
 export type SystemSettingsResponse = {
   settings: SystemSettings;
   schema: SystemSettingsSchema;
+};
+
+export type PublicDisplaySettings = {
+  show_extraction_diagnostics: boolean;
+};
+
+export type QwenTokenStatus = {
+  status: "valid" | "expired" | "missing" | "invalid" | "service_unavailable" | "unknown" | string;
+  valid: boolean;
+  expired: boolean;
+  token_configured: boolean;
+  message: string;
+  model?: string | null;
+  user?: Record<string, unknown> | null;
+};
+
+export type QwenHarUpdateResponse = {
+  updated: boolean;
+  message: string;
+  qwen_status: QwenTokenStatus;
+  token_source?: {
+    source?: string;
+    url?: string;
+    started_at?: string;
+    token_preview?: string;
+    candidates_count?: number;
+    unique_tokens_count?: number;
+  };
 };

@@ -65,6 +65,13 @@ class Settings(BaseSettings):
     # Celery
     CELERY_BROKER_URL: str = "redis://localhost:6380/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6380/0"
+    # Regular Celery worker settings. These are normally consumed by .bat scripts,
+    # but declaring them here lets admin settings display the current runtime
+    # configuration without crashing when .env contains these keys.
+    CELERY_WORKERS: int = 1
+    WORKER_CONCURRENCY: int = 5
+    WORKER_POOL: str = "threads"
+    WORKER_QUEUES: str = "celery"
 
     # Flower (Celery monitoring)
     FLOWER_HOST: str = "http://localhost"
@@ -112,6 +119,8 @@ class Settings(BaseSettings):
     # Celery rate limit for qwen gateway tasks. Use "off"/"none"/"0"/empty to disable.
     QWEN_QUEUE_TASK_RATE_LIMIT: str | None = None
     QWEN_QUEUE_WORKERS: int = 1
+    QWEN_WORKER_CONCURRENCY: int = 5
+    QWEN_WORKER_POOL: str = "threads"
 
     # Content processing queue (PDF download, text extraction, embeddings)
     CONTENT_QUEUE_NAME: str = "content"
