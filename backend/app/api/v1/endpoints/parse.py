@@ -13,25 +13,52 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.config import settings
 from app.api.v1.endpoints.error_helpers import format_paper_db_error
 from app.db.models.paper import Paper as PaperModel
 from app.db.session import get_db
 from app.services.parse_job_history import add_parse_job
-from app.services.paper_content_service import save_pdf_locally
+from app.services.system_settings_service import SystemSettingsService
 from app.services.paper_service import PaperService
-from app.tasks.content_tasks import process_paper_content_task
-from app.tasks.parse_tasks import (
-    ARXIV_SEARCH_QUERIES,
-    AVAILABLE_SOURCES,
-    DEFAULT_SEARCH_QUERIES,
-    parse_all_sources_task,
-    parse_multiple_queries_task,
-    parse_papers_task,
-)
+from app.services.paper_content_part_service import PaperContentPartService
 from shared.schemas.auth import UserResponse
-from shared.schemas.paper import Paper, PaperSearchRequest, PaperSearchResponse
+from shared.schemas.paper import (
+    Paper,
+    PaperContentPart,
+    PaperContentPartRegenerateResponse,
+    PaperSearchRequest,
+    PaperSearchResponse,
+)
 
 router = APIRouter(prefix="/papers", tags=["papers"])
+
+
+def _get_parse_task_module():
+    """Lazy import Celery parser tasks only when a parse endpoint is used."""
+    from app.tasks import parse_tasks
+
+    return parse_tasks
+
+
+def _get_content_task():
+    """Lazy import content task only when PDF post-processing is queued."""
+    from app.tasks.content_tasks import process_paper_content_task
+
+    return process_paper_content_task
+
+
+def _get_regenerate_markdown_part_task():
+    """Lazy import Qwen part-regeneration task."""
+    from app.tasks.qwen_tasks import regenerate_markdown_part_task
+
+    return regenerate_markdown_part_task
+
+
+def _get_save_pdf_locally():
+    """Lazy import PDF helper to avoid PDFParser initialization during API startup."""
+    from app.services.paper_content_service import save_pdf_locally
+
+    return save_pdf_locally
 
 _PAPERS_COUNT_TTL_SECONDS = 5.0
 _papers_count_cache: dict[str, tuple[int, float]] = {}
@@ -53,6 +80,24 @@ def _get_cached_count(source: str | None) -> tuple[int, bool] | None:
 
 def _set_cached_count(source: str | None, total: int) -> None:
     _papers_count_cache[_count_cache_key(source)] = (total, time.monotonic())
+
+
+def _is_source_enabled(parser_settings: dict, source: str) -> bool:
+    enabled_sources = parser_settings.get("enabled_sources") or {}
+    return bool(enabled_sources.get(source, True))
+
+
+def _effective_parse_limit(requested_limit: int | None, parser_settings: dict, source: str) -> int:
+    default_limit = int(parser_settings.get("default_limit") or 10)
+    max_limit = int(parser_settings.get("max_limit") or 100)
+    source_limits = parser_settings.get("source_limits") or {}
+    source_limit = int(source_limits.get(source) or max_limit)
+    requested = int(requested_limit or default_limit)
+    return max(1, min(requested, max_limit, source_limit))
+
+
+async def _get_parser_settings(db: AsyncSession) -> dict:
+    return await SystemSettingsService(db).get_parser_settings()
 
 
 async def _count_papers_for_source(db: AsyncSession, source: str | None) -> int:
@@ -163,7 +208,7 @@ async def get_papers_count(
 @router.post("/parse")
 async def start_parsing(
     query: str = Query(..., description="Поисковый запрос"),
-    limit: int = Query(default=50, ge=1, le=100, description="Макс. количество результатов"),
+    limit: int | None = Query(default=None, ge=1, le=5000, description="Макс. количество результатов"),
     source: str = Query(default="CORE", description="Источник"),
     _current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -177,10 +222,22 @@ async def start_parsing(
     if not normalized_query:
         raise HTTPException(status_code=400, detail="Поле query обязательно и не может быть пустым")
 
-    if source not in AVAILABLE_SOURCES:
-        raise HTTPException(status_code=400, detail=f"Неподдерживаемый источник. Доступны: {', '.join(AVAILABLE_SOURCES)}")
+    parse_tasks = _get_parse_task_module()
+    available_sources = parse_tasks.AVAILABLE_SOURCES
+    if source not in available_sources:
+        raise HTTPException(status_code=400, detail=f"Неподдерживаемый источник. Доступны: {', '.join(available_sources)}")
 
-    task = parse_papers_task.delay(query=normalized_query, limit=limit, source=source)
+    parser_settings = await _get_parser_settings(db)
+    if not parser_settings.get("enabled", True):
+        raise HTTPException(status_code=409, detail="Парсинг временно отключён в технических настройках")
+    if not _is_source_enabled(parser_settings, source):
+        raise HTTPException(status_code=409, detail=f"Источник {source} отключён в технических настройках")
+    effective_limit = _effective_parse_limit(limit, parser_settings, source)
+
+    task = parse_tasks.parse_papers_task.apply_async(
+        kwargs={"query": normalized_query, "limit": effective_limit, "source": source},
+        queue="celery",
+    )
     initial_count = await _count_papers_for_source(db, source)
     _record_parse_job(
         task_id=task.id,
@@ -195,13 +252,13 @@ async def start_parsing(
         "task_id": task.id,
         "source": source,
         "query": normalized_query,
-        "limit": limit,
+        "limit": effective_limit,
     }
 
 
 @router.post("/parse-all")
 async def start_parsing_all(
-    limit_per_query: int = Query(default=50, ge=1, le=100),
+    limit_per_query: int | None = Query(default=None, ge=1, le=5000),
     source: str = Query(default="all", description="Источник (или all)"),
     query: str = Query(..., description="Пользовательский запрос для всех источников"),
     _current_user: UserResponse = Depends(get_current_user),
@@ -212,9 +269,20 @@ async def start_parsing_all(
 
     Источники: `AVAILABLE_SOURCES` и `all`.
     """
-    allowed_with_all = [*AVAILABLE_SOURCES, "all"]
+    parse_tasks = _get_parse_task_module()
+    available_sources = parse_tasks.AVAILABLE_SOURCES
+    parser_settings = await _get_parser_settings(db)
+    if not parser_settings.get("enabled", True):
+        raise HTTPException(status_code=409, detail="Парсинг временно отключён в технических настройках")
+
+    enabled_sources = [s for s in available_sources if _is_source_enabled(parser_settings, s)]
+    allowed_with_all = [*available_sources, "all"]
     if source not in allowed_with_all:
         raise HTTPException(status_code=400, detail=f"Неподдерживаемый источник. Доступны: {', '.join(allowed_with_all)}")
+    if source != "all" and source not in enabled_sources:
+        raise HTTPException(status_code=409, detail=f"Источник {source} отключён в технических настройках")
+    if source == "all" and not enabled_sources:
+        raise HTTPException(status_code=409, detail="Все источники отключены в технических настройках")
 
     normalized_query = query.strip()
     if not normalized_query:
@@ -222,31 +290,47 @@ async def start_parsing_all(
     user_queries = [normalized_query]
 
     if source == "all":
-        task = parse_all_sources_task.delay(
-            limit_per_query=limit_per_query,
-            queries=user_queries,
-            query=normalized_query or None,
+        effective_limit = min(
+            _effective_parse_limit(limit_per_query, parser_settings, src) for src in enabled_sources
         )
-        source_list = AVAILABLE_SOURCES
+        task = parse_tasks.parse_all_sources_task.apply_async(
+            kwargs={
+                "limit_per_query": effective_limit,
+                "queries": user_queries,
+                "query": normalized_query or None,
+                "sources": enabled_sources,
+            },
+            queue="celery",
+        )
+        source_list = enabled_sources
     elif source == "arXiv":
-        task = parse_multiple_queries_task.delay(
-            queries=user_queries or ARXIV_SEARCH_QUERIES,
-            limit_per_query=limit_per_query,
-            source="arXiv",
+        task = parse_tasks.parse_multiple_queries_task.apply_async(
+            kwargs={
+                "queries": user_queries or parse_tasks.ARXIV_SEARCH_QUERIES,
+                "limit_per_query": _effective_parse_limit(limit_per_query, parser_settings, "arXiv"),
+                "source": "arXiv",
+            },
+            queue="celery",
         )
         source_list = ["arXiv"]
     elif source == "CORE":
-        task = parse_multiple_queries_task.delay(
-            queries=user_queries or DEFAULT_SEARCH_QUERIES,
-            limit_per_query=limit_per_query,
-            source="CORE",
+        task = parse_tasks.parse_multiple_queries_task.apply_async(
+            kwargs={
+                "queries": user_queries or parse_tasks.DEFAULT_SEARCH_QUERIES,
+                "limit_per_query": _effective_parse_limit(limit_per_query, parser_settings, "CORE"),
+                "source": "CORE",
+            },
+            queue="celery",
         )
         source_list = ["CORE"]
     else:
-        task = parse_multiple_queries_task.delay(
-            queries=user_queries or DEFAULT_SEARCH_QUERIES,
-            limit_per_query=limit_per_query,
-            source=source,
+        task = parse_tasks.parse_multiple_queries_task.apply_async(
+            kwargs={
+                "queries": user_queries or parse_tasks.DEFAULT_SEARCH_QUERIES,
+                "limit_per_query": _effective_parse_limit(limit_per_query, parser_settings, source),
+                "source": source,
+            },
+            queue="celery",
         )
         source_list = [source]
 
@@ -269,7 +353,7 @@ async def start_parsing_all(
         "message": "Массовый парсинг запущен",
         "task_id": task.id,
         "sources": source_list,
-        "limit_per_query": limit_per_query,
+        "limit_per_query": effective_limit if source == "all" else _effective_parse_limit(limit_per_query, parser_settings, source),
         "query": normalized_query,
     }
 
@@ -288,6 +372,97 @@ async def get_paper(paper_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Статья не найдена")
 
     return paper
+
+
+@router.get("/id/{paper_id}/content-parts", response_model=list[PaperContentPart])
+async def get_paper_content_parts(paper_id: int, db: AsyncSession = Depends(get_db)):
+    """Получить сохранённые части PDF/raw text + Qwen Markdown по статье."""
+    paper = await PaperService(db).get_by_id(paper_id)
+    if not paper:
+        raise HTTPException(status_code=404, detail="Статья не найдена")
+    return await PaperContentPartService(db).list_parts(paper_id)
+
+
+@router.post("/id/{paper_id}/content-parts/{part_id}/regenerate", response_model=PaperContentPartRegenerateResponse)
+async def regenerate_paper_content_part(
+    paper_id: int,
+    part_id: int,
+    _current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Перегенерировать Markdown только для одной сохранённой части."""
+    paper = await PaperService(db).get_by_id(paper_id)
+    if not paper:
+        raise HTTPException(status_code=404, detail="Статья не найдена")
+
+    part_service = PaperContentPartService(db)
+    part = await part_service.get_part(paper_id, part_id)
+    if not part:
+        raise HTTPException(status_code=404, detail="Часть статьи не найдена")
+    if not (part.raw_text or "").strip():
+        raise HTTPException(status_code=400, detail="У части нет сохранённого сырого PDF-текста")
+
+    task = _get_regenerate_markdown_part_task().apply_async(
+        args=[paper_id, part_id],
+        queue=settings.QWEN_QUEUE_NAME,
+    )
+    total_parts = len(await part_service.list_parts(paper_id)) or max(1, part.part_index)
+    await PaperService(db).update_paper(
+        paper_id,
+        processing_status=f"digitizing_file:{part.part_index}/{max(1, total_parts)}",
+        content_task_id=task.id,
+        processing_error=None,
+    )
+    return PaperContentPartRegenerateResponse(
+        paper_id=paper_id,
+        part_id=part_id,
+        task_id=task.id,
+        status="queued",
+        page_start=part.page_start,
+        page_end=part.page_end,
+    )
+
+
+@router.post("/id/{paper_id}/markdown-pages/regenerate", response_model=PaperContentPartRegenerateResponse)
+async def regenerate_paper_markdown_pages(
+    paper_id: int,
+    page_start: int = Query(..., ge=1),
+    page_end: int = Query(..., ge=1),
+    _current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Совместимый endpoint: найти часть по диапазону страниц и перегенерировать её."""
+    if page_end < page_start:
+        raise HTTPException(status_code=400, detail="page_end должен быть >= page_start")
+
+    paper = await PaperService(db).get_by_id(paper_id)
+    if not paper:
+        raise HTTPException(status_code=404, detail="Статья не найдена")
+
+    part_service = PaperContentPartService(db)
+    part = await part_service.get_part_by_pages(paper_id, page_start, page_end)
+    if not part:
+        raise HTTPException(status_code=404, detail="Часть с указанными страницами не найдена")
+
+    task = _get_regenerate_markdown_part_task().apply_async(
+        args=[paper_id, part.id],
+        queue=settings.QWEN_QUEUE_NAME,
+    )
+    total_parts = len(await part_service.list_parts(paper_id)) or max(1, part.part_index)
+    await PaperService(db).update_paper(
+        paper_id,
+        processing_status=f"digitizing_file:{part.part_index}/{max(1, total_parts)}",
+        content_task_id=task.id,
+        processing_error=None,
+    )
+    return PaperContentPartRegenerateResponse(
+        paper_id=paper_id,
+        part_id=part.id,
+        task_id=task.id,
+        status="queued",
+        page_start=part.page_start,
+        page_end=part.page_end,
+    )
 
 
 @router.get("/id/{paper_id}/pdf")
@@ -329,6 +504,7 @@ async def get_paper_pdf(paper_id: int, db: AsyncSession = Depends(get_db)):
                 raise HTTPException(status_code=404, detail="Удалённый ресурс не является PDF")
 
             try:
+                save_pdf_locally = _get_save_pdf_locally()
                 cached_path = await asyncio.to_thread(save_pdf_locally, paper_id, pdf_bytes)
                 await PaperService(db).update_paper(paper_id, pdf_local_path=cached_path)
             except Exception as cache_exc:
@@ -364,7 +540,11 @@ async def reprocess_paper_content(
     if not paper:
         raise HTTPException(status_code=404, detail="Статья не найдена")
 
-    task = process_paper_content_task.delay(paper_id)
+    process_paper_content_task = _get_content_task()
+    task = process_paper_content_task.apply_async(
+        args=[paper_id],
+        queue=settings.CONTENT_QUEUE_NAME,
+    )
     await paper_service.update_paper(
         paper_id,
         processing_status="queued_for_content_processing",
@@ -394,10 +574,14 @@ async def reprocess_all_papers(
         logger.exception("Failed to load papers for reprocess-all")
         raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
 
+    process_paper_content_task = _get_content_task()
     queued = 0
     task_ids: list[str] = []
     for paper in papers:
-        task = process_paper_content_task.delay(paper.id)
+        task = process_paper_content_task.apply_async(
+            args=[paper.id],
+            queue=settings.CONTENT_QUEUE_NAME,
+        )
         await paper_service.update_paper(
             paper.id,
             processing_status="queued_for_content_processing",

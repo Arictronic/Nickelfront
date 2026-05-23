@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 14
+    # Small grace window for refresh-token rotation races across browser tabs/windows.
+    # Without it, two simultaneous 401 responses can both try to rotate the same
+    # refresh token: the first succeeds and revokes it, the second gets 401 and
+    # clears the whole frontend session.
+    REFRESH_TOKEN_REUSE_GRACE_SECONDS: int = 60
 
     # CORS
     CORS_ORIGINS: str | None = None
@@ -103,10 +108,20 @@ class Settings(BaseSettings):
     # Qwen gateway queue (shared Qwen load controller for background jobs)
     QWEN_QUEUE_ENABLED: bool = True
     QWEN_QUEUE_NAME: str = "qwen"
-    QWEN_QUEUE_TIMEOUT: float = 1000.0
+    QWEN_QUEUE_TIMEOUT: float = 360.0
     # Celery rate limit for qwen gateway tasks. Use "off"/"none"/"0"/empty to disable.
     QWEN_QUEUE_TASK_RATE_LIMIT: str | None = None
-    QWEN_QUEUE_WORKERS: int = 5
+    QWEN_QUEUE_WORKERS: int = 1
+
+    # Content processing queue (PDF download, text extraction, embeddings)
+    CONTENT_QUEUE_NAME: str = "content"
+    CONTENT_WORKERS: int = 1
+    CONTENT_WORKER_CONCURRENCY: int = 5
+    CONTENT_WORKER_POOL: str = "threads"
+
+    # Markdown normalization through Qwen
+    QWEN_MARKDOWN_PAGES_PER_REQUEST: int = 1
+    QWEN_MARKDOWN_PAGE_CHARS: int = 14000
 
     # RAG Settings
     RAG_CHUNK_SIZE: int = 1000

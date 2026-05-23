@@ -11,6 +11,7 @@ import Metrics from "./pages/Metrics";
 import CeleryMonitoring from "./pages/CeleryMonitoring";
 import WorkerStatus from "./pages/WorkerStatus";
 import Database from "./pages/Database";
+import TechnicalSettings from "./pages/TechnicalSettings";
 import PaperReport from "./pages/PaperReport";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
@@ -219,6 +220,7 @@ export default function App() {
           <Route path="/analysis" element={<ProtectedPage name="Анализ сплавов"><AlloyAnalysis /></ProtectedPage>} />
           <Route path="/jobs" element={<ProtectedPage name="Статус парсинга"><WorkerStatus /></ProtectedPage>} />
           <Route path="/database" element={<AdminPage name="База данных"><Database /></AdminPage>} />
+          <Route path="/settings" element={<AdminPage name="Технические настройки"><TechnicalSettings /></AdminPage>} />
         </Route>
         <Route path="*" element={<RootRedirect />} />
       </Routes>

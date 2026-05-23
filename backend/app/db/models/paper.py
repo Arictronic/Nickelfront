@@ -58,6 +58,14 @@ class Paper(Base):
     quality_flags = Column(JSON, nullable=False, default=list)
     schema_version = Column(String(20), nullable=True, default="2.0")
 
+    content_parts = relationship(
+        "PaperContentPart",
+        back_populates="paper",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="PaperContentPart.part_index",
+    )
+
     # Индексы
     __table_args__ = (
         # GIN индекс для полнотекстового поиска

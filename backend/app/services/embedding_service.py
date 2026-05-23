@@ -7,6 +7,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+import threading
 from typing import Any
 
 from loguru import logger
@@ -59,6 +60,7 @@ class EmbeddingService:
             local_only: Загружать модели только локально (без скачивания).
         """
         self._model: SentenceTransformer | None = None
+        self._model_lock = threading.RLock()
         self.MODEL_NAME = model_name or settings.EMBEDDING_MODEL
         self.EMBEDDING_DIM = embedding_dim or settings.EMBEDDING_DIM
         self._cache_dir = cache_dir or settings.EMBEDDING_CACHE_DIR
@@ -71,12 +73,18 @@ class EmbeddingService:
 
     @property
     def model(self) -> SentenceTransformer | None:
-        """Ленивая загрузка модели."""
+        """Ленивая потокобезопасная загрузка модели."""
         if not SENTENCE_TRANSFORMERS_AVAILABLE:
             logger.warning("sentence-transformers не установлен. Эмбеддинги недоступны.")
             return None
 
-        if self._model is None:
+        if self._model is not None:
+            return self._model
+
+        with self._model_lock:
+            if self._model is not None:
+                return self._model
+
             cache_dir = self._cache_dir
             cache_dir = settings.resolve_path(cache_dir) if cache_dir else None
             if cache_dir:
@@ -98,9 +106,11 @@ class EmbeddingService:
                     self._model = SentenceTransformer(self.MODEL_NAME, cache_folder=cache_dir)
                     logger.info(f"Модель {self.MODEL_NAME} успешно загружена")
                 except Exception as e:
+                    self._model = None
                     logger.error(f"Ошибка загрузки модели: {e}")
                     return None
             except Exception as e:
+                self._model = None
                 logger.error(f"Ошибка загрузки модели: {e}")
                 if self._local_only:
                     logger.error(
@@ -109,6 +119,10 @@ class EmbeddingService:
                     )
                 return None
         return self._model
+
+    def is_loaded(self) -> bool:
+        """Проверить, загружена ли модель, без запуска тяжелой загрузки."""
+        return self._model is not None
 
     def get_embedding(self, text: str) -> list[float] | None:
         """
@@ -229,12 +243,17 @@ class EmbeddingService:
                 - embedding_dim: Размерность эмбеддингов
                 - cache_info: Информация о кэше (если доступен)
         """
+        # Важно: get_stats не должен грузить ML-модель.
+        # Статистика может вызываться при открытии dashboard/vector страницы,
+        # и раньше из-за self.model здесь запускалась тяжелая загрузка all-MiniLM-L6-v2.
+        loaded = self.is_loaded()
         stats = {
-            "available": self.model is not None,
-            "model": self.MODEL_NAME if self.model else None,
-            "embedding_dim": self.EMBEDDING_DIM if self.model else None,
+            "available": loaded,
+            "model": self.MODEL_NAME,
+            "embedding_dim": self.EMBEDDING_DIM,
             "cache_dir": self._cache_dir,
             "local_only": self._local_only,
+            "loaded": loaded,
         }
 
         # Информация о кэше lru_cache
@@ -255,6 +274,7 @@ class EmbeddingService:
 
 # Глобальный экземпляр сервиса
 _embedding_service: EmbeddingService | None = None
+_embedding_service_lock = threading.RLock()
 
 
 def get_embedding_service() -> EmbeddingService:
@@ -265,6 +285,10 @@ def get_embedding_service() -> EmbeddingService:
         EmbeddingService: Глобальный экземпляр сервиса.
     """
     global _embedding_service
-    if _embedding_service is None:
-        _embedding_service = EmbeddingService()
-    return _embedding_service
+    if _embedding_service is not None:
+        return _embedding_service
+
+    with _embedding_service_lock:
+        if _embedding_service is None:
+            _embedding_service = EmbeddingService()
+        return _embedding_service

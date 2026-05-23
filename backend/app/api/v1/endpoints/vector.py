@@ -163,7 +163,10 @@ async def vector_search_stats():
     vector_stats = await asyncio.to_thread(vector_service.get_stats)
 
     embedding_service = get_embedding_service()
-    embedding_available = await asyncio.to_thread(lambda: embedding_service.model is not None)
+    # /vector/stats не должен загружать sentence-transformers модель.
+    # Он вызывается dashboard/vector страницами автоматически и может приходить
+    # параллельно несколько раз. Тяжелая загрузка нужна только для search/rebuild.
+    embedding_available = embedding_service.is_loaded()
 
     store_count = int(vector_stats.get("count", 0) or 0)
     store_available = bool(vector_stats.get("available", False))
@@ -176,8 +179,8 @@ async def vector_search_stats():
             collection=store_collection,
             persist_directory=vector_stats.get("persist_directory", "./chroma_db"),
         ),
-        embedding_model=embedding_service.MODEL_NAME if embedding_available else None,
-        embedding_dim=embedding_service.EMBEDDING_DIM if embedding_available else None,
+        embedding_model=embedding_service.MODEL_NAME,
+        embedding_dim=embedding_service.EMBEDDING_DIM,
         embedding_available=embedding_available,
         count=store_count,
         available=store_available,

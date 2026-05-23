@@ -7,6 +7,7 @@
 """
 
 import os
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -62,6 +63,8 @@ class ChromaVectorService:
         """
         self._client = None
         self._collection = None
+        self._client_lock = threading.RLock()
+        self._collection_lock = threading.RLock()
         self._persist_directory = persist_directory or settings.resolve_path(
             settings.CHROMA_DB_PATH
         )
@@ -70,17 +73,26 @@ class ChromaVectorService:
 
     @property
     def client(self):
-        """Ленивая инициализация клиента ChromaDB."""
+        """Ленивая потокобезопасная инициализация клиента ChromaDB."""
         if not CHROMADB_AVAILABLE:
             logger.warning("ChromaDB не установлен. Векторный поиск недоступен.")
             return None
 
-        if self._client is None:
+        if self._client is not None:
+            return self._client
+
+        with self._client_lock:
+            if self._client is not None:
+                return self._client
+
             try:
                 # Создаем директорию для персистентного хранения
                 os.makedirs(self._persist_directory, exist_ok=True)
 
-                # Инициализируем персистентный клиент
+                # Chroma PersistentClient не любит параллельную инициализацию
+                # в одном процессе. При одновременных /vector/stats запросах
+                # без lock возможны ошибки вида:
+                # 'RustBindingsAPI' object has no attribute 'bindings'.
                 self._client = chromadb.PersistentClient(
                     path=self._persist_directory,
                     settings=ChromaSettings(
@@ -90,6 +102,7 @@ class ChromaVectorService:
                 )
                 logger.info(f"ChromaDB инициализирован: {self._persist_directory}")
             except Exception as e:
+                self._client = None
                 logger.error(f"Ошибка инициализации ChromaDB: {e}")
                 return None
 
@@ -97,19 +110,27 @@ class ChromaVectorService:
 
     @property
     def collection(self):
-        """Получить коллекцию для статей."""
-        if not self.client:
+        """Получить коллекцию для статей потокобезопасно."""
+        client = self.client
+        if client is None:
             return None
 
-        if self._collection is None:
+        if self._collection is not None:
+            return self._collection
+
+        with self._collection_lock:
+            if self._collection is not None:
+                return self._collection
+
             try:
                 # Получаем или создаем коллекцию
-                self._collection = self.client.get_or_create_collection(
+                self._collection = client.get_or_create_collection(
                     name=self.COLLECTION_NAME,
                     metadata={"hnsw:space": "cosine"},  # Косинусное сходство
                 )
                 logger.info(f"Коллекция {self.COLLECTION_NAME} готова")
             except Exception as e:
+                self._collection = None
                 logger.error(f"Ошибка создания коллекции: {e}")
                 return None
 
@@ -472,6 +493,7 @@ class ChromaVectorService:
 
 # Глобальный экземпляр сервиса
 _vector_service: ChromaVectorService | None = None
+_vector_service_lock = threading.RLock()
 
 
 def get_vector_service() -> ChromaVectorService:
@@ -482,6 +504,10 @@ def get_vector_service() -> ChromaVectorService:
         ChromaVectorService: Глобальный экземпляр сервиса.
     """
     global _vector_service
-    if _vector_service is None:
-        _vector_service = ChromaVectorService()
-    return _vector_service
+    if _vector_service is not None:
+        return _vector_service
+
+    with _vector_service_lock:
+        if _vector_service is None:
+            _vector_service = ChromaVectorService()
+        return _vector_service

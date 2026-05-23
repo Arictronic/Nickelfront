@@ -3,6 +3,8 @@
 from .paper import (
     Paper,
     PaperCreate,
+    PaperContentPart,
+    PaperContentPartRegenerateResponse,
     PaperSearchRequest,
     PaperSearchResponse,
     QwenConfigResponse,
@@ -19,12 +21,18 @@ from .paper import (
     QwenSessionListResponse,
 )
 from .task import TaskCreate, TaskOut
+from .system_settings import SystemSettingsResponse, SystemSettingsSectionResponse, SystemSettingsSectionUpdate
 
 __all__ = [
     "TaskCreate",
     "TaskOut",
+    "SystemSettingsResponse",
+    "SystemSettingsSectionResponse",
+    "SystemSettingsSectionUpdate",
     "Paper",
     "PaperCreate",
+    "PaperContentPart",
+    "PaperContentPartRegenerateResponse",
     "PaperSearchRequest",
     "PaperSearchResponse",
     "QwenMessageRequest",

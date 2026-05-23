@@ -4,7 +4,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.task import PatentTask
-from app.tasks.tasks import process_patent
 
 
 async def create_task(db: AsyncSession, task_data: dict) -> PatentTask:
@@ -19,7 +18,10 @@ async def create_task(db: AsyncSession, task_data: dict) -> PatentTask:
     await db.commit()
     await db.refresh(db_task)
 
-    # 2. Отправляем в Celery
+    # 2. Отправляем в Celery. Импорт внутри функции, чтобы обычный backend startup
+    # не подтягивал Celery task-модули и тяжёлые parser/RAG зависимости.
+    from app.tasks.tasks import process_patent
+
     process_patent.delay(db_task.id, task_data["patent_number"], task_data.get("options", {}))
 
     return db_task

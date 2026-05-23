@@ -88,6 +88,14 @@ async def refresh_access_token(
     """Refresh access token using refresh token."""
     refresh_service = RefreshTokenService(db)
     token = await refresh_service.get_valid_token(payload.refresh_token)
+    token_from_grace_window = False
+
+    if not token:
+        token = await refresh_service.get_recently_revoked_token(
+            payload.refresh_token,
+            grace_seconds=settings.REFRESH_TOKEN_REUSE_GRACE_SECONDS,
+        )
+        token_from_grace_window = token is not None
 
     if not token:
         raise HTTPException(
@@ -105,7 +113,14 @@ async def refresh_access_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    await refresh_service.revoke_token(token)
+    if token_from_grace_window:
+        logger.warning(
+            "Refresh token reused within grace window: user_id=%s grace_seconds=%s",
+            token.user_id,
+            settings.REFRESH_TOKEN_REUSE_GRACE_SECONDS,
+        )
+    else:
+        await refresh_service.revoke_token(token)
 
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(

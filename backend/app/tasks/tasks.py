@@ -8,6 +8,7 @@ from sqlalchemy import select
 from app.db.models.task import PatentTask
 from app.db.session import async_session_maker
 
+from .async_runner import run_async
 from .celery_app import celery_app
 
 
@@ -55,8 +56,7 @@ def process_patent(self, task_id: int, patent_number: str, options: dict):
     """Фоновая обработка патента."""
     try:
         # Обновляем статус на processing
-        import asyncio
-        asyncio.run(update_task_status(task_id, "processing"))
+        run_async(update_task_status(task_id, "processing"))
 
         # Имитация долгой работы (парсинг, ML анализ и т.д.)
         time.sleep(10)
@@ -69,15 +69,14 @@ def process_patent(self, task_id: int, patent_number: str, options: dict):
         }
 
         # Обновляем статус на completed
-        asyncio.run(update_task_status(task_id, "completed", result))
+        run_async(update_task_status(task_id, "completed", result))
 
         return result
 
     except Exception as e:
         logger.error(f"Ошибка обработки патента {patent_number}: {e}")
         # Обновляем статус на failed
-        import asyncio
-        asyncio.run(update_task_status(task_id, "failed", {"error": str(e)}))
+        run_async(update_task_status(task_id, "failed", {"error": str(e)}))
         raise
 
 

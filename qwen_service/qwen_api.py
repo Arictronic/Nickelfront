@@ -32,6 +32,22 @@ class QwenInternalStreamError(QwenProviderError):
     """Raised when provider reports internal stream error."""
 
 
+
+def _env_int(name: str, default: int, *, min_value: int | None = None, max_value: int | None = None) -> int:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        value = default
+    else:
+        try:
+            value = int(str(raw).strip())
+        except (TypeError, ValueError):
+            value = default
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
 def _env_float(name: str, default: float, *, min_value: float | None = None, max_value: float | None = None) -> float:
     raw = os.getenv(name)
     if raw is None or str(raw).strip() == "":
@@ -365,24 +381,86 @@ class QwenTransport:
         info = self.get_user_info()
         return bool(info.get("id"))
 
+    def _reset_session_after_transport_error(self) -> None:
+        """Recreate requests.Session after provider closes/reset TCP connection."""
+        try:
+            self.session.close()
+        except Exception:
+            pass
+        self.session = requests.Session()
+        self.session.headers.update(self._get_headers())
+        if self.proxy_config:
+            self._setup_proxy(self.proxy_config)
+
     def create_session(self, model: str = "qwen3.6-plus") -> str | None:
-        """Create new chat session"""
-        payload = {
-            "title": "New Chat",
-            "models": [model],
-            "chat_mode": "normal",
-            "chat_type": "t2t",
-            "timestamp": int(time.time() * 1000),
-            "project_id": "",
-        }
-        resp = self.session.post(self.CHATS_NEW_URL, json=payload, timeout=30)
-        self._raise_for_bad_response(resp, operation="create_session")
-        data = self._extract_data(resp.json())
-        session_id = data.get("id") if isinstance(data, dict) else None
-        if session_id:
-            self.update_referer(session_id)
-            return session_id
-        return None
+        """Create new chat session with retry for transient provider TCP resets.
+
+        Parallel chat tests create several sessions at once. chat.qwen.ai can
+        sporadically close one of those /chats/new connections with WinError
+        10054 / ConnectionResetError. This is not a local qwen_service crash;
+        retrying session creation on a fresh HTTP session is safe because no
+        chat session id was returned yet.
+        """
+        attempts = _env_int("QWEN_CREATE_SESSION_ATTEMPTS", 3, min_value=1, max_value=10)
+        retry_delay = _env_float("QWEN_CREATE_SESSION_RETRY_DELAY_SEC", 0.8, min_value=0.0, max_value=30.0)
+        last_error: Exception | None = None
+
+        for attempt in range(1, attempts + 1):
+            payload = {
+                "title": "New Chat",
+                "models": [model],
+                "chat_mode": "normal",
+                "chat_type": "t2t",
+                "timestamp": int(time.time() * 1000),
+                "project_id": "",
+            }
+
+            try:
+                resp = self.session.post(
+                    self.CHATS_NEW_URL,
+                    json=payload,
+                    timeout=self.connect_timeout,
+                )
+                self._raise_for_bad_response(resp, operation="create_session")
+                data = self._extract_data(resp.json())
+                session_id = data.get("id") if isinstance(data, dict) else None
+                if session_id:
+                    self.update_referer(session_id)
+                    return session_id
+                last_error = QwenProviderError("Qwen provider did not return session id")
+
+            except requests.exceptions.RequestException as exc:
+                last_error = exc
+                self._log(
+                    f"Qwen create_session attempt {attempt}/{attempts} failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                self._reset_session_after_transport_error()
+
+            except ValueError as exc:
+                # Invalid/non-JSON provider response. Retry once/twice; provider may
+                # occasionally return a transient HTML error page behind HTTP 200.
+                last_error = exc
+                self._log(
+                    f"Qwen create_session attempt {attempt}/{attempts} returned invalid JSON: {exc}"
+                )
+                self._reset_session_after_transport_error()
+
+            except QwenProviderError as exc:
+                last_error = exc
+                msg = str(exc).lower()
+                if "authentication failed" in msg or "qwen_token" in msg:
+                    raise
+                self._log(
+                    f"Qwen create_session attempt {attempt}/{attempts} provider error: {exc}"
+                )
+
+            if attempt < attempts:
+                time.sleep(retry_delay * attempt)
+
+        raise QwenProviderError(
+            f"Qwen create_session failed after {attempts} attempts: {last_error}"
+        )
 
     def delete_session(self, session_id: str) -> bool:
         """Delete chat session"""

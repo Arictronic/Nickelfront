@@ -3,7 +3,7 @@ import { apiClient } from "../api/client";
 import { reprocessAllPapers, stopCeleryQueues } from "../api/papers";
 
 type CeleryStatus = {
-  status: "online" | "offline" | "unknown";
+  status: "online" | "offline" | "unknown" | "degraded" | string;
   workers: {
     total: number;
     active: number;
@@ -47,7 +47,7 @@ type TaskInfo = {
   succeeded?: string;
   failed?: string;
   retries: number;
-  worker: Record<string, any>;
+  worker: Record<string, any> | string | null;
 };
 
 type ScheduledTask = {
@@ -67,6 +67,90 @@ const STATUS_TIMEOUT = 15000;
 const WORKERS_TIMEOUT = 20000;
 const LIST_TIMEOUT = 12000;
 const SCHEDULE_TIMEOUT = 8000;
+
+const EXPECTED_QUEUES = ["celery", "content", "qwen"] as const;
+
+const PANEL_LABELS: Record<PanelKey, string> = {
+  status: "статус кластера",
+  workers: "воркеры",
+  queues: "очереди",
+  tasks: "задачи",
+  scheduled: "периодические задачи",
+};
+
+const QUEUE_LABELS: Record<string, string> = {
+  celery: "celery (парсинг/служебные)",
+  content: "content (PDF/текст/эмбеддинги)",
+  qwen: "qwen (Qwen AI)",
+};
+
+const WORKER_STATUS_LABELS: Record<string, string> = {
+  online: "Онлайн",
+  busy: "Занят",
+  offline: "Офлайн",
+  unknown: "Неизвестно",
+};
+
+const TASK_STATE_LABELS: Record<string, string> = {
+  success: "Успешно",
+  failure: "Ошибка",
+  started: "В работе",
+  running: "В работе",
+  pending: "Ожидает",
+  received: "Получена",
+  retry: "Повтор",
+  revoked: "Отменена",
+  unknown: "Неизвестно",
+};
+
+function normalizeKey(value: unknown): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+function formatQueueName(name: string | undefined | null): string {
+  const key = normalizeKey(name);
+  return QUEUE_LABELS[key] || String(name || "—");
+}
+
+function formatWorkerStatus(status: string | undefined | null): string {
+  const key = normalizeKey(status);
+  return WORKER_STATUS_LABELS[key] || String(status || "Неизвестно");
+}
+
+function formatTaskState(state: string | undefined | null): string {
+  const key = normalizeKey(state);
+  return TASK_STATE_LABELS[key] || String(state || "Неизвестно");
+}
+
+function getTaskWorkerName(worker: TaskInfo["worker"]): string {
+  if (!worker) return "—";
+  if (typeof worker === "string") return worker;
+  return worker.hostname || worker.name || worker.worker || "—";
+}
+
+function getPoolConcurrency(pool: WorkerInfo["pool"]): string | number {
+  if (!pool || typeof pool !== "object") return "N/A";
+  return (
+    (pool as any).max_concurrency ||
+    (pool as any)["max-concurrency"] ||
+    (pool as any).maxConcurrency ||
+    "N/A"
+  );
+}
+
+function taskStatsFromList(tasks: TaskInfo[]) {
+  return tasks.reduce(
+    (acc, task) => {
+      const state = normalizeKey(task.state);
+      acc.total += 1;
+      if (["started", "running", "active"].includes(state)) acc.active += 1;
+      if (state === "success") acc.successful += 1;
+      if (state === "failure") acc.failed += 1;
+      return acc;
+    },
+    { total: 0, active: 0, successful: 0, failed: 0 }
+  );
+}
 
 const initialLoading: PanelState = {
   status: true,
@@ -207,7 +291,7 @@ export default function CeleryMonitoring() {
   const stopQueues = async () => {
     if (
       !window.confirm(
-        "Остановить ВСЕ очереди Celery? Будут затронуты обычная celery-очередь и qwen-очередь. Активные/ожидающие задачи будут отменены, а сообщения в очередях очищены."
+        "Остановить ВСЕ очереди Celery? Будут затронуты очереди celery, content и qwen. Активные/ожидающие задачи будут отменены, а сообщения в очередях очищены."
       )
     ) {
       return;
@@ -263,25 +347,48 @@ export default function CeleryMonitoring() {
   }, [workers, status]);
 
   const taskStats = useMemo(() => {
-    if (status?.tasks) {
-      return status.tasks;
-    }
+    const recentStats = taskStatsFromList(tasks);
+    const statusStats = status?.tasks;
 
-    const byState = tasks.reduce(
-      (acc, task) => {
-        const s = (task.state || "").toLowerCase();
-        if (s === "started" || s === "running") acc.active += 1;
-        if (s === "success") acc.successful += 1;
-        if (s === "failure") acc.failed += 1;
-        return acc;
-      },
-      { total: tasks.length, active: 0, successful: 0, failed: 0 }
-    );
-
-    return byState;
+    return {
+      total: Math.max(statusStats?.total ?? 0, recentStats.total),
+      active: Math.max(statusStats?.active ?? 0, recentStats.active),
+      successful: Math.max(statusStats?.successful ?? 0, recentStats.successful),
+      failed: Math.max(statusStats?.failed ?? 0, recentStats.failed),
+    };
   }, [status, tasks]);
 
-  const clusterStatus = status?.status ?? (mergedWorkers.total > 0 ? "online" : "unknown");
+  const knownQueueNames = useMemo(() => {
+    const names = new Set<string>();
+    queues.forEach((queue) => {
+      const key = normalizeKey(queue.name);
+      if (key) names.add(key);
+    });
+    workers.forEach((worker) => {
+      (worker.queues || []).forEach((queueName) => {
+        const key = normalizeKey(queueName);
+        if (key) names.add(key);
+      });
+    });
+    return names;
+  }, [queues, workers]);
+
+  const canCheckExpectedQueues = !loading.workers && !loading.queues && (workers.length > 0 || queues.length > 0);
+  const missingExpectedQueues = canCheckExpectedQueues
+    ? EXPECTED_QUEUES.filter((queueName) => !knownQueueNames.has(queueName))
+    : [];
+  const hasMissingCoreQueues = missingExpectedQueues.length > 0;
+
+  const rawClusterStatus = status?.status ?? (mergedWorkers.total > 0 ? "online" : "unknown");
+  const clusterStatus = hasMissingCoreQueues && mergedWorkers.total > 0 ? "degraded" : rawClusterStatus;
+  const clusterStatusLabel =
+    clusterStatus === "degraded"
+      ? "НЕПОЛНЫЙ"
+      : clusterStatus === "online"
+        ? "ONLINE"
+        : clusterStatus === "offline"
+          ? "OFFLINE"
+          : "UNKNOWN";
   const flowerAvailable =
     status?.flower_available ?? (mergedWorkers.total > 0 || workers.length > 0 ? true : false);
 
@@ -305,6 +412,8 @@ export default function CeleryMonitoring() {
     switch (current.toLowerCase()) {
       case "online":
         return "#22c55e";
+      case "degraded":
+        return "#f59e0b";
       case "offline":
         return "#ef4444";
       default:
@@ -364,6 +473,18 @@ export default function CeleryMonitoring() {
         </div>
       )}
 
+      {hasMissingCoreQueues && (
+        <div className="panel" style={{ borderColor: "#f59e0b", background: "color-mix(in srgb, #f59e0b 8%, var(--surface))" }}>
+          <h3 style={{ color: "#92400e" }}>Неполный набор Celery-очередей</h3>
+          <p className="muted">
+            Не видны обязательные очереди: {missingExpectedQueues.map(formatQueueName).join(", ")}.
+            {missingExpectedQueues.includes("celery")
+              ? " Парсинг и служебные задачи не будут выполняться, пока regular worker не запущен."
+              : " Проверь соответствующий worker."}
+          </p>
+        </div>
+      )}
+
       <div className="kpi-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
         <article className="panel kpi-card">
           <h3>Статус кластера</h3>
@@ -378,7 +499,7 @@ export default function CeleryMonitoring() {
                 marginRight: 8,
               }}
             />
-            {loading.status && !status ? "Загрузка..." : clusterStatus.toUpperCase()}
+            {loading.status && !status ? "Загрузка..." : clusterStatusLabel}
           </p>
         </article>
 
@@ -438,20 +559,20 @@ export default function CeleryMonitoring() {
             <tbody>
               {workers.map((worker, idx) => (
                 <tr key={idx}>
-                  <td style={{ fontFamily: "monospace", fontSize: 13 }}>{worker.name}</td>
+                  <td style={{ fontFamily: "monospace", fontSize: 13, wordBreak: "break-all" }}>{worker.name}</td>
                   <td>
                     <span
                       className={`status ${
                         ["online", "busy"].includes((worker.status || "").toLowerCase()) ? "active" : ""
                       }`}
                     >
-                      {worker.status || "Unknown"}
+                      {formatWorkerStatus(worker.status)}
                     </span>
                   </td>
                   <td>{worker.active_tasks}</td>
                   <td>{worker.processed_tasks}</td>
-                  <td>{worker.queues?.join(", ") || "celery"}</td>
-                  <td>{(worker.pool as any)?.max_concurrency || (worker.pool as any)?.["max-concurrency"] || "N/A"}</td>
+                  <td>{worker.queues?.length ? worker.queues.map(formatQueueName).join(", ") : "—"}</td>
+                  <td>{getPoolConcurrency(worker.pool)}</td>
                 </tr>
               ))}
             </tbody>
@@ -478,7 +599,7 @@ export default function CeleryMonitoring() {
             <tbody>
               {queues.map((queue, idx) => (
                 <tr key={idx}>
-                  <td style={{ fontFamily: "monospace", fontSize: 13 }}>{queue.name}</td>
+                  <td style={{ fontFamily: "monospace", fontSize: 13 }}>{formatQueueName(queue.name)}</td>
                   <td>{queue.messages}</td>
                   <td>{queue.consumers}</td>
                   <td>{queue.unacked}</td>
@@ -558,10 +679,10 @@ export default function CeleryMonitoring() {
                         fontSize: 12,
                       }}
                     >
-                      {task.state}
+                      {formatTaskState(task.state)}
                     </span>
                   </td>
-                  <td>{task.worker?.hostname || "N/A"}</td>
+                  <td>{getTaskWorkerName(task.worker)}</td>
                   <td style={{ fontSize: 12 }}>{task.started ? new Date(task.started).toLocaleTimeString() : "-"}</td>
                 </tr>
               ))}
@@ -574,7 +695,14 @@ export default function CeleryMonitoring() {
 
       {Object.keys(errors).length > 0 && (
         <div className="panel">
-          <p className="error">Часть данных не обновилась: {Object.keys(errors).join(", ")}</p>
+          <p className="error" style={{ marginBottom: 8 }}>Часть данных не обновилась:</p>
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {Object.entries(errors).map(([panel, message]) => (
+              <li key={panel} className="error">
+                <strong>{PANEL_LABELS[panel as PanelKey] || panel}</strong>: {message}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 

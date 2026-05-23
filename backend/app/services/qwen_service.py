@@ -126,19 +126,60 @@ class QwenService:
             f"model={self.model}, thinking={self.thinking_enabled}, search={self.search_enabled}"
         )
 
+    def health_status(self) -> dict[str, Any]:
+        """Проверить доступность standalone qwen_service с понятной причиной отказа.
+
+        Backend использует это перед отправкой сообщений, чтобы отличать:
+        - qwen_service не запущен / не отвечает;
+        - qwen_service запущен, но в нём не загружен QWEN_TOKEN;
+        - qwen_service вернул статус error/unavailable.
+        """
+        health, error_type = self._request_with_error("GET", "/health", timeout=3.0)
+
+        if not health:
+            reason = "Qwen Service не отвечает"
+            if error_type == "timeout":
+                reason = "Qwen Service не ответил на /health за 3 секунды"
+            elif error_type == "http":
+                reason = "HTTP-ошибка при обращении к Qwen Service /health"
+            return {
+                "status": "unavailable",
+                "model": self.model,
+                "available": False,
+                "base_url": self.base_url,
+                "reason": reason,
+                "error_type": error_type or "unknown",
+            }
+
+        if "available" in health:
+            available = bool(health.get("available"))
+        else:
+            available = str(health.get("status", "")).lower() == "ok"
+
+        reason: str | None = None
+        if not available:
+            if health.get("has_token") is False:
+                reason = "Qwen Service запущен, но QWEN_TOKEN в нём не загружен"
+            else:
+                reason = (
+                    "Qwen Service вернул недоступный статус: "
+                    f"status={health.get('status')!r}, available={health.get('available')!r}"
+                )
+
+        return {
+            "status": "ok" if available else "unavailable",
+            "model": health.get("model", self.model),
+            "available": available,
+            "base_url": self.base_url,
+            "reason": reason,
+            "error_type": None,
+            "has_token": health.get("has_token"),
+        }
+
     @property
     def is_available(self) -> bool:
-        """Проверяет доступность standalone qwen_service.
-
-        Важно: HTTP 200 от /health ещё не значит, что Qwen реально готов.
-        Standalone service возвращает available=false, если нет QWEN_TOKEN или клиент не инициализирован.
-        """
-        health = self._request("GET", "/health", timeout=3.0)
-        if not health:
-            return False
-        if "available" in health:
-            return bool(health.get("available"))
-        return str(health.get("status", "")).lower() == "ok"
+        """Проверяет доступность standalone qwen_service."""
+        return bool(self.health_status().get("available"))
 
     @property
     def session_id(self) -> str | None:

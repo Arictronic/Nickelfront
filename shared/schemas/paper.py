@@ -265,6 +265,43 @@ class Paper(PaperBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+
+
+class PaperContentPart(BaseModel):
+    """Сырой PDF-текст и Qwen Markdown для одной части статьи."""
+
+    id: int
+    paper_id: int
+    part_index: int
+    page_start: int
+    page_end: int
+    raw_text: str | None = None
+    markdown_text: str | None = None
+    status: str = "raw_extracted"
+    error: str | None = None
+    source: str = "pdf"
+    qwen_model: str | None = None
+    qwen_prompt_version: str | None = None
+    regeneration_count: int = 0
+    raw_text_chars: int = 0
+    markdown_text_chars: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaperContentPartRegenerateResponse(BaseModel):
+    """Ответ на постановку перегенерации одной markdown-части."""
+
+    paper_id: int
+    part_id: int
+    task_id: str
+    status: str = "queued"
+    page_start: int
+    page_end: int
+
+
 class PaperSearchRequest(BaseModel):
     """Запрос на поиск статей."""
 
@@ -481,3 +518,7 @@ class QwenHealthResponse(BaseModel):
     status: str = Field(..., description="Статус")
     model: str = Field(..., description="Модель")
     available: bool = Field(..., description="Доступен")
+    base_url: str | None = Field(None, description="URL standalone Qwen Service")
+    reason: str | None = Field(None, description="Причина недоступности")
+    error_type: str | None = Field(None, description="Тип ошибки проверки здоровья")
+    has_token: bool | None = Field(None, description="Загружен ли QWEN_TOKEN в qwen_service")

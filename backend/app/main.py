@@ -25,6 +25,9 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from app.api.v1.endpoints import (
+    admin_settings as admin_settings_router,
+)
+from app.api.v1.endpoints import (
     analytics as analytics_router,
 )
 from app.api.v1.endpoints import (
@@ -194,6 +197,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 
 # Подключение роутеров
 app.include_router(tasks_router.router, prefix="/api/v1")
+app.include_router(admin_settings_router.router, prefix="/api/v1")
 app.include_router(parse_router.router, prefix="/api/v1")
 app.include_router(auth_router.router, prefix="/api/v1")
 app.include_router(vector_router.router, prefix="/api/v1")

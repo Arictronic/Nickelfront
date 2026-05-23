@@ -15,13 +15,28 @@ from app.services.alloy_analysis_service import (
     save_alloy_analysis_prompt,
 )
 from app.services.task_service import create_task, get_task_by_id
-from app.tasks.alloy_analysis_tasks import analyze_papers_alloys_task, extract_alloys_task
-from app.tasks.celery_app import celery_app
-from app.tasks.tasks import get_celery_task_status
 from shared.schemas.auth import UserResponse
 from shared.schemas.task import CeleryTaskStatus, TaskCreate, TaskOut
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
+
+
+def _get_celery_app():
+    from app.tasks.celery_app import celery_app
+
+    return celery_app
+
+
+def _get_celery_task_status_func():
+    from app.tasks.tasks import get_celery_task_status
+
+    return get_celery_task_status
+
+
+def _get_alloy_tasks():
+    from app.tasks.alloy_analysis_tasks import analyze_papers_alloys_task, extract_alloys_task
+
+    return analyze_papers_alloys_task, extract_alloys_task
 
 
 class AlloyAnalysisRequest(BaseModel):
@@ -57,6 +72,7 @@ def _extract_inspected_task_id(item: dict) -> str | None:
 
 
 def _inspect_revoke_candidates() -> list[str]:
+    celery_app = _get_celery_app()
     inspector = celery_app.control.inspect(timeout=2.0)
     inspected_groups = [
         inspector.active() or {},
@@ -135,6 +151,7 @@ async def get_celery_task_status_endpoint(
     Возвращает текущий статус задачи (PENDING, STARTED, RETRY, FAILURE, SUCCESS)
     и результат выполнения если задача завершена.
     """
+    get_celery_task_status = _get_celery_task_status_func()
     task_info = await asyncio.to_thread(get_celery_task_status, task_id)
 
     if task_info is None:
@@ -187,6 +204,7 @@ async def create_alloy_analysis_task(
             detail="Text is too long for Qwen: maximum 50000 characters including the prompt",
         )
 
+    _, extract_alloys_task = _get_alloy_tasks()
     task = extract_alloys_task.delay(request.document_id, request.text)
     return {
         "task_id": task.id,
@@ -200,6 +218,7 @@ async def create_alloy_batch_analysis_task(
     request: AlloyBatchAnalysisRequest,
     _current_user: UserResponse = Depends(get_current_user),
 ):
+    analyze_papers_alloys_task, _ = _get_alloy_tasks()
     task = analyze_papers_alloys_task.delay(
         request.id_spec,
         request.sources,
@@ -257,8 +276,10 @@ async def stop_celery_queues(
 
         for task_id in task_ids:
             await asyncio.to_thread(set_cancel_flag, task_id)
+            celery_app = _get_celery_app()
             await asyncio.to_thread(celery_app.control.revoke, task_id, terminate=terminate)
 
+        celery_app = _get_celery_app()
         purged = await asyncio.to_thread(celery_app.control.purge)
 
         return {
@@ -285,6 +306,7 @@ async def revoke_celery_task(
     Примечание: на Windows с pool=solo завершение запущенной задачи
     через terminate может остановить весь воркер, поэтому по умолчанию terminate=False.
     """
+    celery_app = _get_celery_app()
     current_state = await asyncio.to_thread(lambda: AsyncResult(task_id, app=celery_app).state)
 
     if current_state in {"SUCCESS", "FAILURE", "REVOKED"}:

@@ -15,9 +15,10 @@ from app.core.config import settings
 from app.db.session import engine
 
 # Tables that are project structure / identity, not runtime data.
-# users is preserved by default so the local admin account keeps working after cleanup.
+# users and refresh_tokens are preserved by default so the local admin account and
+# current browser session keep working after runtime cleanup.
 ALWAYS_PRESERVE_TABLES = {"alembic_version"}
-DEFAULT_PRESERVE_TABLES = ALWAYS_PRESERVE_TABLES | {"users"}
+DEFAULT_PRESERVE_TABLES = ALWAYS_PRESERVE_TABLES | {"users", "refresh_tokens"}
 
 # Runtime files/dirs that should be reset to make the project look like a fresh start.
 RUNTIME_DIRS_TO_CLEAR = (
@@ -368,8 +369,8 @@ def parse_args() -> argparse.Namespace:
         "--include-users",
         action="store_true",
         help=(
-            "Также очистить таблицу users. По умолчанию пользователи сохраняются, "
-            "чтобы локальный admin-логин продолжал работать. Таблица миграций Alembic всегда сохраняется."
+            "Также очистить таблицы users и refresh_tokens. По умолчанию пользователи "
+            "и текущие browser-сессии сохраняются. Таблица миграций Alembic всегда сохраняется."
         ),
     )
     return parser.parse_args()
@@ -380,11 +381,11 @@ def main() -> int:
 
     if not args.yes:
         print("Будут УДАЛЕНЫ runtime-данные:")
-        print("1. по умолчанию все таблицы БД, кроме `users` и `alembic_version`")
-        print("2. refresh-токены/сессии, истории задач, статьи, patent_tasks, статистика парсеров")
+        print("1. по умолчанию все таблицы БД, кроме `users`, `refresh_tokens` и `alembic_version`")
+        print("2. истории задач, статьи, patent_tasks, статистика парсеров")
         print("3. Chroma/vector/RAG-хранилища, загруженные RAG-файлы, PDF, результаты анализа")
         print("4. логи, очереди Celery/Redis, runtime-данные парсеров и временные кэши")
-        print("\nПользователи по умолчанию сохраняются. Используй --include-users только если точно хочешь удалить и их.")
+        print("\nПользователи и refresh-токены по умолчанию сохраняются. Используй --include-users только если точно хочешь удалить и их.")
         confirm = input("Введите YES для продолжения: ").strip()
         if confirm != "YES":
             print("Отменено.")

@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.deps import require_admin_user
 from app.core.config import settings
-from app.tasks.celery_app import celery_app
 
 router = APIRouter(prefix="/monitoring", tags=["monitoring"], dependencies=[Depends(require_admin_user)])
 
@@ -21,6 +20,12 @@ FLOWER_HTTP_OK_FOR_REACHABILITY = {200, 301, 302, 307, 308, 401, 403, 404}
 WORKER_CACHE_TTL_SECONDS = 180
 WORKER_BUSY_AFTER_SECONDS = 15
 _WORKER_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _get_celery_app():
+    from app.tasks.celery_app import celery_app
+
+    return celery_app
 
 
 def _flower_url(path: str) -> str:
@@ -59,6 +64,7 @@ async def _flower_get_json(
 
 def _inspect_workers_fallback() -> list[str]:
     try:
+        celery_app = _get_celery_app()
         inspector = celery_app.control.inspect(timeout=2.0)
         ping = inspector.ping() or {}
         return list(ping.keys())
@@ -68,11 +74,31 @@ def _inspect_workers_fallback() -> list[str]:
 
 def _inspect_active_tasks_fallback() -> int:
     try:
+        celery_app = _get_celery_app()
         inspector = celery_app.control.inspect(timeout=2.0)
         active = inspector.active() or {}
         return sum(len(v or []) for v in active.values())
     except Exception:
         return 0
+
+
+def _inspect_active_queues_fallback() -> dict[str, list[str]]:
+    try:
+        celery_app = _get_celery_app()
+        inspector = celery_app.control.inspect(timeout=2.0)
+        active_queues = inspector.active_queues() or {}
+        result: dict[str, list[str]] = {}
+        for worker_name, queues in active_queues.items():
+            names: list[str] = []
+            for queue in queues or []:
+                if isinstance(queue, dict):
+                    queue_name = queue.get("name")
+                    if queue_name:
+                        names.append(str(queue_name))
+            result[str(worker_name)] = names
+        return result
+    except Exception:
+        return {}
 
 
 async def _inspect_workers_count_quick() -> int:
@@ -208,25 +234,175 @@ def _normalize_worker(name: str, info: Any) -> dict[str, Any]:
     }
 
 
+def _uniq_strings(values: list[Any] | tuple[Any, ...] | set[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _merge_worker_records(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[str, Any]:
+    """Merge Flower and Celery inspect worker payloads without losing queues.
+
+    Flower can temporarily miss a worker while Celery inspect still sees it, and
+    Flower's /api/workers payload can omit active_queues. The UI needs a stable
+    view, so we merge by worker name and keep the richest values.
+    """
+    merged = dict(primary)
+
+    primary_status = str(primary.get("status") or "").lower()
+    secondary_status = str(secondary.get("status") or "").lower()
+    if primary_status not in {"online", "busy"} and secondary_status in {"online", "busy"}:
+        merged["status"] = secondary.get("status")
+
+    merged["active_tasks"] = max(
+        int(primary.get("active_tasks") or 0),
+        int(secondary.get("active_tasks") or 0),
+    )
+    merged["processed_tasks"] = max(
+        int(primary.get("processed_tasks") or 0),
+        int(secondary.get("processed_tasks") or 0),
+    )
+
+    merged["queues"] = _uniq_strings(
+        list(primary.get("queues") or []) + list(secondary.get("queues") or [])
+    )
+
+    primary_pool = primary.get("pool") if isinstance(primary.get("pool"), dict) else {}
+    secondary_pool = secondary.get("pool") if isinstance(secondary.get("pool"), dict) else {}
+    merged["pool"] = primary_pool or secondary_pool
+
+    if not merged.get("timestamp") and secondary.get("timestamp"):
+        merged["timestamp"] = secondary.get("timestamp")
+
+    return merged
+
+
+def _merge_worker_lists(*worker_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for workers in worker_lists:
+        for worker in workers or []:
+            if not isinstance(worker, dict):
+                continue
+            name = str(worker.get("name") or "").strip()
+            if not name:
+                continue
+            if name in merged:
+                merged[name] = _merge_worker_records(merged[name], worker)
+            else:
+                merged[name] = dict(worker)
+    return sorted(merged.values(), key=lambda item: str(item.get("name") or ""))
+
+
+def _queue_consumer_counts_from_active_queues(active_queues: dict[str, list[str]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for queue_names in active_queues.values():
+        for queue_name in queue_names or []:
+            name = str(queue_name or "").strip()
+            if not name:
+                continue
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _normalize_queue_record(name: str, info: Any) -> dict[str, Any]:
+    payload = info if isinstance(info, dict) else {}
+    return {
+        "name": name,
+        "messages": int(payload.get("messages") or 0),
+        "consumers": int(payload.get("consumers") or 0),
+        "unacked": int(payload.get("unacked") or 0),
+    }
+
+
+def _merge_queue_lists(*queue_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for queues in queue_lists:
+        for queue in queues or []:
+            if not isinstance(queue, dict):
+                continue
+            name = str(queue.get("name") or "").strip()
+            if not name:
+                continue
+            if name not in merged:
+                merged[name] = {
+                    "name": name,
+                    "messages": int(queue.get("messages") or 0),
+                    "consumers": int(queue.get("consumers") or 0),
+                    "unacked": int(queue.get("unacked") or 0),
+                }
+                continue
+            merged[name]["messages"] = max(
+                int(merged[name].get("messages") or 0),
+                int(queue.get("messages") or 0),
+            )
+            merged[name]["consumers"] = max(
+                int(merged[name].get("consumers") or 0),
+                int(queue.get("consumers") or 0),
+            )
+            merged[name]["unacked"] = max(
+                int(merged[name].get("unacked") or 0),
+                int(queue.get("unacked") or 0),
+            )
+    return sorted(merged.values(), key=lambda item: str(item.get("name") or ""))
+
+
+def _queue_payloads_from_inspect(active_queues: dict[str, list[str]]) -> list[dict[str, Any]]:
+    return [
+        {"name": name, "messages": 0, "consumers": consumers, "unacked": 0}
+        for name, consumers in sorted(_queue_consumer_counts_from_active_queues(active_queues).items())
+    ]
+
+
+def _task_state_counts(tasks_data: Any) -> dict[str, int]:
+    counts = {"total": 0, "active": 0, "successful": 0, "failed": 0}
+    if not isinstance(tasks_data, dict):
+        return counts
+
+    counts["total"] = len(tasks_data)
+    for info in tasks_data.values():
+        if not isinstance(info, dict):
+            continue
+        state = str(info.get("state") or "").lower()
+        if state in {"started", "running", "active"}:
+            counts["active"] += 1
+        elif state == "success":
+            counts["successful"] += 1
+        elif state == "failure":
+            counts["failed"] += 1
+    return counts
+
+
 def _inspect_workers_details_fallback() -> list[dict]:
     try:
+        celery_app = _get_celery_app()
         inspector = celery_app.control.inspect(timeout=2.0)
         ping = inspector.ping() or {}
         active = inspector.active() or {}
         stats = inspector.stats() or {}
+        active_queues = inspector.active_queues() or {}
 
         workers = []
         for name in ping.keys():
             worker_stats = stats.get(name, {}) if isinstance(stats, dict) else {}
             total_map = (worker_stats.get("total") or {}) if isinstance(worker_stats, dict) else {}
             processed_tasks = sum(total_map.values()) if isinstance(total_map, dict) else 0
+            queues = []
+            for queue in active_queues.get(name, []) or []:
+                if isinstance(queue, dict) and queue.get("name"):
+                    queues.append(str(queue.get("name")))
             workers.append(
                 {
                     "name": name,
                     "status": "online",
                     "active_tasks": len(active.get(name, []) or []),
                     "processed_tasks": processed_tasks,
-                    "queues": ["celery"],
+                    "queues": queues,
                     "pool": worker_stats.get("pool", {}) if isinstance(worker_stats, dict) else {},
                     "timestamp": None,
                 }
@@ -238,6 +414,7 @@ def _inspect_workers_details_fallback() -> list[dict]:
 
 def _inspect_tasks_details_fallback(limit: int = 100, state: str | None = None) -> list[dict]:
     try:
+        celery_app = _get_celery_app()
         inspector = celery_app.control.inspect(timeout=2.0)
         active = inspector.active() or {}
         reserved = inspector.reserved() or {}
@@ -290,51 +467,37 @@ async def get_celery_status():
     """
     try:
         async with httpx.AsyncClient(timeout=FLOWER_TIMEOUT, follow_redirects=False, trust_env=False) as client:
-            probe_ok, workers_result = await asyncio.gather(
+            probe_ok, workers_result, tasks_result = await asyncio.gather(
                 _flower_probe(client),
                 _flower_get_json(client, "/api/workers", params={"refresh": 1}),
+                _flower_get_json(client, "/api/tasks", params={"limit": 100}),
             )
 
         workers_data, workers_reachable = workers_result
-        tasks_data, tasks_reachable = {}, False
+        tasks_data, tasks_reachable = tasks_result
         workers_data = workers_data if isinstance(workers_data, dict) else {}
         tasks_data = tasks_data if isinstance(tasks_data, dict) else {}
         flower_reachable = bool(probe_ok or workers_reachable or tasks_reachable)
 
-        workers_count = len(workers_data) if isinstance(workers_data, dict) else 0
-        active_workers = sum(1 for w in _safe_dict_values(workers_data) if _is_worker_active(w))
+        flower_workers = [
+            _normalize_worker(name, info)
+            for name, info in workers_data.items()
+        ]
+        inspect_workers = await asyncio.to_thread(_inspect_workers_details_fallback)
+        workers = _merge_worker_lists(flower_workers, inspect_workers, _get_cached_workers())
+        if workers:
+            _cache_workers(workers)
 
-        if workers_count == 0:
-            workers_payload = await get_workers_info()
-            fallback_workers = workers_payload.get("workers", [])
-            workers_count = int(workers_payload.get("total", 0))
-            active_workers = sum(
-                1
-                for worker in fallback_workers
-                if isinstance(worker, dict)
-                and str(worker.get("status", "")).lower() in {"online", "busy"}
-            )
-            if active_workers == 0 and workers_count > 0:
-                active_workers = workers_count
+        workers_count = len(workers)
+        active_workers = sum(
+            1
+            for worker in workers
+            if str(worker.get("status", "")).lower() in {"online", "busy"}
+        )
 
-        total_tasks = len(tasks_data) if isinstance(tasks_data, dict) else 0
-        active_tasks = sum(
-            1
-            for t in _safe_dict_values(tasks_data)
-            if isinstance(t, dict) and str(t.get("state", "")).lower() == "started"
-        )
-        if active_tasks == 0:
-            active_tasks = await _inspect_active_tasks_quick()
-        successful_tasks = sum(
-            1
-            for t in _safe_dict_values(tasks_data)
-            if isinstance(t, dict) and str(t.get("state", "")).lower() == "success"
-        )
-        failed_tasks = sum(
-            1
-            for t in _safe_dict_values(tasks_data)
-            if isinstance(t, dict) and str(t.get("state", "")).lower() == "failure"
-        )
+        task_counts = _task_state_counts(tasks_data)
+        inspect_active_tasks = await _inspect_active_tasks_quick()
+        active_tasks = max(task_counts["active"], inspect_active_tasks)
 
         return {
             "status": "online" if workers_count > 0 else "offline",
@@ -343,10 +506,10 @@ async def get_celery_status():
                 "active": active_workers,
             },
             "tasks": {
-                "total": total_tasks,
+                "total": task_counts["total"],
                 "active": active_tasks,
-                "successful": successful_tasks,
-                "failed": failed_tasks,
+                "successful": task_counts["successful"],
+                "failed": task_counts["failed"],
             },
             "flower_available": flower_reachable,
             "flower_url": FLOWER_HOST,
@@ -354,6 +517,32 @@ async def get_celery_status():
         }
 
     except Exception as e:
+        workers = await asyncio.to_thread(_inspect_workers_details_fallback)
+        if workers:
+            _cache_workers(workers)
+            active_tasks = await _inspect_active_tasks_quick()
+            return {
+                "status": "online",
+                "workers": {
+                    "total": len(workers),
+                    "active": sum(
+                        1
+                        for worker in workers
+                        if str(worker.get("status", "")).lower() in {"online", "busy"}
+                    ),
+                },
+                "tasks": {
+                    "total": 0,
+                    "active": active_tasks,
+                    "successful": 0,
+                    "failed": 0,
+                },
+                "flower_available": False,
+                "flower_url": FLOWER_HOST,
+                "warning": str(e),
+                "generated_at": datetime.now().isoformat(),
+            }
+
         return {
             "status": "offline",
             "workers": {
@@ -382,35 +571,31 @@ async def get_workers_info():
         Список воркеров с деталями
     """
     try:
+        flower_workers: list[dict[str, Any]] = []
         async with httpx.AsyncClient(timeout=FLOWER_TIMEOUT, follow_redirects=False, trust_env=False) as client:
             workers_data, _ = await _flower_get_json(client, "/api/workers", params={"refresh": 1})
-            workers_data = workers_data if isinstance(workers_data, dict) else {}
+            if isinstance(workers_data, dict):
+                flower_workers = [
+                    _normalize_worker(name, info)
+                    for name, info in workers_data.items()
+                ]
 
-            # Форматируем ответ
-            workers = []
-            for name, info in (workers_data.items() if isinstance(workers_data, dict) else {}):
-                workers.append(_normalize_worker(name, info))
+        inspect_workers = await asyncio.to_thread(_inspect_workers_details_fallback)
+        workers = _merge_worker_lists(flower_workers, inspect_workers, _get_cached_workers())
+        if workers:
+            _cache_workers(workers)
 
-            if len(workers) == 0:
-                workers = await asyncio.to_thread(_inspect_workers_details_fallback)
-            else:
-                _cache_workers(workers)
-
-            workers = _merge_with_cached_workers(workers)
-            if workers:
-                _cache_workers(workers)
-
-            return {
-                "workers": workers,
-                "total": len(workers),
-                "generated_at": datetime.now().isoformat(),
-            }
+        return {
+            "workers": workers,
+            "total": len(workers),
+            "generated_at": datetime.now().isoformat(),
+        }
 
     except httpx.RequestError:
         workers = await asyncio.to_thread(_inspect_workers_details_fallback)
+        workers = _merge_worker_lists(workers, _get_cached_workers())
         if workers:
             _cache_workers(workers)
-        workers = _merge_with_cached_workers(workers)
         return {
             "workers": workers,
             "total": len(workers),
@@ -418,10 +603,9 @@ async def get_workers_info():
         }
     except Exception as e:
         workers = await asyncio.to_thread(_inspect_workers_details_fallback)
+        workers = _merge_worker_lists(workers, _get_cached_workers())
         if workers:
             _cache_workers(workers)
-        workers = _merge_with_cached_workers(workers)
-        if workers:
             return {
                 "workers": workers,
                 "total": len(workers),
@@ -513,45 +697,42 @@ async def get_queues_info():
         Список очередей
     """
     try:
+        flower_queues: list[dict[str, Any]] = []
         async with httpx.AsyncClient(timeout=FLOWER_TIMEOUT, follow_redirects=False, trust_env=False) as client:
             queues_data, _ = await _flower_get_json(client, "/api/broker/queues")
+            if isinstance(queues_data, dict):
+                flower_queues = [
+                    _normalize_queue_record(name, info)
+                    for name, info in queues_data.items()
+                ]
 
-            if not isinstance(queues_data, dict):
-                # Queue API unavailable: return minimal fallback payload
-                return {
-                    "queues": [
-                        {"name": "celery", "messages": 0, "consumers": 1},
-                    ],
-                    "total": 1,
-                    "generated_at": datetime.now().isoformat(),
-                }
+        active_queues = await asyncio.to_thread(_inspect_active_queues_fallback)
+        inspect_queues = _queue_payloads_from_inspect(active_queues)
+        queues = _merge_queue_lists(flower_queues, inspect_queues)
 
-            # Форматируем ответ
-            queues = []
-            for name, info in (queues_data.items() if isinstance(queues_data, dict) else {}):
-                queues.append({
-                    "name": name,
-                    "messages": info.get("messages", 0),
-                    "consumers": info.get("consumers", 0),
-                    "unacked": info.get("unacked", 0),
-                })
+        return {
+            "queues": queues,
+            "total": len(queues),
+            "generated_at": datetime.now().isoformat(),
+        }
 
+    except httpx.RequestError:
+        fallback_queues = await asyncio.to_thread(_inspect_active_queues_fallback)
+        queues = _queue_payloads_from_inspect(fallback_queues)
+        return {
+            "queues": queues,
+            "total": len(queues),
+            "generated_at": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        fallback_queues = await asyncio.to_thread(_inspect_active_queues_fallback)
+        queues = _queue_payloads_from_inspect(fallback_queues)
+        if queues:
             return {
                 "queues": queues,
                 "total": len(queues),
                 "generated_at": datetime.now().isoformat(),
             }
-
-    except httpx.RequestError:
-        # Возвращаем базовую информацию при ошибке
-        return {
-            "queues": [
-                {"name": "celery", "messages": 0, "consumers": 1},
-            ],
-            "total": 1,
-            "generated_at": datetime.now().isoformat(),
-        }
-    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -565,6 +746,7 @@ async def get_scheduled_tasks_info():
     """
     try:
         # Получаем конфигурацию из celery_app
+        celery_app = _get_celery_app()
         beat_schedule = celery_app.conf.beat_schedule or {}
         descriptions = {
             "daily-parse-all-sources": "Ежедневный полный парсинг всех источников из parser_alpha",

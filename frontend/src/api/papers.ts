@@ -4,6 +4,8 @@ import type {
   PaperListFilters,
   PaperSearchFilters,
   PaperSource,
+  PaperContentPart,
+  PaperContentPartRegenerateResponse,
 } from "../types/paper";
 import type { VectorSearchFilters, VectorSearchResponse } from "../types/paper";
 
@@ -42,6 +44,49 @@ type PaperApiModel = {
   created_at: string | null;
   updated_at: string | null;
 };
+
+
+type PaperContentPartApiModel = {
+  id: number;
+  paper_id: number;
+  part_index: number;
+  page_start: number;
+  page_end: number;
+  raw_text: string | null;
+  markdown_text: string | null;
+  status: string;
+  error: string | null;
+  source: string;
+  qwen_model: string | null;
+  qwen_prompt_version: string | null;
+  regeneration_count: number;
+  raw_text_chars: number;
+  markdown_text_chars: number;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+function mapPaperContentPart(apiPart: PaperContentPartApiModel): PaperContentPart {
+  return {
+    id: apiPart.id,
+    paperId: apiPart.paper_id,
+    partIndex: apiPart.part_index,
+    pageStart: apiPart.page_start,
+    pageEnd: apiPart.page_end,
+    rawText: apiPart.raw_text ?? null,
+    markdownText: apiPart.markdown_text ?? null,
+    status: apiPart.status ?? "raw_extracted",
+    error: apiPart.error ?? null,
+    source: apiPart.source ?? "pdf",
+    qwenModel: apiPart.qwen_model ?? null,
+    qwenPromptVersion: apiPart.qwen_prompt_version ?? null,
+    regenerationCount: apiPart.regeneration_count ?? 0,
+    rawTextChars: apiPart.raw_text_chars ?? 0,
+    markdownTextChars: apiPart.markdown_text_chars ?? 0,
+    createdAt: apiPart.created_at ?? null,
+    updatedAt: apiPart.updated_at ?? null,
+  };
+}
 
 function clampBackendLimit(limit: number | undefined, fallback: number = 10) {
   const parsed = Number(limit ?? fallback);
@@ -273,7 +318,7 @@ export async function rebuildVectorIndex() {
 
 export type CeleryTaskStatus = {
   task_id: string;
-  status: "PENDING" | "STARTED" | "RETRY" | "FAILURE" | "SUCCESS" | "REVOKED";
+  status: "PENDING" | "RECEIVED" | "STARTED" | "PROGRESS" | "RETRY" | "FAILURE" | "SUCCESS" | "REVOKED" | "UNKNOWN";
   state?: string;
   result?: {
     query?: string;
@@ -543,5 +588,19 @@ export async function getSearchHighlight(paperId: number, query: string) {
     title: string;
     abstract: string;
   }>(`/search/highlight/${paperId}`, { params: { query } });
+  return data;
+}
+
+export async function getPaperContentParts(paperId: number) {
+  const { data } = await apiClient.get<PaperContentPartApiModel[]>(
+    `/papers/id/${paperId}/content-parts`,
+  );
+  return (data ?? []).map(mapPaperContentPart);
+}
+
+export async function regeneratePaperContentPart(paperId: number, partId: number) {
+  const { data } = await apiClient.post<PaperContentPartRegenerateResponse>(
+    `/papers/id/${paperId}/content-parts/${partId}/regenerate`,
+  );
   return data;
 }

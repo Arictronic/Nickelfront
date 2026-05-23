@@ -108,6 +108,77 @@ function isExpiredPendingTask(job: ParseJob, now: number): boolean {
   return job.status === "in_progress" && now - job.lastCountChangeAt > STALE_PENDING_TASK_MS && job.lastObservedCount <= job.initialCount;
 }
 
+function getCeleryStatusMeta(status: CeleryTaskStatus | null | undefined): Record<string, any> {
+  const progress = status?.progress && typeof status.progress === "object" ? status.progress : {};
+  const result = status?.result && typeof status.result === "object" ? status.result : {};
+  return { ...progress, ...result };
+}
+
+function toFiniteNumber(value: unknown, fallback = 0): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function clampPercent(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function getParseJobProgressPercent(job: ParseJob): number {
+  if (job.status === "completed") return 100;
+  if (job.status === "failed" || job.status === "expired" || job.status === "cancelled") return 0;
+
+  const celeryStatus = job.celeryStatus;
+  if (celeryStatus) {
+    const meta = getCeleryStatusMeta(celeryStatus);
+    const current = toFiniteNumber(celeryStatus.current ?? meta.current, 0);
+    const total = toFiniteNumber(celeryStatus.total ?? meta.total, 0);
+    if (total > 0 && current > 0) return clampPercent((current / total) * 100);
+
+    const celeryState = celeryStatus.status;
+    const stage = String(meta.stage ?? "").toLowerCase();
+    const elapsed = toFiniteNumber(meta.elapsed_seconds, 0);
+
+    if (celeryState === "PENDING") return 3;
+    if (stage === "parser_alpha") {
+      // parser_alpha can run for a long time before saving articles.
+      // Show visible heartbeat progress while the textual status is updated.
+      return clampPercent(8 + Math.min(37, elapsed / 3));
+    }
+    if (stage.includes("read") || stage.includes("result") || stage.includes("parse_results")) return 46;
+    if (stage.includes("save") || stage.includes("saving")) return 55;
+    if (celeryState === "STARTED" || celeryState === "PROGRESS" || celeryState === "RECEIVED") return 8;
+  }
+
+  const delta = Math.max(0, job.lastObservedCount - job.initialCount);
+  const expectedDelta = 50;
+  return Math.min(100, Math.round((delta / expectedDelta) * 100));
+}
+
+function getParseJobStatusText(job: ParseJob): string {
+  if (job.status === "completed") return "✓ Завершено";
+  if (job.status === "failed") return "✕ Ошибка";
+  if (job.status === "cancelled") return "Отменено";
+  if (job.status === "expired") return "Истёк / не найден";
+
+  const celeryStatus = job.celeryStatus;
+  if (!celeryStatus) return "В обработке";
+
+  const meta = getCeleryStatusMeta(celeryStatus);
+  const stateText = String(meta.status || meta.stage_label || celeryStatus.state || "").trim();
+
+  if (celeryStatus.status === "SUCCESS") return "✓ Завершено";
+  if (celeryStatus.status === "FAILURE") return stateText ? `✕ ${stateText}` : "✕ Ошибка";
+  if (celeryStatus.status === "REVOKED") return "Отменено";
+  if (celeryStatus.status === "PENDING") return "Ожидание...";
+  if (celeryStatus.status === "RETRY") return "Повтор...";
+  if (celeryStatus.status === "UNKNOWN") return "Статус неизвестен";
+  if (celeryStatus.status === "RECEIVED") return stateText || "Получено worker-ом...";
+  if (celeryStatus.status === "STARTED" || celeryStatus.status === "PROGRESS") return stateText || "В процессе...";
+
+  return stateText || "В обработке";
+}
+
+
 function loadJobs(): ParseJob[] {
   try {
     // Старые версионные ключи не используем: после runtime-cleanup они могут
@@ -740,36 +811,8 @@ export default function Dashboard() {
             </thead>
             <tbody>
               {jobs.slice(0, 10).map((j) => {
-                const progress = (() => {
-                  if (j.status === "completed") return 100;
-                  if (j.status === "failed" || j.status === "expired") return 0;
-                  if (j.celeryStatus) {
-                    const current = j.celeryStatus.current || j.celeryStatus.result?.current || 0;
-                    const total = j.celeryStatus.total || j.celeryStatus.result?.total || 0;
-                    if (total > 0) return Math.round((current / total) * 100);
-                  }
-                  const delta = j.lastObservedCount - j.initialCount;
-                  const expectedDelta = 50;
-                  return Math.min(100, Math.round((delta / expectedDelta) * 100));
-                })();
-
-                const statusText = (() => {
-                  if (j.status === "completed") return "✓ Завершено";
-                  if (j.status === "failed") return "✕ Ошибка";
-                  if (j.status === "cancelled") return "Отменено";
-                  if (j.status === "expired") return "Истёк / не найден";
-
-                  if (j.celeryStatus) {
-                    const status = j.celeryStatus.status;
-                    if (status === "SUCCESS") return "✓ Завершено";
-                    if (status === "FAILURE") return "✕ Ошибка";
-                    if (status === "REVOKED") return "Отменено";
-                    if (status === "PENDING") return "Ожидание...";
-                    if (status === "STARTED") return j.celeryStatus.result?.status || "В процессе...";
-                    if (status === "RETRY") return "Повтор...";
-                  }
-                  return "В обработке";
-                })();
+                const progress = getParseJobProgressPercent(j);
+                const statusText = getParseJobStatusText(j);
 
                 const savedCount =
                   j.celeryStatus?.saved_count ||

@@ -587,13 +587,24 @@ def _pick_fallback_model(current_model: str, *, tried_models: set[str] | None = 
 def _recover_response_from_history(
     session_id: str,
     min_message_id: int = 0,
+    *,
+    attempts_override: int | None = None,
+    interval_override: float | None = None,
 ) -> tuple[str, str, int]:
     """
     Fallback recovery when SSE stream is interrupted.
     Polls chat history for a saved assistant message.
+
+    Important: when provider stream already produced chunks/thinking and then
+    disconnected, the prompt must not be sent again to the same Qwen session.
+    Qwen may still be generating the first answer and a duplicate send often
+    returns "The chat is in progress!". In that case callers pass larger
+    recovery limits here and wait for the already-started answer in history.
     """
-    attempts = max(1, int(config.get("history_recovery_attempts", DEFAULT_HISTORY_RECOVERY_ATTEMPTS)))
-    interval = max(0.5, float(config.get("history_recovery_interval_sec", DEFAULT_HISTORY_RECOVERY_INTERVAL_SEC)))
+    configured_attempts = int(config.get("history_recovery_attempts", DEFAULT_HISTORY_RECOVERY_ATTEMPTS))
+    configured_interval = float(config.get("history_recovery_interval_sec", DEFAULT_HISTORY_RECOVERY_INTERVAL_SEC))
+    attempts = max(1, int(attempts_override if attempts_override is not None else configured_attempts))
+    interval = max(0.5, float(interval_override if interval_override is not None else configured_interval))
 
     for attempt in range(1, attempts + 1):
         thinking, response, recovered_message_id = _extract_latest_assistant_parts(
@@ -694,6 +705,8 @@ def _send_message_sync(
             )
             break
         except (ChunkedEncodingError, ReadTimeout, RequestsConnectionError) as e:
+            stream_already_started = bool(response_text.strip() or thinking_text.strip() or chunks_count > 0)
+
             if response_text.strip():
                 logging.warning(
                     "Stream interrupted after partial response (session=%s, attempt=%s, len=%s): %s",
@@ -707,10 +720,54 @@ def _send_message_sync(
                     message_id = int(qwen_api.last_message_id or 0)
                 break
 
+            if stream_already_started:
+                logging.warning(
+                    "Stream interrupted after activity; will not resend prompt to busy Qwen session "
+                    "(session=%s, attempt=%s, thinking_len=%s, chunks=%s): %s",
+                    session_id[-6:],
+                    attempt,
+                    len(thinking_text),
+                    chunks_count,
+                    e,
+                )
+                recovered_thinking, recovered_response, recovered_message_id = _recover_response_from_history(
+                    session_id=session_id,
+                    min_message_id=max(0, message_id),
+                    attempts_override=max(
+                        int(config.get("history_recovery_attempts", DEFAULT_HISTORY_RECOVERY_ATTEMPTS)),
+                        20,
+                    ),
+                    interval_override=max(
+                        float(config.get("history_recovery_interval_sec", DEFAULT_HISTORY_RECOVERY_INTERVAL_SEC)),
+                        1.5,
+                    ),
+                )
+                if recovered_response.strip():
+                    thinking_text = recovered_thinking or thinking_text
+                    response_text = recovered_response
+                    if recovered_message_id > 0:
+                        message_id = recovered_message_id
+                        qwen_api.last_message_id = recovered_message_id
+                    can_continue = False
+                    logging.warning(
+                        "Recovered active stream from history: session=%s, attempt=%s, recovered_len=%s",
+                        session_id[-6:],
+                        attempt,
+                        len(response_text),
+                    )
+                    break
+
+                raise QwenProviderError(
+                    "Qwen stream was interrupted after generation started; "
+                    "the prompt was not resent to avoid duplicating the request. "
+                    "History recovery did not return a completed response."
+                )
+
             if attempt <= max_retries:
                 backoff = min(5.0, 1.0 * attempt)
                 logging.warning(
-                    "Transient stream error, retrying (session=%s, attempt=%s/%s, backoff=%.1fs): %s",
+                    "Transient stream error before provider activity, retrying "
+                    "(session=%s, attempt=%s/%s, backoff=%.1fs): %s",
                     session_id[-6:],
                     attempt,
                     max_retries + 1,
@@ -793,25 +850,51 @@ def _send_message_sync(
                 break
 
             if isinstance(e, QwenChatInProgressError):
-                if attempt <= (max_retries + 2):
-                    backoff = min(8.0, 1.5 * attempt)
-                    logging.warning(
-                        "Chat still in progress during send; waiting and retrying (session=%s, attempt=%s/%s, backoff=%.1fs)",
-                        session_id[-6:],
-                        attempt,
-                        max_retries + 3,
-                        backoff,
-                    )
-                    time.sleep(backoff)
-                    continue
-
+                backoff = min(8.0, 1.5 * attempt)
                 logging.warning(
-                    "Stopping send due to in-progress state without recovery (session=%s, attempt=%s)",
+                    "Chat still in progress during send; waiting for history instead of resending prompt "
+                    "(session=%s, attempt=%s/%s, backoff=%.1fs)",
                     session_id[-6:],
                     attempt,
+                    max_retries + 3,
+                    backoff,
                 )
-                can_continue = False
-                break
+                time.sleep(backoff)
+
+                recovered_thinking, recovered_response, recovered_message_id = _recover_response_from_history(
+                    session_id=session_id,
+                    min_message_id=max(0, message_id),
+                    attempts_override=max(
+                        int(config.get("history_recovery_attempts", DEFAULT_HISTORY_RECOVERY_ATTEMPTS)),
+                        12,
+                    ),
+                    interval_override=max(
+                        float(config.get("history_recovery_interval_sec", DEFAULT_HISTORY_RECOVERY_INTERVAL_SEC)),
+                        1.5,
+                    ),
+                )
+                if recovered_response.strip():
+                    thinking_text = recovered_thinking or thinking_text
+                    response_text = recovered_response
+                    if recovered_message_id > 0:
+                        message_id = recovered_message_id
+                        qwen_api.last_message_id = recovered_message_id
+                    can_continue = False
+                    logging.warning(
+                        "Recovered in-progress chat from history: session=%s, attempt=%s, recovered_len=%s",
+                        session_id[-6:],
+                        attempt,
+                        len(response_text),
+                    )
+                    break
+
+                if attempt <= (max_retries + 2):
+                    continue
+
+                raise QwenProviderError(
+                    "Qwen provider is still processing the previous message; "
+                    "history recovery did not return a completed response."
+                )
 
             if attempt <= max_retries:
                 backoff = min(5.0, 1.0 * attempt)
@@ -915,6 +998,8 @@ def _continue_message_sync(
             )
             break
         except (ChunkedEncodingError, ReadTimeout, RequestsConnectionError) as e:
+            stream_already_started = bool(response_text.strip() or thinking_text.strip() or chunks_count > 0)
+
             if response_text.strip():
                 logging.warning(
                     "Continue stream interrupted after partial response (session=%s, attempt=%s, len=%s): %s",
@@ -928,10 +1013,55 @@ def _continue_message_sync(
                     new_message_id = int(qwen_api.last_message_id or message_id or 0)
                 break
 
+            if stream_already_started:
+                logging.warning(
+                    "Continue stream interrupted after activity; will not resend continue request "
+                    "(session=%s, attempt=%s, thinking_len=%s, chunks=%s): %s",
+                    session_id[-6:],
+                    attempt,
+                    len(thinking_text),
+                    chunks_count,
+                    e,
+                )
+                recovered_thinking, recovered_response, recovered_message_id = _recover_response_from_history(
+                    session_id=session_id,
+                    min_message_id=max(0, message_id),
+                    attempts_override=max(
+                        int(config.get("history_recovery_attempts", DEFAULT_HISTORY_RECOVERY_ATTEMPTS)),
+                        20,
+                    ),
+                    interval_override=max(
+                        float(config.get("history_recovery_interval_sec", DEFAULT_HISTORY_RECOVERY_INTERVAL_SEC)),
+                        1.5,
+                    ),
+                )
+                if recovered_response.strip():
+                    thinking_text = recovered_thinking or thinking_text
+                    response_text = recovered_response
+                    if recovered_message_id > 0:
+                        new_message_id = recovered_message_id
+                        qwen_api.last_message_id = recovered_message_id
+                    else:
+                        new_message_id = int(qwen_api.last_message_id or message_id or 0)
+                    can_continue = False
+                    logging.warning(
+                        "Recovered active continue stream from history: session=%s, attempt=%s, recovered_len=%s",
+                        session_id[-6:],
+                        attempt,
+                        len(response_text),
+                    )
+                    break
+
+                raise QwenProviderError(
+                    "Qwen continue stream was interrupted after generation started; "
+                    "history recovery did not return a completed response."
+                )
+
             if attempt <= max_retries:
                 backoff = min(5.0, 1.0 * attempt)
                 logging.warning(
-                    "Transient continue error, retrying (session=%s, attempt=%s/%s, backoff=%.1fs): %s",
+                    "Transient continue error before provider activity, retrying "
+                    "(session=%s, attempt=%s/%s, backoff=%.1fs): %s",
                     session_id[-6:],
                     attempt,
                     max_retries + 1,
@@ -986,10 +1116,11 @@ def _continue_message_sync(
                 )
                 break
 
-            if isinstance(e, QwenChatInProgressError) and attempt <= max_retries:
+            if isinstance(e, QwenChatInProgressError):
                 backoff = min(5.0, 1.0 * attempt)
                 logging.warning(
-                    "Chat still in progress, retrying continue (session=%s, attempt=%s/%s, backoff=%.1fs): %s",
+                    "Chat still in progress during continue; waiting for history instead of resending "
+                    "(session=%s, attempt=%s/%s, backoff=%.1fs): %s",
                     session_id[-6:],
                     attempt,
                     max_retries + 1,
@@ -997,7 +1128,43 @@ def _continue_message_sync(
                     e,
                 )
                 time.sleep(backoff)
-                continue
+
+                recovered_thinking, recovered_response, recovered_message_id = _recover_response_from_history(
+                    session_id=session_id,
+                    min_message_id=max(0, message_id),
+                    attempts_override=max(
+                        int(config.get("history_recovery_attempts", DEFAULT_HISTORY_RECOVERY_ATTEMPTS)),
+                        12,
+                    ),
+                    interval_override=max(
+                        float(config.get("history_recovery_interval_sec", DEFAULT_HISTORY_RECOVERY_INTERVAL_SEC)),
+                        1.5,
+                    ),
+                )
+                if recovered_response.strip():
+                    thinking_text = recovered_thinking or thinking_text
+                    response_text = recovered_response
+                    if recovered_message_id > 0:
+                        new_message_id = recovered_message_id
+                        qwen_api.last_message_id = recovered_message_id
+                    else:
+                        new_message_id = int(qwen_api.last_message_id or message_id or 0)
+                    can_continue = False
+                    logging.warning(
+                        "Recovered in-progress continue from history: session=%s, attempt=%s, recovered_len=%s",
+                        session_id[-6:],
+                        attempt,
+                        len(response_text),
+                    )
+                    break
+
+                if attempt <= max_retries:
+                    continue
+
+                raise QwenProviderError(
+                    "Qwen provider is still processing the previous continue request; "
+                    "history recovery did not return a completed response."
+                )
 
             logging.warning(
                 "Stopping continue due to provider terminal state (session=%s, attempt=%s): %s",

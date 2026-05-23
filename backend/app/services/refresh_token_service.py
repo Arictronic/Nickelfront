@@ -39,6 +39,45 @@ class RefreshTokenService:
         )
         return result.scalar_one_or_none()
 
+
+    @staticmethod
+    def _ensure_aware(value: datetime) -> datetime:
+        """Normalize DB datetimes for safe UTC comparisons."""
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    async def get_recently_revoked_token(
+        self,
+        raw_token: str,
+        grace_seconds: int,
+    ) -> RefreshToken | None:
+        """
+        Return a revoked refresh token only inside a short rotation grace window.
+
+        This makes refresh idempotent enough for browser races: several tabs can
+        receive 401 at the same moment and try to rotate the same refresh token.
+        The first request revokes it; a following request within the grace window
+        should not force logout if the token was otherwise valid.
+        """
+        if grace_seconds <= 0:
+            return None
+
+        token = await self.get_by_token(raw_token)
+        if not token or token.revoked_at is None:
+            return None
+
+        expires_at = self._ensure_aware(token.expires_at)
+        now = datetime.now(UTC)
+        if expires_at <= now:
+            return None
+
+        revoked_at = self._ensure_aware(token.revoked_at)
+        if now - revoked_at > timedelta(seconds=grace_seconds):
+            return None
+
+        return token
+
     async def get_valid_token(self, raw_token: str) -> RefreshToken | None:
         """Проверить refresh-токен на валидность."""
         token = await self.get_by_token(raw_token)
@@ -46,9 +85,7 @@ class RefreshTokenService:
             return None
         if token.revoked_at is not None:
             return None
-        expires_at = token.expires_at
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=UTC)
+        expires_at = self._ensure_aware(token.expires_at)
         if expires_at <= datetime.now(UTC):
             return None
         return token

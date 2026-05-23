@@ -22,18 +22,31 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _is_celery_cli_process() -> bool:
+    """True only for real Celery worker/beat/flower CLI processes."""
+    argv = " ".join(str(arg).lower() for arg in sys.argv)
+    return "celery" in argv
+
+
 def _worker_service_name() -> str:
     explicit = (os.getenv("NICKELFRONT_SERVICE_NAME") or "").strip()
     if explicit:
         return explicit
     if _env_bool("QWEN_GATEWAY_WORKER"):
         return "qwen_worker"
+    if (os.getenv("NICKELFRONT_WORKER_ROLE") or "").strip().lower() == "content":
+        return "content_worker"
+    if not _is_celery_cli_process():
+        # backend imports celery_app only as a client for inspect/revoke/delay;
+        # do not relabel backend logs as celery_worker in that case.
+        return "backend_api"
     return "celery_worker"
 
 
 IS_QWEN_GATEWAY_WORKER = _env_bool("QWEN_GATEWAY_WORKER")
 SERVICE_NAME = _worker_service_name()
-setup_logging(service_name=SERVICE_NAME)
+if _is_celery_cli_process():
+    setup_logging(service_name=SERVICE_NAME)
 
 # Qwen gateway workers should not import parser/content/RAG task modules.
 # This keeps their startup clean and avoids misleading logs such as PDFParser
@@ -87,18 +100,38 @@ celery_app.conf.update(
     beat_schedule_filename=settings.resolve_path(settings.CELERY_BEAT_SCHEDULE_FILENAME),
     beat_schedule={},
     task_routes={
-        "app.tasks.qwen.*": {"queue": settings.QWEN_QUEUE_NAME},
+        # Parser/orchestration tasks must stay on the regular worker queue.
+        "app.tasks.parse_tasks.parse_papers_task": {"queue": "celery"},
+        "app.tasks.parse_tasks.parse_multiple_queries_task": {"queue": "celery"},
+        "app.tasks.parse_tasks.parse_all_sources_task": {"queue": "celery"},
+        "app.tasks.qwen.send_message": {"queue": settings.QWEN_QUEUE_NAME},
+        "app.tasks.qwen.markdown": {"queue": settings.QWEN_QUEUE_NAME},
+        "app.tasks.qwen.ru_analysis": {"queue": settings.QWEN_QUEUE_NAME},
+        "app.tasks.qwen.keywords": {"queue": settings.QWEN_QUEUE_NAME},
+        "app.tasks.qwen.regenerate_markdown_part": {"queue": settings.QWEN_QUEUE_NAME},
+        "app.tasks.content_tasks.process_paper_content_task": {"queue": settings.CONTENT_QUEUE_NAME},
+        "app.tasks.content_tasks.download_pdf_task": {"queue": settings.CONTENT_QUEUE_NAME},
+        "app.tasks.content_tasks.extract_pdf_text_task": {"queue": settings.CONTENT_QUEUE_NAME},
+        "app.tasks.content_tasks.build_embedding_task": {"queue": settings.CONTENT_QUEUE_NAME},
+        "app.tasks.content_tasks.finalize_paper_processing_task": {"queue": settings.CONTENT_QUEUE_NAME},
     },
 )
 
-logger.info(
-    "Celery app configured: service={}, qwen_gateway={}, modules={}, broker={}, result_backend={}",
-    SERVICE_NAME,
-    IS_QWEN_GATEWAY_WORKER,
-    TASK_MODULES,
-    settings.CELERY_BROKER_URL,
-    settings.CELERY_RESULT_BACKEND,
-)
+if _is_celery_cli_process():
+    logger.info(
+        "Celery app configured: service={}, qwen_gateway={}, modules={}, broker={}, result_backend={}",
+        SERVICE_NAME,
+        IS_QWEN_GATEWAY_WORKER,
+        TASK_MODULES,
+        settings.CELERY_BROKER_URL,
+        settings.CELERY_RESULT_BACKEND,
+    )
+else:
+    logger.debug(
+        "Celery app imported by non-Celery process: service={}, modules={}",
+        SERVICE_NAME,
+        TASK_MODULES,
+    )
 
 
 def _short_task_id(task_id: str | None) -> str:

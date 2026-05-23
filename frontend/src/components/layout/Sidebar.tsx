@@ -11,6 +11,7 @@ const RU = {
   tech: "\u0422\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u043e\u0442\u0434\u0435\u043b",
   tasks: "\u0417\u0430\u0434\u0430\u0447\u0438",
   db: "\u0411\u0430\u0437\u0430 \u0434\u0430\u043d\u043d\u044b\u0445",
+  settings: "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438",
 } as const;
 
 export default function Sidebar() {
@@ -47,6 +48,9 @@ export default function Sidebar() {
           </NavLink>
           <NavLink className={cls} to="/database">
             <span>{RU.db}</span>
+          </NavLink>
+          <NavLink className={cls} to="/settings">
+            <span>{RU.settings}</span>
           </NavLink>
         </>
       )}

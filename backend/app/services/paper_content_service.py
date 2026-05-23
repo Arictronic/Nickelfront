@@ -15,7 +15,6 @@ from loguru import logger
 
 from app.core.config import settings
 from app.services.qwen_client import get_qwen_client
-from app.services.rag_parser import pdf_parser
 
 
 @dataclass
@@ -28,6 +27,10 @@ class AIEnrichmentResult:
 
 
 MAX_KEYWORD_SOURCE_CHARS = 32000
+PDF_MARKDOWN_PROMPT_VERSION = "pdf-markdown-v2-parts"
+
+# Callback arguments: processed pages, total pages, current markdown.
+MarkdownProgressCallback = Callable[[int, int, str], None]
 
 
 _PAGE_MARKER_SPLIT_RE = re.compile("(?=\\[(?:\\u0421\\u0442\\u0440\\u0430\\u043d\\u0438\\u0446\\u0430|Page)\\s+\\d+\\])")
@@ -39,48 +42,36 @@ def _decode_cp1251_utf8_mojibake(value: str) -> str:
         return value
 
 
-PDF_MARKDOWN_SYSTEM_PROMPT = _decode_cp1251_utf8_mojibake("""Ты — редактор научных PDF-статей. Тебе будут по порядку передаваться сырые OCR/извлечённые данные страниц PDF.
+PDF_MARKDOWN_SYSTEM_PROMPT = _decode_cp1251_utf8_mojibake("""Ты — OCR/Markdown-редактор научных PDF-фрагментов.
 
-Твоя задача: восстановить содержимое страницы в чистом Markdown, сохранив всю исходную информацию без смысловых потерь.
+Тебе передан сырой текст одного фрагмента PDF: одна страница или диапазон страниц.
+Твоя задача — восстановить только этот фрагмент в чистом Markdown, без смысловых потерь и без добавления текста от себя.
 
-Правила обработки:
-
-1. Не добавляй ничего от себя.
-2. Не объясняй свои действия.
-3. Не пиши вступления, комментарии, выводы или предупреждения.
-4. Выводи только обработанный Markdown.
-5. Сохраняй структуру статьи:
-   - заголовки;
-   - авторов;
-   - организации;
-   - abstract;
-   - keywords;
-   - разделы и подразделы;
-   - таблицы;
-   - подписи к рисункам;
-   - сноски;
-   - формулы;
-   - references.
-6. Исправляй очевидные OCR-ошибки форматирования:
-   - слитые слова;
-   - пропущенные пробелы;
-   - переносы строк внутри предложений;
-   - неправильные разрывы абзацев;
-   - мусорные символы от PDF-вёрстки.
-7. Не исправляй научный смысл, числа, единицы измерения, имена, даты, формулы и ссылки, если нет полной уверенности.
-8. Если таблица распознана плохо, восстанови её в Markdown-таблицу настолько точно, насколько возможно.
-9. Если рисунок представлен только подписью, сохрани подпись как **Figure X.** ....
-10. Если встречается текст вида [Страница N], используй его только как границу страницы и не выводи в результате.
-11. Не удаляй повторяющиеся или странно выглядящие данные, если они могут быть частью статьи.
-12. Не объединяй разные страницы в один раздел искусственно. Обрабатывай только полученную страницу.
+Жёсткие правила:
+1. Верни только Markdown. Без пояснений, комментариев, вступлений и заключений.
+2. Не добавляй заголовки вида "Page", "Pages", "Страница", если они не являются частью самой статьи.
+3. Не добавляй текст, которого нет во входном фрагменте.
+4. Не объединяй фрагмент с предыдущими или следующими страницами.
+5. Не исправляй научный смысл, числа, единицы измерения, имена, ссылки и формулы.
+6. Если символ/формула распознаны плохо — сохрани максимально близко к исходнику, не угадывай.
+7. Заголовки статьи оформи через #, ##, ### только если они явно есть во входе.
+8. Abstract, Keywords, References, Figure captions и Table captions сохраняй отдельными блоками.
+9. Таблицы восстанавливай в Markdown-таблицы, если структура понятна; иначе сохраняй как preformatted text.
+10. Формулы оформляй так:
+    - inline формулы: $...$
+    - отдельные формулы: $$...$$
+    - не используй \\( \\) и \\[ \\]
+    - не выдумывай недостающие части формул.
+11. Между абзацами оставляй пустую строку.
+12. Не склеивай заголовки, абзацы, таблицы, подписи рисунков и references в одну строку.
 13. Сохраняй язык оригинала.
-14. Математические выражения оформляй в Markdown/LaTeX:
-    - inline: $...$
-    - отдельной строкой: $$...$$
-15. Если часть текста невозможно надёжно восстановить, оставь её максимально близко к оригиналу, не придумывая недостающее.
+14. Если часть текста невозможно восстановить надёжно, оставь её максимально близко к исходнику.
 
 Формат ответа: только Markdown. Без дополнительного текста.""")
 
+PDF_MARKDOWN_CONTINUE_PROMPT = _decode_cp1251_utf8_mojibake("""Продолжай ту же OCR/Markdown-задачу для нового PDF-фрагмента.
+Верни только Markdown этого фрагмента. Не добавляй Page/Pages/Страница, комментарии или текст от себя.
+Формулы: inline $...$, отдельные $$...$$.""")
 
 def _clean_arxiv_id(raw: str) -> str:
     value = (raw or "").strip()
@@ -182,11 +173,24 @@ def save_pdf_locally(paper_id: int, pdf_bytes: bytes) -> str:
 
 
 def extract_pdf_text(pdf_bytes: bytes) -> str:
+    """Извлечь текст из PDF.
+
+    PDFParser импортируется лениво: обычный старт FastAPI не должен
+    инициализировать PDF/RAG зависимости до первого реального PDF-запроса.
+    """
     try:
+        from app.services.rag_parser import pdf_parser
+
         return pdf_parser.extract_text_from_bytes(pdf_bytes)
     except Exception as exc:
         logger.warning("Failed to extract text from PDF: {}", exc)
         return ""
+
+
+def extract_pdf_pages(pdf_bytes: bytes) -> list[str]:
+    """Извлечь PDF-текст и вернуть список страниц/частей с исходными маркерами."""
+    text = extract_pdf_text(pdf_bytes)
+    return _split_pdf_text_into_pages(text)
 
 
 def _clean_html_text(raw: str) -> str:
@@ -306,12 +310,116 @@ def _split_pdf_text_into_pages(raw_text: str) -> list[str]:
     return [text[i : i + chunk_size].strip() for i in range(0, len(text), chunk_size) if text[i : i + chunk_size].strip()]
 
 
+
+def _clean_markdown_response(text: str) -> str:
+    """Small post-processing pass after Qwen Markdown normalization.
+
+    Qwen usually does the semantic restoration, but PDF/OCR output can still come
+    back with extra fences or with headings/tables glued to adjacent paragraphs.
+    This pass is deliberately conservative: it normalizes spacing without trying
+    to rewrite scientific content.
+    """
+    value = (text or "").strip()
+    if not value:
+        return ""
+
+    # Remove accidental markdown fences around the whole answer.
+    value = re.sub(r"^```(?:markdown|md)?\s*", "", value, flags=re.IGNORECASE).strip()
+    value = re.sub(r"\s*```$", "", value).strip()
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Keep Markdown readable: separate headings and tables from surrounding text.
+    value = re.sub(r"(?<!\n)\n(#{1,6}\s+)", r"\n\n\1", value)
+    value = re.sub(r"(#{1,6}[^\n]+)\n(?!\n)", r"\1\n\n", value)
+    value = re.sub(r"(?<!\n)\n(\|.+\|)", r"\n\n\1", value)
+    value = re.sub(r"(\|.+\|)\n(?!\n|\|)", r"\1\n\n", value)
+
+    # Normalize common LaTeX delimiters for remark-math / KaTeX rendering.
+    value = re.sub(r"\\\((.+?)\\\)", lambda m: f"${m.group(1).strip()}$", value, flags=re.DOTALL)
+    value = re.sub(r"\\\[(.+?)\\\]", lambda m: f"$$\n{m.group(1).strip()}\n$$", value, flags=re.DOTALL)
+
+    # Separate glued headings commonly returned by LLMs from compact PDF text.
+    value = re.sub(r"(?<!\n)(#{1,6}\s+)", r"\n\n\1", value)
+    value = re.sub(r"(?<!\n)(\b(?:Abstract|Keywords|References|Acknowledg(?:e)?ments)\b\s*:?)", r"\n\n## \1", value, flags=re.IGNORECASE)
+    value = re.sub(r"(?<!\n)(\b[IVX]{1,6}\.\s+[A-Z][A-Z0-9 ,:;()\-/]{3,})", r"\n\n## \1", value)
+
+    # Collapse excessive blank lines, but keep paragraph breaks.
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
+def _build_markdown_prompt(
+    *,
+    title: str,
+    page_start: int,
+    page_end: int,
+    raw_text: str,
+    include_full_instruction: bool = True,
+) -> str:
+    instruction = PDF_MARKDOWN_SYSTEM_PROMPT if include_full_instruction else PDF_MARKDOWN_CONTINUE_PROMPT
+    return (
+        f"{instruction}\n\n"
+        f"Article title: {title}\n"
+        f"Input pages: {page_start}-{page_end}\n"
+        "Raw PDF fragment:\n"
+        f"{(raw_text or '').strip()}"
+    ).strip()
+
+
+def normalize_pdf_text_part(
+    paper_id: int,
+    title: str,
+    raw_text: str,
+    page_start: int,
+    page_end: int,
+    session_id: str | None = None,
+    *,
+    include_full_instruction: bool = True,
+) -> str:
+    """Normalize one stored PDF page/chunk through Qwen and return Markdown only."""
+    source_text = (raw_text or "").strip()
+    if not source_text:
+        return ""
+
+    qwen_client = get_qwen_client()
+    prompt = _build_markdown_prompt(
+        title=title,
+        page_start=page_start,
+        page_end=page_end,
+        raw_text=source_text,
+        include_full_instruction=include_full_instruction,
+    )
+
+    result = qwen_client.send_message(
+        message=prompt,
+        session_id=session_id,
+        thinking_enabled=True,
+        search_enabled=False,
+        auto_continue=False,
+        timeout=float(getattr(settings, "QWEN_CHAT_TIMEOUT_SECONDS", 300.0) or 300.0),
+    )
+    response_text = _clean_markdown_response(result.get("response") or "")
+    if response_text:
+        return response_text
+
+    error_text = str(result.get("error") or "").strip()
+    logger.warning(
+        "Empty Qwen markdown part response for paper={} pages={}..{} session={} error={}",
+        paper_id,
+        page_start,
+        page_end,
+        (session_id or "none"),
+        (error_text or "none"),
+    )
+    return ""
+
+
 def normalize_pdf_text_markdown(
     paper_id: int,
     title: str,
     raw_text: str,
     session_id: str | None = None,
-    on_page_markdown: Callable[[int, str], None] | None = None,
+    on_page_markdown: MarkdownProgressCallback | None = None,
 ) -> str:
     pages = _split_pdf_text_into_pages(raw_text)
     if not pages:
@@ -322,25 +430,25 @@ def normalize_pdf_text_markdown(
     active_session_id = session_id
     max_page_attempts = 3
     session_needs_prompt = True
-    pages_per_request = 3
+    pages_per_request = max(1, int(getattr(settings, "QWEN_MARKDOWN_PAGES_PER_REQUEST", 1) or 1))
+    page_char_limit = max(4000, int(getattr(settings, "QWEN_MARKDOWN_PAGE_CHARS", 14000) or 14000))
     page_batches = [pages[i : i + pages_per_request] for i in range(0, len(pages), pages_per_request)]
     current_page = 1
 
     for batch in page_batches:
         response_text = ""
-        batch_text = "\n\n".join(f"[Page {current_page + offset}]\n{page[:18000]}" for offset, page in enumerate(batch))
+        batch_text = "\n\n".join(f"[Page {current_page + offset}]\n{page[:page_char_limit]}" for offset, page in enumerate(batch))
         batch_range_start = current_page
         batch_range_end = current_page + len(batch) - 1
 
         for attempt in range(1, max_page_attempts + 1):
-            if session_needs_prompt:
-                prompt = (
-                    f"{PDF_MARKDOWN_SYSTEM_PROMPT}\n\n"
-                    f"Article title: {title}\n"
-                    f"{batch_text}"
-                )
-            else:
-                prompt = batch_text
+            prompt = _build_markdown_prompt(
+                title=title,
+                page_start=batch_range_start,
+                page_end=batch_range_end,
+                raw_text=batch_text,
+                include_full_instruction=session_needs_prompt,
+            )
 
             result = qwen_client.send_message(
                 message=prompt,
@@ -348,9 +456,9 @@ def normalize_pdf_text_markdown(
                 thinking_enabled=True,
                 search_enabled=False,
                 auto_continue=False,
-                timeout=1000.0,
+                timeout=float(getattr(settings, "QWEN_CHAT_TIMEOUT_SECONDS", 300.0) or 300.0),
             )
-            response_text = (result.get("response") or "").strip()
+            response_text = _clean_markdown_response(result.get("response") or "")
             error_text = str(result.get("error") or "").strip()
 
             if response_text:
@@ -383,11 +491,11 @@ def normalize_pdf_text_markdown(
                             active_session_id,
                         )
 
-        page_payload = response_text or batch_text
+        page_payload = _clean_markdown_response(response_text or batch_text)
         normalized_parts.append(f"### Pages {batch_range_start}-{batch_range_end}\n\n{page_payload}".strip())
         if on_page_markdown:
             try:
-                on_page_markdown(batch_range_end, "\n\n".join(normalized_parts).strip())
+                on_page_markdown(batch_range_end, len(pages), "\n\n".join(normalized_parts).strip())
             except Exception as callback_exc:
                 logger.warning(
                     "on_page_markdown callback failed for paper={} pages={}..{}: {}",
@@ -441,7 +549,7 @@ def generate_ai_enrichment_ru(
         thinking_enabled=True,
         search_enabled=False,
         auto_continue=True,
-        timeout=1000.0,
+        timeout=float(getattr(settings, "QWEN_CHAT_TIMEOUT_SECONDS", 300.0) or 300.0),
     )
     response_text = (result.get("response") or "").strip()
     if not response_text:
@@ -619,7 +727,7 @@ def generate_article_keywords(
         thinking_enabled=True,
         search_enabled=False,
         auto_continue=True,
-        timeout=1000.0,
+        timeout=float(getattr(settings, "QWEN_CHAT_TIMEOUT_SECONDS", 300.0) or 300.0),
     )
 
     response_text = (result.get("response") or "").strip()

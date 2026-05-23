@@ -5,6 +5,7 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.deps import get_current_user, require_admin_user
+from app.services.qwen_client import get_qwen_client
 from app.services.qwen_service import get_qwen_service
 from shared.schemas.auth import UserResponse
 from shared.schemas.paper import (
@@ -25,6 +26,14 @@ from shared.schemas.paper import (
 router = APIRouter(prefix="/qwen", tags=["qwen-chat"])
 
 
+def _qwen_unavailable_message(health: dict) -> str:
+    reason = str(health.get("reason") or "").strip()
+    base_url = str(health.get("base_url") or "").strip()
+    details = f" Причина: {reason}." if reason else ""
+    where = f" URL: {base_url}." if base_url else ""
+    return f"Qwen сервис недоступен.{details}{where}"
+
+
 @router.get("/health", response_model=QwenHealthResponse)
 async def health_check():
     """
@@ -34,14 +43,9 @@ async def health_check():
         Информация о статусе и доступности сервиса.
     """
     qwen_service = get_qwen_service()
+    health = await asyncio.to_thread(qwen_service.health_status)
 
-    is_available = await asyncio.to_thread(lambda: qwen_service.is_available)
-
-    return QwenHealthResponse(
-        status="ok" if is_available else "unavailable",
-        model=qwen_service.model,
-        available=is_available,
-    )
+    return QwenHealthResponse(**health)
 
 
 @router.get("/config", response_model=QwenConfigResponse)
@@ -319,8 +323,9 @@ async def send_message(
         }
     """
     qwen_service = get_qwen_service()
+    health = await asyncio.to_thread(qwen_service.health_status)
 
-    if not await asyncio.to_thread(lambda: qwen_service.is_available):
+    if not health.get("available"):
         return QwenMessageResponse(
             session_id="",
             message=request.message,
@@ -328,11 +333,15 @@ async def send_message(
             thinking="",
             thinking_enabled=request.thinking_enabled,
             search_enabled=request.search_enabled,
-            error="Qwen сервис недоступен. Проверьте настройку QWEN_TOKEN.",
+            error=_qwen_unavailable_message(health),
         )
 
+    # Interactive chat also goes through the shared Qwen gateway when
+    # QWEN_QUEUE_ENABLED=1. With QWEN_QUEUE_WORKERS=5 and each worker
+    # concurrency=1 this gives exactly 5 parallel Qwen slots for one token.
+    qwen_client = get_qwen_client()
     result = await asyncio.to_thread(
-        qwen_service.send_message,
+        qwen_client.send_message,
         message=request.message,
         session_id=request.session_id,
         thinking_enabled=request.thinking_enabled,

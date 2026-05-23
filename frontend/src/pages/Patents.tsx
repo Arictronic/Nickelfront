@@ -5,6 +5,7 @@ import Pagination from "../components/ui/Pagination";
 import { useToast } from "../components/ui/Toast";
 import {
   getProcessingProgress,
+  getProcessingStatusKey,
   getProcessingStatusLabel,
   isPaperProcessing,
   PAPER_SOURCES,
@@ -110,12 +111,26 @@ const PROCESSING_STATUS_OPTIONS = [
   "pdf_pending",
   "downloading_pdf",
   "pdf_downloaded",
+  "pdf_download_failed",
+  "pdf_unavailable",
+  "extracting_pdf_text",
   "pdf_parsed",
   "fulltext_fallback_parsed",
+  "fulltext_unavailable",
+  "digitizing_file",
   "formatting_markdown",
+  "markdown_ready",
+  "markdown_failed",
+  "markdown_skipped",
   "analyzing_ru",
+  "ru_analysis_ready",
+  "ru_analysis_fallback",
   "extracting_keywords",
+  "keywords_ready",
+  "keywords_failed",
   "indexing_vector",
+  "embedding_ready",
+  "embedding_skipped",
   "ready",
   "ready_with_fallback",
   "completed",
@@ -269,7 +284,7 @@ export default function Patents() {
         );
       if (filters.processingStatus && filters.processingStatus !== "all") {
         items = items.filter(
-          (p) => p.processingStatus === filters.processingStatus,
+          (p) => getProcessingStatusKey(p.processingStatus) === filters.processingStatus,
         );
       }
 
@@ -333,7 +348,9 @@ export default function Patents() {
     : sortedPapers;
 
   const statusOptions = useMemo(() => {
-    const fromLoaded = papers.map((p) => p.processingStatus).filter(Boolean);
+    const fromLoaded = papers
+      .map((p) => getProcessingStatusKey(p.processingStatus))
+      .filter(Boolean);
     const unique = Array.from(
       new Set([...PROCESSING_STATUS_OPTIONS, ...fromLoaded]),
     );

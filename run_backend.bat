@@ -15,6 +15,13 @@ if exist .venv\Scripts\activate.bat (
   exit /b 1
 )
 
+rem Fast local startup: by default do not use uvicorn --reload.
+rem --reload starts an extra WatchFiles reloader process and imports backend in a
+rem child process, which is slow on Windows. If you need auto-reload, run:
+rem   set NICKELFRONT_BACKEND_RELOAD=1
+rem   run_backend.bat
+if not defined NICKELFRONT_BACKEND_RELOAD set "NICKELFRONT_BACKEND_RELOAD=0"
+
 if /I not "%SKIP_BACKEND_MIGRATIONS%"=="1" (
   echo Applying Alembic migrations...
   python backend\apply_migrations.py
@@ -24,5 +31,6 @@ if /I not "%SKIP_BACKEND_MIGRATIONS%"=="1" (
   )
 )
 
+set "NICKELFRONT_SERVICE_NAME=backend_api"
 python backend\start_server.py
 endlocal

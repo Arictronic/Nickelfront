@@ -7,12 +7,27 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_current_user, require_admin_user
-from app.services.rag_chain import process_query
-from app.services.rag_parser import pdf_parser
-from app.services.rag_vector_store import get_rag_vector_store
 from shared.schemas.auth import UserResponse
 
 router = APIRouter(prefix="/rag", tags=["rag"])
+
+
+def _get_process_query():
+    from app.services.rag_chain import process_query
+
+    return process_query
+
+
+def _get_pdf_parser():
+    from app.services.rag_parser import pdf_parser
+
+    return pdf_parser
+
+
+def _get_rag_vector_store():
+    from app.services.rag_vector_store import get_rag_vector_store
+
+    return get_rag_vector_store()
 
 
 class AskRequest(BaseModel):
@@ -64,6 +79,7 @@ async def ask_question(
     logger.info(f"Получен вопрос: {request.question[:100]}...")
 
     try:
+        process_query = _get_process_query()
         result = await asyncio.to_thread(process_query, request.question)
 
         if result.get("error"):
@@ -131,6 +147,7 @@ async def upload_document(
 
         logger.info(f"Парсинг PDF: {file.filename} ({len(file_bytes)} байт)")
 
+        pdf_parser = _get_pdf_parser()
         documents = await asyncio.to_thread(
             pdf_parser.parse_bytes_to_documents,
             file_bytes=file_bytes,
@@ -143,7 +160,7 @@ async def upload_document(
                 detail="Не удалось извлечь текст из PDF",
             )
 
-        vector_store = get_rag_vector_store()
+        vector_store = _get_rag_vector_store()
         added_ids = await asyncio.to_thread(vector_store.add_documents, documents)
 
         logger.info(f"Файл успешно обработан: {file.filename}")
@@ -170,7 +187,7 @@ async def get_stats(
     _current_user: UserResponse = Depends(get_current_user),
 ):
     """Получить статистику RAG системы."""
-    vector_store = get_rag_vector_store()
+    vector_store = _get_rag_vector_store()
     stats = await asyncio.to_thread(vector_store.get_stats)
 
     return StatsResponse(
@@ -191,7 +208,7 @@ async def clear_store(
     """
     logger.warning("Запрос на очистку RAG хранилища")
 
-    vector_store = get_rag_vector_store()
+    vector_store = _get_rag_vector_store()
     success = await asyncio.to_thread(vector_store.clear)
 
     if success:
