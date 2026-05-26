@@ -5,6 +5,7 @@
 """
 
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
@@ -14,16 +15,19 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .api.routes import router
-from .config import settings
 
-# Настройка логирования
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 LOGS_DIR = PROJECT_ROOT / "logs"
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-RAG_LOG_FILE = LOGS_DIR / "rag_api.log"
+raw_rag_log_file = (os.getenv("RAG_LOG_FILE") or "").strip()
+if raw_rag_log_file:
+    configured = Path(raw_rag_log_file)
+    RAG_LOG_FILE = configured if configured.is_absolute() else PROJECT_ROOT / configured
+else:
+    RAG_LOG_FILE = LOGS_DIR / "rag_api.log"
+RAG_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -41,6 +45,10 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+logger.info("RAG logging initialized: file=%s", RAG_LOG_FILE)
+
+from .api.routes import router
+from .config import settings
 
 
 @asynccontextmanager
@@ -50,24 +58,24 @@ async def lifespan(app: FastAPI):
 
     Выполняет инициализацию при запуске и очистку при остановке приложения.
     """
-    # === Инициализация при запуске ===
+
     logger.info("=" * 50)
     logger.info("Запуск RAG-системы для анализа патентов")
     logger.info("=" * 50)
 
-    # Логирование конфигурации
+
     logger.info(f"Директория данных: {settings.data_dir}")
     logger.info(f"Директория БД: {settings.db_dir}")
     logger.info(f"Модель эмбеддингов: {settings.embedding_model_name}")
     logger.info(f"Модель LLM: {settings.llm_model_name}")
     logger.info(f"LLM API URL: {settings.llm_api_base_url}")
 
-    # Проверка наличия API ключа
+
     if not settings.llm_api_key:
         logger.warning("API ключ LLM не установлен! Генерация ответов будет недоступна.")
         logger.warning("Установите LLM_API_KEY в .env файле или переменной окружения.")
 
-    # Создание директорий
+
     settings._create_directories()
     logger.info("Директории для данных созданы/проверены")
 
@@ -76,12 +84,12 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # === Очистка при остановке ===
+
     logger.info("Остановка RAG-системы...")
     logger.info("RAG-система остановлена")
 
 
-# Создание приложения FastAPI
+
 app = FastAPI(
     title="RAG-система для анализа патентов на суперсплавы",
     description="""
@@ -113,10 +121,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Настройка CORS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # В продакшене ограничить до конкретных доменов
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -142,7 +150,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
     )
 
 
-# Подключение маршрутов
+
 app.include_router(router, prefix="/api/v1", tags=["RAG API"])
 
 
@@ -197,7 +205,7 @@ def main():
         "rag.app.main:app",
         host=settings.host,
         port=settings.port,
-        reload=True,  # Автоперезагрузка при разработке
+        reload=True,
         log_level="info",
     )
 

@@ -13,12 +13,12 @@ from app.core.config import settings
 router = APIRouter(prefix="/monitoring", tags=["monitoring"], dependencies=[Depends(require_admin_user)])
 
 
-# Flower API base URL
+
 FLOWER_HOST = settings.get_flower_url()
 FLOWER_TIMEOUT = httpx.Timeout(connect=0.8, read=6.0, write=2.0, pool=1.0)
 FLOWER_HTTP_OK_FOR_REACHABILITY = {200, 301, 302, 307, 308, 401, 403, 404}
-WORKER_CACHE_TTL_SECONDS = 180
-WORKER_BUSY_AFTER_SECONDS = 15
+WORKER_CACHE_TTL_SECONDS = 60
+WORKER_STALE_AFTER_SECONDS = 15
 _WORKER_CACHE: dict[str, dict[str, Any]] = {}
 
 
@@ -166,8 +166,8 @@ def _get_cached_workers() -> list[dict[str, Any]]:
 
         cached_worker = dict(worker)
         cached_worker["stale_seconds"] = age_seconds
-        if age_seconds >= WORKER_BUSY_AFTER_SECONDS:
-            cached_worker["status"] = "busy"
+        if age_seconds >= WORKER_STALE_AFTER_SECONDS:
+            cached_worker["status"] = "stale"
         result.append(cached_worker)
 
     for name in expired:
@@ -244,6 +244,58 @@ def _uniq_strings(values: list[Any] | tuple[Any, ...] | set[Any]) -> list[str]:
         seen.add(text)
         result.append(text)
     return result
+
+
+def _split_queue_names(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        parts = value
+    else:
+        parts = str(value).replace(";", ",").split(",")
+    return _uniq_strings([str(part).strip() for part in parts if str(part).strip()])
+
+
+def _expected_queue_names() -> list[str]:
+    names: list[str] = []
+    names.extend(_split_queue_names(getattr(settings, "WORKER_QUEUES", "celery")))
+    names.extend(_split_queue_names(getattr(settings, "CONTENT_QUEUE_NAME", "content")))
+    if bool(getattr(settings, "QWEN_QUEUE_ENABLED", True)):
+        names.extend(_split_queue_names(getattr(settings, "QWEN_QUEUE_NAME", "qwen")))
+    return _uniq_strings(names or ["celery"])
+
+
+def _task_time_sort_value(value: Any) -> float:
+    if value is None:
+        return 0.0
+
+    if isinstance(value, (int, float)):
+        raw = float(value)
+        return raw / 1000.0 if raw > 10_000_000_000 else raw
+
+    text = str(value).strip()
+    if not text:
+        return 0.0
+
+    try:
+        raw = float(text)
+        return raw / 1000.0 if raw > 10_000_000_000 else raw
+    except ValueError:
+        pass
+
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _task_sort_key(task: dict[str, Any]) -> float:
+    return max(
+        _task_time_sort_value(task.get("received")),
+        _task_time_sort_value(task.get("started")),
+        _task_time_sort_value(task.get("succeeded")),
+        _task_time_sort_value(task.get("failed")),
+    )
 
 
 def _merge_worker_records(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[str, Any]:
@@ -473,10 +525,13 @@ async def get_celery_status():
                 _flower_get_json(client, "/api/tasks", params={"limit": 100}),
             )
 
-        workers_data, workers_reachable = workers_result
-        tasks_data, tasks_reachable = tasks_result
-        workers_data = workers_data if isinstance(workers_data, dict) else {}
-        tasks_data = tasks_data if isinstance(tasks_data, dict) else {}
+        workers_data_raw, workers_reachable = workers_result
+        tasks_data_raw, tasks_reachable = tasks_result
+        flower_workers_api_available = isinstance(workers_data_raw, dict)
+        flower_tasks_api_available = isinstance(tasks_data_raw, dict)
+        flower_api_available = flower_workers_api_available or flower_tasks_api_available
+        workers_data = workers_data_raw if isinstance(workers_data_raw, dict) else {}
+        tasks_data = tasks_data_raw if isinstance(tasks_data_raw, dict) else {}
         flower_reachable = bool(probe_ok or workers_reachable or tasks_reachable)
 
         flower_workers = [
@@ -512,6 +567,8 @@ async def get_celery_status():
                 "failed": task_counts["failed"],
             },
             "flower_available": flower_reachable,
+            "flower_api_available": flower_api_available,
+            "expected_queues": _expected_queue_names(),
             "flower_url": FLOWER_HOST,
             "generated_at": datetime.now().isoformat(),
         }
@@ -538,6 +595,8 @@ async def get_celery_status():
                     "failed": 0,
                 },
                 "flower_available": False,
+                "flower_api_available": False,
+                "expected_queues": _expected_queue_names(),
                 "flower_url": FLOWER_HOST,
                 "warning": str(e),
                 "generated_at": datetime.now().isoformat(),
@@ -556,6 +615,8 @@ async def get_celery_status():
                 "failed": 0,
             },
             "flower_available": False,
+            "flower_api_available": False,
+            "expected_queues": _expected_queue_names(),
             "flower_url": FLOWER_HOST,
             "error": str(e),
             "generated_at": datetime.now().isoformat(),
@@ -635,12 +696,15 @@ async def get_tasks_info(
             if state:
                 params["state"] = state
 
-            tasks_data, _ = await _flower_get_json(client, "/api/tasks", params=params)
-            tasks_data = tasks_data if isinstance(tasks_data, dict) else {}
+            tasks_data_raw, _ = await _flower_get_json(client, "/api/tasks", params=params)
+            flower_api_available = isinstance(tasks_data_raw, dict)
+            tasks_data = tasks_data_raw if isinstance(tasks_data_raw, dict) else {}
 
-            # Форматируем ответ
+
             tasks = []
-            for task_id, info in (tasks_data.items() if isinstance(tasks_data, dict) else {}):
+            for task_id, info in tasks_data.items():
+                if not isinstance(info, dict):
+                    continue
                 tasks.append({
                     "task_id": task_id,
                     "name": info.get("name", "unknown"),
@@ -655,34 +719,45 @@ async def get_tasks_info(
                     "worker": info.get("worker", {}),
                 })
 
-            # Сортируем по времени получения
-            tasks.sort(key=lambda t: t.get("received", ""), reverse=True)
 
+            tasks.sort(key=_task_sort_key, reverse=True)
+
+            source = "flower"
             if len(tasks) == 0:
                 tasks = await asyncio.to_thread(_inspect_tasks_details_fallback, limit, state)
+                tasks.sort(key=_task_sort_key, reverse=True)
+                source = "inspect"
 
             return {
                 "tasks": tasks[:limit],
                 "total": len(tasks),
                 "limit": limit,
+                "source": source,
+                "flower_api_available": flower_api_available,
                 "generated_at": datetime.now().isoformat(),
             }
 
     except httpx.RequestError:
         tasks = await asyncio.to_thread(_inspect_tasks_details_fallback, limit, state)
+        tasks.sort(key=_task_sort_key, reverse=True)
         return {
             "tasks": tasks[:limit],
             "total": len(tasks),
             "limit": limit,
+            "source": "inspect",
+            "flower_api_available": False,
             "generated_at": datetime.now().isoformat(),
         }
     except Exception as e:
         tasks = await asyncio.to_thread(_inspect_tasks_details_fallback, limit, state)
         if tasks:
+            tasks.sort(key=_task_sort_key, reverse=True)
             return {
                 "tasks": tasks[:limit],
                 "total": len(tasks),
                 "limit": limit,
+                "source": "inspect",
+                "flower_api_available": False,
                 "generated_at": datetime.now().isoformat(),
             }
         raise HTTPException(status_code=500, detail=str(e))
@@ -713,6 +788,7 @@ async def get_queues_info():
         return {
             "queues": queues,
             "total": len(queues),
+            "expected_queues": _expected_queue_names(),
             "generated_at": datetime.now().isoformat(),
         }
 
@@ -722,6 +798,7 @@ async def get_queues_info():
         return {
             "queues": queues,
             "total": len(queues),
+            "expected_queues": _expected_queue_names(),
             "generated_at": datetime.now().isoformat(),
         }
     except Exception as e:
@@ -731,6 +808,7 @@ async def get_queues_info():
             return {
                 "queues": queues,
                 "total": len(queues),
+                "expected_queues": _expected_queue_names(),
                 "generated_at": datetime.now().isoformat(),
             }
         raise HTTPException(status_code=500, detail=str(e))
@@ -745,7 +823,7 @@ async def get_scheduled_tasks_info():
         Список периодических задач
     """
     try:
-        # Получаем конфигурацию из celery_app
+
         celery_app = _get_celery_app()
         beat_schedule = celery_app.conf.beat_schedule or {}
         descriptions = {

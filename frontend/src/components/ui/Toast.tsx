@@ -38,11 +38,11 @@ function useToastState(): ToastApi {
     return {
       toasts,
       success: (message, duration) => addToast("success", message, duration),
-      error: (message, duration) => addToast("error", message, duration),
+      error:   (message, duration) => addToast("error",   message, duration),
       warning: (message, duration) => addToast("warning", message, duration),
-      info: (message, duration) => addToast("info", message, duration),
-      dismiss: (id) => setToasts((prev) => prev.filter((toast) => toast.id !== id)),
-      clear: () => setToasts([]),
+      info:    (message, duration) => addToast("info",    message, duration),
+      dismiss: (id) => setToasts((prev) => prev.filter((t) => t.id !== id)),
+      clear:   ()   => setToasts([]),
     };
   }, [toasts]);
 
@@ -56,13 +56,17 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
 export function useToast() {
   const ctx = useContext(ToastContext);
-  if (!ctx) {
-    throw new Error("useToast must be used inside ToastProvider");
-  }
+  if (!ctx) throw new Error("useToast must be used inside ToastProvider");
   return ctx;
 }
 
-/** Компонент отдельного Toast уведомления. */
+const TOAST_COLORS: Record<ToastType, { bg: string; border: string; color: string; icon: string }> = {
+  success: { bg: "var(--success-bg)",  border: "var(--success-border)", color: "var(--success)", icon: "✓" },
+  error:   { bg: "var(--danger-bg)",   border: "var(--danger-border)",  color: "var(--danger)",  icon: "✕" },
+  warning: { bg: "var(--warning-bg)",  border: "var(--warning-border)", color: "var(--warning)", icon: "⚠" },
+  info:    { bg: "var(--info-bg)",     border: "var(--info-border)",    color: "var(--info)",    icon: "ℹ" },
+};
+
 function ToastItem({ id, type, message, duration = 5000, onDismiss }: ToastProps) {
   useEffect(() => {
     if (duration <= 0) return;
@@ -70,54 +74,51 @@ function ToastItem({ id, type, message, duration = 5000, onDismiss }: ToastProps
     return () => window.clearTimeout(timer);
   }, [id, duration, onDismiss]);
 
-  const getStyles = () => {
-    const base = {
-      padding: "12px 16px",
-      borderRadius: 8,
-      marginBottom: 8,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: 12,
-      boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-      minWidth: 300,
-      maxWidth: 500,
-      animation: "slideIn 0.3s ease-out",
-    } as const;
-
-    switch (type) {
-      case "success":
-        return { ...base, background: "#22c55e", color: "white" };
-      case "error":
-        return { ...base, background: "#ef4444", color: "white" };
-      case "warning":
-        return { ...base, background: "#f59e0b", color: "white" };
-      case "info":
-      default:
-        return { ...base, background: "#4a6cf7", color: "white" };
-    }
-  };
-
-  const icon = type === "success" ? "✓" : type === "error" ? "✕" : type === "warning" ? "⚠" : "ℹ";
+  const c = TOAST_COLORS[type];
 
   return (
-    <div style={getStyles()} role="alert">
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 18 }}>{icon}</span>
+    <div
+      role="alert"
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 10,
+        justifyContent: "space-between",
+        padding: "12px 14px",
+        marginBottom: 8,
+        borderRadius: "var(--radius)",
+        border: `1px solid ${c.border}`,
+        background: c.bg,
+        color: c.color,
+        minWidth: 280,
+        maxWidth: 440,
+        boxShadow: "var(--shadow-md)",
+        animation: "slideIn 0.25s ease-out",
+        fontFamily: "var(--font-body)",
+        fontSize: 13,
+        fontWeight: 600,
+        lineHeight: 1.4,
+      }}
+    >
+      <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 15, flexShrink: 0 }}>{c.icon}</span>
         <span>{message}</span>
-      </div>
+      </span>
       <button
         type="button"
         onClick={() => onDismiss(id)}
-        aria-label="Закрыть уведомление"
+        aria-label="Закрыть"
         style={{
           background: "transparent",
           border: "none",
           color: "inherit",
           cursor: "pointer",
-          padding: 4,
-          fontSize: 18,
-          opacity: 0.8,
+          padding: "2px 4px",
+          fontSize: 16,
+          opacity: 0.65,
+          lineHeight: 1,
+          marginTop: 1,
+          flexShrink: 0,
         }}
       >
         ×
@@ -133,27 +134,16 @@ interface ToastContainerProps {
 }
 
 export function ToastContainer({ toasts, onDismiss, position = "top-right" }: ToastContainerProps) {
-  const positionStyles =
-    position === "top-left"
-      ? { top: 20, left: 20 }
-      : position === "bottom-right"
-        ? { bottom: 20, right: 20 }
-        : position === "bottom-left"
-          ? { bottom: 20, left: 20 }
-          : { top: 20, right: 20 };
+  const pos =
+    position === "top-left"     ? { top: 72, left: 20 }
+    : position === "bottom-right" ? { bottom: 20, right: 20 }
+    : position === "bottom-left"  ? { bottom: 20, left: 20 }
+    : { top: 72, right: 20 };
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        ...positionStyles,
-        zIndex: 9999,
-        display: "flex",
-        flexDirection: "column",
-      }}
-    >
-      {toasts.map((toast) => (
-        <ToastItem key={toast.id} {...toast} onDismiss={onDismiss} />
+    <div style={{ position: "fixed", ...pos, zIndex: 9999, display: "flex", flexDirection: "column" }}>
+      {toasts.map((t) => (
+        <ToastItem key={t.id} {...t} onDismiss={onDismiss} />
       ))}
     </div>
   );

@@ -40,6 +40,11 @@ def _first_core_text(value: Any) -> str | None:
     return None
 
 
+def _response_status_code(response: Any) -> int | None:
+    status_code = getattr(response, "status_code", None)
+    return status_code if isinstance(status_code, int) else None
+
+
 class COREClient(BaseAPIClient):
     """Client for CORE API v3."""
 
@@ -77,23 +82,26 @@ class COREClient(BaseAPIClient):
         client = await self._get_client()
 
         params = {"q": query, "limit": min(limit, 100), "offset": offset}
+        if full_text_only:
+            params["filter"] = "has_full_text:true"
         params.update(kwargs)
 
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
                 response = await client.get("/search/works/", params=params)
-                if response.status_code >= 400:
+                status_code = _response_status_code(response)
+                if status_code is not None and status_code >= 400:
                     decision = decide_for_status(
                         source="CORE",
-                        status_code=response.status_code,
+                        status_code=status_code,
                         attempt=attempt,
                         config=self._retry_config,
-                        retry_after_header=response.headers.get("Retry-After"),
+                        retry_after_header=getattr(getattr(response, "headers", {}), "get", lambda *_: None)("Retry-After"),
                     )
                     if decision.retry:
                         logger.warning(
                             "CORE transient status {} for query='{}' (attempt {}/{}), retry in {:.1f}s",
-                            response.status_code,
+                            status_code,
                             query,
                             attempt,
                             self.MAX_RETRIES,
@@ -145,9 +153,8 @@ class COREClient(BaseAPIClient):
                     )
                     await asyncio.sleep(decision.delay_seconds)
                     continue
-                if decision.error is not None:
-                    raise decision.error from exc
-                raise SourceUnavailableError(source="CORE", message=f"Search failure: {exc}") from exc
+                logger.warning("CORE search failed for query='{}': {}", query, exc)
+                return []
 
         raise SourceUnavailableError(source="CORE", message="Search failed without a response")
 
@@ -156,19 +163,20 @@ class COREClient(BaseAPIClient):
 
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
-                response = await client.get(f"/works/{article_id}")
-                if response.status_code >= 400:
+                response = await client.get(f"/articles/{article_id}")
+                status_code = _response_status_code(response)
+                if status_code is not None and status_code >= 400:
                     decision = decide_for_status(
                         source="CORE",
-                        status_code=response.status_code,
+                        status_code=status_code,
                         attempt=attempt,
                         config=self._retry_config,
-                        retry_after_header=response.headers.get("Retry-After"),
+                        retry_after_header=getattr(getattr(response, "headers", {}), "get", lambda *_: None)("Retry-After"),
                     )
                     if decision.retry:
                         logger.warning(
                             "CORE get_article transient status {} for id={} (attempt {}/{}), retry in {:.1f}s",
-                            response.status_code,
+                            status_code,
                             article_id,
                             attempt,
                             self.MAX_RETRIES,
@@ -198,9 +206,8 @@ class COREClient(BaseAPIClient):
                 if decision.retry:
                     await asyncio.sleep(decision.delay_seconds)
                     continue
-                if decision.error is not None:
-                    raise decision.error from exc
-                raise SourceUnavailableError(source="CORE", message=f"Article request failure: {exc}") from exc
+                logger.warning("CORE get_article failed for id={}: {}", article_id, exc)
+                return None
 
         return None
 
@@ -211,6 +218,10 @@ class COREClient(BaseAPIClient):
             download_url = _first_core_text(article.get("downloadUrl"))
             if download_url:
                 return download_url
+
+            source_fulltext_url = _first_core_text(article.get("source_fulltext_url"))
+            if source_fulltext_url:
+                return source_fulltext_url
 
             fulltext_url = _first_core_text(article.get("sourceFulltextUrls"))
             if fulltext_url:
@@ -231,6 +242,9 @@ class COREClient(BaseAPIClient):
             data = response.json()
             if not isinstance(data, dict):
                 return []
+            direct_suggestions = data.get("suggestions")
+            if isinstance(direct_suggestions, list):
+                return [str(item) for item in direct_suggestions[:limit] if str(item).strip()]
             suggestions = []
             for item in data.get("results", []):
                 title = item.get("title") if isinstance(item, dict) else None

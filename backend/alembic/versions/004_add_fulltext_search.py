@@ -9,7 +9,7 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-# revision identifiers, used by Alembic.
+
 revision = '004'
 down_revision = '003_add_embedding'
 branch_labels = None
@@ -19,13 +19,13 @@ depends_on = None
 def upgrade() -> None:
     """Добавить колонки и индексы для полнотекстового поиска."""
 
-    # Включаем расширение для trigram индексов
+
     op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
 
-    # Добавляем колонку tsvector для полнотекстового поиска
+
     op.add_column('papers', sa.Column('search_vector', postgresql.TSVECTOR(), nullable=True))
 
-    # Заполняем существующие записи
+
     op.execute("""
         UPDATE papers SET search_vector =
             setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
@@ -33,7 +33,7 @@ def upgrade() -> None:
             setweight(to_tsvector('english', coalesce((SELECT string_agg(elem, ' ') FROM jsonb_array_elements_text(keywords::jsonb) AS elem), '')), 'C')
     """)
 
-    # Добавляем индекс GIN для полнотекстового поиска
+
     op.create_index(
         'ix_papers_search_vector',
         'papers',
@@ -42,7 +42,7 @@ def upgrade() -> None:
         postgresql_using='gin'
     )
 
-    # Добавляем индекс для ранжирования по релевантности
+
     op.create_index(
         'ix_papers_title_trgm',
         'papers',
@@ -52,7 +52,7 @@ def upgrade() -> None:
         postgresql_ops={'title': 'gin_trgm_ops'}
     )
 
-    # Добавляем триггер для автоматического обновления search_vector
+
     op.execute("""
         CREATE OR REPLACE FUNCTION papers_search_vector_update() RETURNS trigger AS $$
         BEGIN
@@ -76,13 +76,13 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Удалить колонки и индексы для полнотекстового поиска."""
 
-    # Удаляем триггер
+
     op.execute("DROP TRIGGER IF EXISTS papers_search_vector_trigger ON papers")
     op.execute("DROP FUNCTION IF EXISTS papers_search_vector_update()")
 
-    # Удаляем индексы
+
     op.drop_index('ix_papers_search_vector')
     op.drop_index('ix_papers_title_trgm')
 
-    # Удаляем колонку
+
     op.drop_column('papers', 'search_vector')

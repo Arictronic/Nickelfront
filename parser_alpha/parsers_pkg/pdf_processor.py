@@ -1,216 +1,242 @@
-"""Universal PDF processing module for all parsers."""
+"""Compatibility wrapper for PDF processing used by parser_alpha.
+
+The project has one canonical PDF extraction implementation:
+``backend.app.services.pdf_content_parser.PDFParser``.  Older parser_alpha code used a
+separate pdfplumber/PyPDF2 pipeline here, which produced text of different
+quality from the backend content pipeline.  This module deliberately stays as a
+thin adapter so all parsers receive the same cleaned/layout-aware PDF text.
+"""
 
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
-try:
-    import PyPDF2
-    PYPDF2_AVAILABLE = True
-except ImportError:
-    PYPDF2_AVAILABLE = False
-    logger.warning("PyPDF2 not installed. PDF text extraction will be unavailable.")
+PARSER_ALPHA_DIR = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = PARSER_ALPHA_DIR.parent
+BACKEND_DIR = PROJECT_ROOT / "backend"
+for _path in (PROJECT_ROOT, BACKEND_DIR, PARSER_ALPHA_DIR):
+    _path_str = str(_path)
+    if _path.exists() and _path_str not in sys.path:
+        sys.path.insert(0, _path_str)
+
+
+def _is_missing_import_path(exc: ModuleNotFoundError, roots: tuple[str, ...]) -> bool:
+    """Detect only missing package roots, not failures inside parser modules."""
+
+    missing = str(getattr(exc, "name", "") or "")
+    return any(missing == root or missing.startswith(f"{root}.") for root in roots)
+
 
 try:
-    import pdfplumber
-    PDFPLUMBER_AVAILABLE = True
-except ImportError:
-    PDFPLUMBER_AVAILABLE = False
-    logger.warning("pdfplumber not installed. Advanced PDF extraction will be unavailable.")
+    from app.services.pdf_content_parser import PDFParser as CanonicalPDFParser
+    from app.services.pdf_content_parser import PdfExtractionError
+except ModuleNotFoundError as exc:
+    if not _is_missing_import_path(exc, ("app",)):
+        raise
+    try:
+        from backend.app.services.pdf_content_parser import PDFParser as CanonicalPDFParser
+        from backend.app.services.pdf_content_parser import PdfExtractionError
+    except ModuleNotFoundError as backend_exc:
+        if not _is_missing_import_path(backend_exc, ("backend",)):
+            raise
+        CanonicalPDFParser = None
+        PdfExtractionError = RuntimeError
+        _IMPORT_ERROR = backend_exc
+    else:
+        _IMPORT_ERROR = None
+else:
+    _IMPORT_ERROR = None
 
 
 class PDFProcessor:
-    """Universal PDF processor for extracting and analyzing scientific papers."""
-    
-    def __init__(self):
-        self.pypdf2_available = PYPDF2_AVAILABLE
-        self.pdfplumber_available = PDFPLUMBER_AVAILABLE
-    
+    """Universal PDF processor for extracting and analyzing scientific papers.
+
+    Extraction is delegated to ``backend.app.services.pdf_content_parser.PDFParser``.
+    The summary/analysis helpers are kept for backward compatibility with
+    parser_alpha callers.
+    """
+
+    def __init__(self, parser: Any | None = None):
+        if parser is not None:
+            self.parser = parser
+            return
+        if CanonicalPDFParser is None:
+            raise RuntimeError(
+                "Canonical PDFParser is unavailable. Run parser_alpha from the "
+                f"Nickelfront project root. Import error: {_IMPORT_ERROR}"
+            )
+        self.parser = CanonicalPDFParser()
+
+    def parse_bytes(
+        self,
+        file_bytes: bytes,
+        filename: str = "unknown.pdf",
+        metadata: dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return structured parser content for bytes callers."""
+
+        try:
+            return self.parser.parse_bytes(
+                file_bytes,
+                filename=filename,
+                metadata=metadata,
+                options=options,
+            )
+        except Exception as exc:
+            logger.exception(f"PDF parse_bytes failed for {filename}: {exc}")
+            raise
+
+    def extract_content(
+        self,
+        pdf_path: str | Path | None = None,
+        *,
+        file_bytes: bytes | None = None,
+        filename: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return structured final text/pages/content_blocks."""
+
+        if file_bytes is not None:
+            return self.parser.extract_content(
+                file_bytes=file_bytes,
+                filename=filename or "unknown.pdf",
+                metadata=metadata,
+                options=options,
+            )
+        if pdf_path is None:
+            raise ValueError("extract_content expects pdf_path or file_bytes")
+        return self.parser.extract_content(
+            file_path=str(pdf_path),
+            filename=filename,
+            metadata=metadata,
+            options=options,
+        )
+
     def extract_text_from_pdf(self, pdf_path: str | Path) -> str | None:
-        """
-        Extract text from PDF file using available libraries.
-        
-        Tries pdfplumber first (better quality), falls back to PyPDF2.
-        
-        Args:
-            pdf_path: Path to PDF file
-            
-        Returns:
-            Extracted text or None if extraction failed
-        """
+        """Extract text from a PDF file using the canonical project parser."""
         pdf_path = Path(pdf_path)
-        
         if not pdf_path.exists():
             logger.error(f"PDF file not found: {pdf_path}")
             return None
-        
-        # Try pdfplumber first (better quality)
-        if self.pdfplumber_available:
-            try:
-                text = self._extract_with_pdfplumber(pdf_path)
-                if text:
-                    logger.info(f"Extracted {len(text)} characters from {pdf_path.name} using pdfplumber")
-                    return text
-            except Exception as e:
-                logger.warning(f"pdfplumber extraction failed for {pdf_path.name}: {e}")
-        
-        # Fallback to PyPDF2
-        if self.pypdf2_available:
-            try:
-                text = self._extract_with_pypdf2(pdf_path)
-                if text:
-                    logger.info(f"Extracted {len(text)} characters from {pdf_path.name} using PyPDF2")
-                    return text
-            except Exception as e:
-                logger.error(f"PyPDF2 extraction failed for {pdf_path.name}: {e}")
-        
-        logger.error(f"No PDF extraction library available or all methods failed for {pdf_path.name}")
-        return None
-    
-    def _extract_with_pdfplumber(self, pdf_path: Path) -> str | None:
-        """Extract text using pdfplumber."""
-        import pdfplumber
-        
-        text_parts = []
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text_parts.append(page_text)
-        
-        return "\n\n".join(text_parts) if text_parts else None
-    
-    def _extract_with_pypdf2(self, pdf_path: Path) -> str | None:
-        """Extract text using PyPDF2."""
-        import PyPDF2
-        
-        text_parts = []
-        with open(pdf_path, 'rb') as file:
-            pdf_reader = PyPDF2.PdfReader(file)
-            for page in pdf_reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text_parts.append(page_text)
-        
-        return "\n\n".join(text_parts) if text_parts else None
-    
+        try:
+            text = self.parser.extract_text_from_file(str(pdf_path))
+            if text:
+                logger.info(f"Extracted {len(text)} characters from {pdf_path.name} using canonical PDFParser")
+                return text
+            logger.warning(f"Canonical PDFParser returned empty text for {pdf_path.name}")
+            return None
+        except Exception as exc:
+            logger.exception(f"PDF extraction failed for {pdf_path.name}: {exc}")
+            return None
+
+    def extract_content_from_pdf(self, pdf_path: str | Path, metadata: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """Extract structured final content blocks for downstream RAG/Qwen adapters."""
+        pdf_path = Path(pdf_path)
+        if not pdf_path.exists():
+            logger.error(f"PDF file not found: {pdf_path}")
+            return None
+        try:
+            content = self.parser.extract_content_from_file(str(pdf_path), metadata=metadata)
+            part_count = len(content.get("content_parts") or [])
+            logger.info(f"Extracted {part_count} structured content parts from {pdf_path.name}")
+            return content
+        except Exception as exc:
+            logger.exception(f"Structured PDF extraction failed for {pdf_path.name}: {exc}")
+            return None
+
+    def extract_qwen_markdown_from_pdf(self, pdf_path: str | Path, metadata: dict[str, Any] | None = None) -> str | None:
+        """Extract Qwen-ready markdown from structured parser content parts."""
+        content = self.extract_content_from_pdf(pdf_path, metadata=metadata)
+        if not content:
+            return None
+        markdown = str(content.get("qwen_markdown") or "").strip()
+        return markdown or None
+
     def create_summary(self, text: str, max_sentences: int = 3) -> str:
-        """
-        Create a brief summary from the text.
-        
-        Extracts key sentences from abstract or introduction.
-        
-        Args:
-            text: Full text of the paper
-            max_sentences: Maximum number of sentences in summary
-            
-        Returns:
-            Summary text
-        """
+        """Create a brief summary from the text."""
         if not text:
             return ""
-        
-        # Try to find abstract section
+
         abstract = self._extract_section(text, ["abstract", "аннотация", "резюме"])
         if abstract:
             sentences = self._split_into_sentences(abstract)
             return " ".join(sentences[:max_sentences])
-        
-        # Fallback to first few sentences
+
         sentences = self._split_into_sentences(text)
         return " ".join(sentences[:max_sentences])
-    
+
     def analyze_paper(self, text: str, metadata: dict[str, Any]) -> str:
-        """
-        Analyze paper and create analysis text.
-        
-        Includes:
-        - Paper type and domain
-        - Key findings
-        - Methodology
-        - Relevance assessment
-        
-        Args:
-            text: Full text of the paper
-            metadata: Paper metadata (title, authors, year, etc.)
-            
-        Returns:
-            Analysis text in Russian
-        """
+        """Analyze paper and create a compact Russian analysis text."""
         if not text:
             return "Анализ недоступен: текст статьи не извлечен."
-        
+
         analysis_parts = []
-        
-        # Basic info
         title = metadata.get("title", "Без названия")
         year = metadata.get("publication_date", "")
         if year:
             year = str(year)[:4]
-        
+
         analysis_parts.append(f"Статья: {title}")
         if year:
             analysis_parts.append(f"Год публикации: {year}")
-        
-        # Detect paper type
+
         paper_type = self._detect_paper_type(text)
         analysis_parts.append(f"Тип работы: {paper_type}")
-        
-        # Extract key topics
+
         topics = self._extract_key_topics(text)
         if topics:
             analysis_parts.append(f"Ключевые темы: {', '.join(topics[:5])}")
-        
-        # Check for metallurgy relevance
+
         relevance = self._assess_metallurgy_relevance(text)
         analysis_parts.append(f"Релевантность для металлургии: {relevance}")
-        
         return "\n".join(analysis_parts)
-    
+
     def _extract_section(self, text: str, section_names: list[str]) -> str | None:
-        """Extract a specific section from the text."""
-        text_lower = text.lower()
-        
+        """Extract a section without applying lower-case indexes to original text."""
+        if not text:
+            return None
         for section_name in section_names:
-            # Look for section header
-            pattern = rf"\b{section_name}\b[\s:]*\n(.*?)(?:\n\n|\n[A-Z]{{2,}}|\Z)"
-            match = re.search(pattern, text_lower, re.DOTALL | re.IGNORECASE)
-            if match:
-                # Get the actual text (not lowercased)
-                start = match.start(1)
-                end = match.end(1)
-                return text[start:end].strip()
-        
+            pattern = rf"(?im)^\s*(?:\d+(?:\.\d+)*\.?\s+)?{re.escape(section_name)}\s*:?\s*$"
+            match = re.search(pattern, text)
+            if not match:
+                continue
+            start = match.end()
+            next_header = re.search(
+                r"(?m)^\s*(?:\d+(?:\.\d+)*\.?\s+)?(?:abstract|keywords?|introduction|background|"
+                r"related work|methodology|methods?|materials?|experimental setup|results?|discussion|"
+                r"limitations|future work|conclusions?|references|acknowledg(?:e)?ments?|appendix|nomenclature)\b.*$",
+                text[start:],
+                flags=re.IGNORECASE,
+            )
+            end = start + next_header.start() if next_header else len(text)
+            section_text = text[start:end].strip()
+            return section_text or None
         return None
-    
+
     def _split_into_sentences(self, text: str) -> list[str]:
-        """Split text into sentences."""
-        # Simple sentence splitter
-        sentences = re.split(r'[.!?]+\s+', text)
+        sentences = re.split(r"(?<=[.!?])\s+", text or "")
         return [s.strip() for s in sentences if len(s.strip()) > 20]
-    
+
     def _detect_paper_type(self, text: str) -> str:
-        """Detect the type of scientific paper."""
         text_lower = text.lower()
-        
         if any(word in text_lower for word in ["review", "обзор", "survey"]):
             return "Обзорная статья"
-        elif any(word in text_lower for word in ["experimental", "эксперимент", "measurement"]):
+        if any(word in text_lower for word in ["experimental", "эксперимент", "measurement"]):
             return "Экспериментальное исследование"
-        elif any(word in text_lower for word in ["simulation", "modeling", "моделирование"]):
+        if any(word in text_lower for word in ["simulation", "modeling", "моделирование"]):
             return "Моделирование"
-        elif any(word in text_lower for word in ["theoretical", "теоретическ"]):
+        if any(word in text_lower for word in ["theoretical", "теоретическ"]):
             return "Теоретическое исследование"
-        else:
-            return "Исследовательская статья"
-    
+        return "Исследовательская статья"
+
     def _extract_key_topics(self, text: str) -> list[str]:
-        """Extract key topics from the text."""
-        # Metallurgy-specific keywords
         metallurgy_keywords = {
             "nickel": "никель",
             "alloy": "сплав",
@@ -229,109 +255,23 @@ class PDFProcessor:
             "fatigue": "усталость",
             "fracture": "разрушение",
         }
-        
         text_lower = text.lower()
         found_topics = []
-        
         for eng, rus in metallurgy_keywords.items():
             if eng in text_lower or rus in text_lower:
                 found_topics.append(rus)
-        
         return found_topics
-    
+
     def _assess_metallurgy_relevance(self, text: str) -> str:
-        """Assess relevance to metallurgy."""
-        topics = self._extract_key_topics(text)
-        
-        if len(topics) >= 5:
-            return "Высокая (прямое отношение к металлургии)"
-        elif len(topics) >= 3:
-            return "Средняя (частичное отношение к металлургии)"
-        elif len(topics) >= 1:
-            return "Низкая (косвенное отношение к металлургии)"
-        else:
-            return "Не определена"
-    
-    def needs_translation(self, text: str) -> bool:
-        """
-        Check if text needs translation to Russian.
-        
-        Args:
-            text: Text to check
-            
-        Returns:
-            True if text is not in Russian
-        """
-        if not text:
-            return False
-        
-        # Simple heuristic: check for Cyrillic characters
-        cyrillic_chars = sum(1 for c in text if '\u0400' <= c <= '\u04FF')
-        total_chars = sum(1 for c in text if c.isalpha())
-        
-        if total_chars == 0:
-            return False
-        
-        # If less than 30% Cyrillic, assume it needs translation
-        return (cyrillic_chars / total_chars) < 0.3
-    
-    def process_paper_pdf(
-        self,
-        pdf_path: str | Path,
-        metadata: dict[str, Any],
-        create_translation: bool = True,
-    ) -> dict[str, str]:
-        """
-        Complete PDF processing pipeline.
-        
-        Args:
-            pdf_path: Path to PDF file
-            metadata: Paper metadata
-            create_translation: Whether to create translation placeholder
-            
-        Returns:
-            Dictionary with:
-            - full_text: Extracted text
-            - summary_ru: Brief summary in Russian
-            - analysis_ru: Analysis in Russian
-            - translation_ru: Translation placeholder or None
-        """
-        result = {
-            "full_text": None,
-            "summary_ru": None,
-            "analysis_ru": None,
-            "translation_ru": None,
-        }
-        
-        # Extract text
-        text = self.extract_text_from_pdf(pdf_path)
-        if not text:
-            logger.error(f"Failed to extract text from {pdf_path}")
-            result["analysis_ru"] = "Ошибка: не удалось извлечь текст из PDF"
-            return result
-        
-        result["full_text"] = text
-        
-        # Create summary
-        summary = self.create_summary(text)
-        if summary:
-            # If summary is in English, add note
-            if self.needs_translation(summary):
-                result["summary_ru"] = f"[EN] {summary}\n\n[Требуется перевод]"
-            else:
-                result["summary_ru"] = summary
-        
-        # Create analysis
-        result["analysis_ru"] = self.analyze_paper(text, metadata)
-        
-        # Translation placeholder
-        if create_translation and self.needs_translation(text):
-            abstract = self._extract_section(text, ["abstract"])
-            if abstract:
-                result["translation_ru"] = f"[Требуется перевод аннотации]\n\nОригинал:\n{abstract[:500]}..."
-        
-        return result
+        text_lower = text.lower()
+        high_relevance = ["nickel", "superalloy", "alloy", "metal", "microstructure"]
+        medium_relevance = ["corrosion", "oxidation", "mechanical", "thermal", "materials"]
 
+        high_count = sum(1 for word in high_relevance if word in text_lower)
+        medium_count = sum(1 for word in medium_relevance if word in text_lower)
 
-# Global instance
-pdf_processor = PDFProcessor()
+        if high_count >= 3:
+            return "Высокая"
+        if high_count >= 1 or medium_count >= 3:
+            return "Средняя"
+        return "Низкая"

@@ -19,7 +19,7 @@ for _path in (PROJECT_ROOT, BACKEND_DIR):
         sys.path.insert(0, _path_str)
 
 from app.db.base import Base
-import app.db.models  # noqa: F401 - register SQLAlchemy models for Alembic
+import app.db.models
 from app.core.config import settings
 
 config = context.config
@@ -29,7 +29,7 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-# Переопределяем URL из настроек
+
 config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
 
 

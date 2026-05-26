@@ -54,10 +54,10 @@ def _coerce_string_list(value: Any, *, split_commas: bool = True) -> list[str]:
         text = " ".join(value.split()).strip()
         if not text:
             return []
-        # Author names often arrive as already-normalized strings in
-        # "Family, Given" form.  Splitting those by comma creates fake authors
-        # ("Smith", "John").  Keep comma splitting only for keyword-like fields;
-        # semicolon/newline remain safe legacy delimiters for authors.
+
+
+
+
         delimiter = r"[;,\n]+" if split_commas else r"[;\n]+"
         parts = [part.strip() for part in re.split(delimiter, text) if part.strip()]
         return parts or [text]

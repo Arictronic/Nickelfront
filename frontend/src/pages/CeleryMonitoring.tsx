@@ -15,6 +15,8 @@ type CeleryStatus = {
     failed: number;
   };
   flower_available: boolean;
+  flower_api_available?: boolean;
+  expected_queues?: string[];
   flower_url: string;
   generated_at: string;
 };
@@ -26,7 +28,8 @@ type WorkerInfo = {
   processed_tasks: number;
   queues: string[];
   pool: Record<string, any>;
-  timestamp?: string;
+  timestamp?: string | number | null;
+  stale_seconds?: number;
 };
 
 type QueueInfo = {
@@ -42,10 +45,10 @@ type TaskInfo = {
   state: string;
   args: string;
   kwargs: Record<string, any>;
-  started?: string;
-  received?: string;
-  succeeded?: string;
-  failed?: string;
+  started?: string | number | null;
+  received?: string | number | null;
+  succeeded?: string | number | null;
+  failed?: string | number | null;
   retries: number;
   worker: Record<string, any> | string | null;
 };
@@ -87,6 +90,7 @@ const QUEUE_LABELS: Record<string, string> = {
 const WORKER_STATUS_LABELS: Record<string, string> = {
   online: "Онлайн",
   busy: "Занят",
+  stale: "Нет свежего ответа",
   offline: "Офлайн",
   unknown: "Неизвестно",
 };
@@ -126,6 +130,32 @@ function getTaskWorkerName(worker: TaskInfo["worker"]): string {
   if (!worker) return "—";
   if (typeof worker === "string") return worker;
   return worker.hostname || worker.name || worker.worker || "—";
+}
+
+
+type TaskTimestamp = string | number | null | undefined;
+
+function toTimestampMs(value: TaskTimestamp): number | null {
+  if (value === null || value === undefined || value === "") return null;
+
+  if (typeof value === "number") {
+    return value < 10_000_000_000 ? value * 1000 : value;
+  }
+
+  const text = String(value).trim();
+  const numeric = Number(text);
+
+  if (Number.isFinite(numeric) && /^\d+(\.\d+)?$/.test(text)) {
+    return numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+  }
+
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatTaskTime(task: TaskInfo): string {
+  const ms = toTimestampMs(task.started ?? task.received ?? task.succeeded ?? task.failed);
+  return ms === null ? "—" : new Date(ms).toLocaleString();
 }
 
 function getPoolConcurrency(pool: WorkerInfo["pool"]): string | number {
@@ -291,7 +321,7 @@ export default function CeleryMonitoring() {
   const stopQueues = async () => {
     if (
       !window.confirm(
-        "Остановить ВСЕ очереди Celery? Будут затронуты очереди celery, content и qwen. Активные/ожидающие задачи будут отменены, а сообщения в очередях очищены."
+        "Очистить очереди Celery? Ожидающие задачи будут удалены из broker, а активным задачам будет отправлен revoke/cancel flag. На Windows запущенные задачи могут завершиться только после cooperative cancel-проверки внутри worker."
       )
     ) {
       return;
@@ -301,7 +331,7 @@ export default function CeleryMonitoring() {
     setQueueStopMessage(null);
     try {
       const res = await stopCeleryQueues(false);
-      setQueueStopMessage(`Очереди остановлены: отменено задач ${res.revoked}, очищено сообщений ${res.purged}.`);
+      setQueueStopMessage(`Очереди очищены: отправлено revoke для задач ${res.revoked}, удалено сообщений из broker ${res.purged}.`);
       await refreshAll();
     } catch (e: any) {
       setQueueStopMessage(`Ошибка остановки очередей: ${e?.message || "неизвестная ошибка"}`);
@@ -373,9 +403,16 @@ export default function CeleryMonitoring() {
     return names;
   }, [queues, workers]);
 
+  const expectedQueues = useMemo(() => {
+    const fromStatus = (status?.expected_queues || [])
+      .map((queueName) => String(queueName || "").trim())
+      .filter(Boolean);
+    return fromStatus.length ? fromStatus : [...EXPECTED_QUEUES];
+  }, [status]);
+
   const canCheckExpectedQueues = !loading.workers && !loading.queues && (workers.length > 0 || queues.length > 0);
   const missingExpectedQueues = canCheckExpectedQueues
-    ? EXPECTED_QUEUES.filter((queueName) => !knownQueueNames.has(queueName))
+    ? expectedQueues.filter((queueName) => !knownQueueNames.has(normalizeKey(queueName)))
     : [];
   const hasMissingCoreQueues = missingExpectedQueues.length > 0;
 
@@ -391,6 +428,7 @@ export default function CeleryMonitoring() {
           : "UNKNOWN";
   const flowerAvailable =
     status?.flower_available ?? (mergedWorkers.total > 0 || workers.length > 0 ? true : false);
+  const flowerApiAvailable = status?.flower_api_available ?? false;
 
   const getStateColor = (state: string) => {
     switch (state.toLowerCase()) {
@@ -429,7 +467,7 @@ export default function CeleryMonitoring() {
         <h2>Мониторинг Celery</h2>
         <div className="actions">
           <button className="btn btn-danger" onClick={() => void stopQueues()} disabled={stoppingQueues}>
-            {stoppingQueues ? "Остановка..." : "Остановить очереди"}
+            {stoppingQueues ? "Очистка..." : "Очистить очереди"}
           </button>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span className="muted">лимит:</span>
@@ -478,7 +516,7 @@ export default function CeleryMonitoring() {
           <h3 style={{ color: "#92400e" }}>Неполный набор Celery-очередей</h3>
           <p className="muted">
             Не видны обязательные очереди: {missingExpectedQueues.map(formatQueueName).join(", ")}.
-            {missingExpectedQueues.includes("celery")
+            {missingExpectedQueues.map(normalizeKey).includes("celery")
               ? " Парсинг и служебные задачи не будут выполняться, пока regular worker не запущен."
               : " Проверь соответствующий worker."}
           </p>
@@ -535,7 +573,10 @@ export default function CeleryMonitoring() {
         <article className="panel kpi-card">
           <h3>Flower</h3>
           <p className={`kpi-status ${flowerAvailable ? "ok" : "idle"}`}>
-            {loading.status && !status ? "Проверка..." : flowerAvailable ? "Доступен" : "Недоступен"}
+            {loading.status && !status ? "Проверка..." : flowerAvailable ? "UI доступен" : "UI недоступен"}
+          </p>
+          <p className="muted" style={{ fontSize: 12 }}>
+            API: {loading.status && !status ? "проверка..." : flowerApiAvailable ? "доступен" : "недоступен"}
           </p>
         </article>
       </div>
@@ -565,6 +606,7 @@ export default function CeleryMonitoring() {
                       className={`status ${
                         ["online", "busy"].includes((worker.status || "").toLowerCase()) ? "active" : ""
                       }`}
+                      title={worker.stale_seconds ? `Последний ответ ${worker.stale_seconds} сек. назад` : undefined}
                     >
                       {formatWorkerStatus(worker.status)}
                     </span>
@@ -683,7 +725,7 @@ export default function CeleryMonitoring() {
                     </span>
                   </td>
                   <td>{getTaskWorkerName(task.worker)}</td>
-                  <td style={{ fontSize: 12 }}>{task.started ? new Date(task.started).toLocaleTimeString() : "-"}</td>
+                  <td style={{ fontSize: 12 }}>{formatTaskTime(task)}</td>
                 </tr>
               ))}
             </tbody>

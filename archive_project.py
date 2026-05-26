@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+
+
 """
 archive_project.py
 
@@ -42,9 +42,9 @@ from pathlib import Path
 from typing import Iterable
 
 
-# -----------------------------------------------------------------------------
-# Настройки по умолчанию
-# -----------------------------------------------------------------------------
+
+
+
 
 DEFAULT_OUTPUT_PREFIX = "project_archive"
 DEFAULT_MAX_FILE_SIZE_MB = 50
@@ -107,6 +107,10 @@ DEFAULT_EXCLUDE_FILE_NAMES = {
     ".coverage",
     "coverage.xml",
 
+
+    "debug_pdf_extract.txt",
+    "debug_pdf_extract_meta.json",
+
     ".env.local",
     ".env.development.local",
     ".env.test.local",
@@ -115,7 +119,7 @@ DEFAULT_EXCLUDE_FILE_NAMES = {
 
 
 DEFAULT_EXCLUDE_PATTERNS = {
-    # Python artifacts
+
     "*.pyc",
     "*.pyo",
     "*.pyd",
@@ -123,24 +127,25 @@ DEFAULT_EXCLUDE_PATTERNS = {
     "*.egg-info",
     "*.egg",
 
-    # JS artifacts
+
     "*.tsbuildinfo",
 
-    # Logs / dumps / temp
+
     "*.log",
     "*.tmp",
     "*.temp",
     "*.bak",
+    "*.bak_*",
     "*.swp",
     "*.swo",
     "*.orig",
 
-    # Databases / binary local state
+
     "*.sqlite",
     "*.sqlite3",
     "*.db",
 
-    # Archives
+
     "*.zip",
     "*.tar",
     "*.tar.gz",
@@ -148,7 +153,7 @@ DEFAULT_EXCLUDE_PATTERNS = {
     "*.rar",
     "*.7z",
 
-    # Large ML / model artifacts
+
     "*.pth",
     "*.pt",
     "*.onnx",
@@ -156,7 +161,7 @@ DEFAULT_EXCLUDE_PATTERNS = {
     "*.safetensors",
     "*.bin",
 
-    # Media usually not needed for code review
+
     "*.mp4",
     "*.mov",
     "*.avi",
@@ -165,7 +170,7 @@ DEFAULT_EXCLUDE_PATTERNS = {
     "*.wav",
     "*.flac",
 
-    # Office/PDF documents are excluded by default
+
     "*.pdf",
     "*.doc",
     "*.docx",
@@ -173,13 +178,13 @@ DEFAULT_EXCLUDE_PATTERNS = {
 }
 
 
-# Важные файлы, которые надо включать даже если .gitignore их игнорирует.
+
 ALWAYS_INCLUDE_FILE_PATTERNS = {
-    # Только README.md из корневых markdown-документов
+
     "README.md",
     "readme.md",
 
-    # Разрешаем архивировать корневой .env
+
     ".env",
 
     "LICENSE",
@@ -223,7 +228,7 @@ ALWAYS_INCLUDE_FILE_PATTERNS = {
     "alembic.ini",
     "**/alembic.ini",
 
-    # Markdown-документы только внутри docs/
+
     "docs/**/*.md",
     "docs/**/*.mdx",
     "docs/**/*.markdown",
@@ -233,7 +238,7 @@ ALWAYS_INCLUDE_FILE_PATTERNS = {
 }
 
 
-# Важные директории, которые нельзя выкидывать из-за правил вроде models/.
+
 ALWAYS_INCLUDE_DIR_PATTERNS = {
     "backend/app/db/models",
     "backend/app/db/models/**",
@@ -246,7 +251,7 @@ ALWAYS_INCLUDE_DIR_PATTERNS = {
     ".github",
     ".github/**",
 
-    # docs нужна, чтобы пройти внутрь и забрать markdown-файлы
+
     "docs",
     "docs/**",
 
@@ -260,7 +265,7 @@ ALWAYS_INCLUDE_DIR_PATTERNS = {
 }
 
 
-# Опасные/мусорные директории, которые исключаем даже без .gitignore.
+
 EXCLUDE_DIR_PATTERNS = {
     "**/__pycache__",
     "**/.pytest_cache",
@@ -278,6 +283,9 @@ EXCLUDE_DIR_PATTERNS = {
 
     "archives",
     "archives/**",
+
+    "parser_alpha/data",
+    "parser_alpha/data/**",
 }
 
 
@@ -305,8 +313,8 @@ ROOT_EXCLUDE_DIR_GLOBS = {
 }
 
 
-# Секреты не включаем.
-# Исключение: корневой .env включается отдельно.
+
+
 SECRET_FILE_PATTERNS = {
     ".env.*",
     "**/.env.*",
@@ -349,9 +357,9 @@ LLM_EXCLUDE_FILE_PATTERNS = {
 }
 
 
-# -----------------------------------------------------------------------------
-# Gitignore parser
-# -----------------------------------------------------------------------------
+
+
+
 
 @dataclass(frozen=True)
 class IgnoreRule:
@@ -466,17 +474,17 @@ def path_matches_pattern(rel_path: str, pattern: str) -> bool:
         if fnmatch.fnmatch(candidate, pattern):
             return True
 
-    # Если паттерн без slash, он может совпадать с любым сегментом пути.
+
     if "/" not in pattern:
         parts = rel_path.split("/")
         if any(fnmatch.fnmatch(part, pattern) for part in parts):
             return True
 
-    # Паттерн директории/пути.
+
     if rel_path == pattern or rel_path.startswith(pattern.rstrip("/") + "/"):
         return True
 
-    # Glob через **.
+
     if fnmatch.fnmatch(rel_path, pattern):
         return True
 
@@ -628,7 +636,7 @@ def is_disallowed_markdown_file(rel_path: str, no_markdown: bool = False) -> boo
 def is_secret_file(rel_path: str) -> bool:
     rel_path = normalize_rel(rel_path)
 
-    # Пользователь явно попросил включать корневой .env.
+
     if is_root_env_file(rel_path):
         return False
 
@@ -711,7 +719,7 @@ def is_hard_excluded_file(rel_path: str, name: str) -> bool:
     if is_secret_file(rel_path):
         return True
 
-    # Markdown вне README.md и docs/ не включаем.
+
     if is_disallowed_markdown_file(rel_path):
         return True
 
@@ -741,9 +749,9 @@ def is_ignored_by_gitignore(rel_path: str, is_dir: bool, rules: list[IgnoreRule]
     return ignored
 
 
-# -----------------------------------------------------------------------------
-# Архивация
-# -----------------------------------------------------------------------------
+
+
+
 
 @dataclass
 class ArchiveStats:
@@ -766,12 +774,12 @@ def should_include_dir(
     if is_always_include_dir(rel_dir):
         return True, "always-include-dir"
 
-    # Жёсткие исключения первыми:
-    # __pycache__, node_modules, archives и т.д.
+
+
     if is_hard_excluded_dir(rel_dir, dir_name):
         return False, "hard-excluded-dir"
 
-    # Важные директории спасаем от .gitignore.
+
     if is_inside_always_include_dir(rel_dir):
         return True, "inside-always-include-dir"
 
@@ -792,18 +800,18 @@ def should_include_file(
 ) -> tuple[bool, str]:
     rel_file = normalize_rel(rel_file)
 
-    # Корневой .env включаем, даже если он в .gitignore.
+
     if is_root_env_file(rel_file):
         return True, "root-env"
 
     if is_inside_hard_excluded_dir(rel_file):
         return False, "inside-hard-excluded-dir"
 
-    # Секреты не включаем.
+
     if is_secret_file(rel_file):
         return False, "secret"
 
-    # Жёсткий мусор не включаем.
+
     if is_hard_excluded_file(rel_file, file_name):
         return False, "hard-excluded-file"
 
@@ -813,18 +821,18 @@ def should_include_file(
     if llm_mode and is_llm_excluded_file(rel_file):
         return False, "llm-excluded-file"
 
-    # Важные файлы включаем даже если .gitignore против.
+
     if is_always_include_file(rel_file):
         return True, "always-include-file"
 
-    # Если файл лежит внутри allowlist-директории.
+
     if is_inside_always_include_dir(rel_file):
-        # Но markdown внутри allowlist-директории всё равно фильтруем:
-        # README.md или docs/*.md — да, остальное markdown — нет.
+
+
         if is_disallowed_markdown_file(rel_file, no_markdown=no_markdown):
             return False, "disallowed-markdown"
 
-        # В docs/ включаем только markdown-файлы.
+
         if rel_file.startswith("docs/"):
             if no_markdown:
                 return False, "markdown-disabled"
@@ -1009,13 +1017,13 @@ def get_output_path(root: Path, output_arg: Path | None) -> Path:
 
     output_path = output_arg
 
-    # Если пользователь передал только имя файла, например:
-    #   --output Nickelfront.zip
-    # кладём его в ./archives/Nickelfront.zip.
+
+
+
     if not output_path.is_absolute() and output_path.parent == Path("."):
         return archives_dir / output_path.name
 
-    # Если пользователь передал путь, уважаем его.
+
     return output_path.resolve()
 
 
@@ -1112,9 +1120,9 @@ def main(argv: list[str] | None = None) -> int:
 
     output_path_resolved = output_path.resolve()
 
-    # Финальная защита:
-    # - не включаем сам выходной архив;
-    # - не включаем папку archives.
+
+
+
     filtered_files: list[Path] = []
 
     for file in files:
@@ -1163,13 +1171,13 @@ def main(argv: list[str] | None = None) -> int:
         "frontend/vite.config.js",
         ".github/workflows",
         "scripts/nf-server.ps1",
-        "tests/conftest.py",
+        "tests/backend/conftest.py",
         "rag/app/main.py",
         "run_all.bat",
-        "run_backend.bat",
-        "run_worker.bat",
-        "run_qwen_worker.bat",
-        "run_frontend.bat",
+        "scripts/run_backend.bat",
+        "scripts/run_worker.bat",
+        "scripts/run_qwen_worker.bat",
+        "scripts/run_frontend.bat",
         "parser_alpha/run_parser.py",
         "qwen_service/service.py",
         "rag/app",

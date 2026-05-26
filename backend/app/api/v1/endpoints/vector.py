@@ -51,11 +51,11 @@ async def vector_search(
     embedding_service = get_embedding_service()
     vector_service = get_vector_service()
 
-    # Проверяем доступность сервисов
+
     embedding_available = await asyncio.to_thread(lambda: embedding_service.model is not None)
     if not embedding_available:
         logger.warning("Модель эмбеддингов недоступна, используем текстовый поиск")
-        # Fallback на текстовый поиск
+
         paper_service = PaperService(db)
         papers = await paper_service.search(query=request.query, limit=request.limit)
 
@@ -69,15 +69,15 @@ async def vector_search(
             search_type="text_fallback",
         )
 
-    # Генерируем эмбеддинг для запроса
+
     query_embedding = await asyncio.to_thread(embedding_service.get_embedding, request.query)
 
     if not query_embedding:
         raise HTTPException(status_code=500, detail="Ошибка генерации эмбеддинга")
 
-    # Выполняем векторный поиск
+
     if request.search_type == "hybrid":
-        # Гибридный поиск: векторный + текстовый
+
         vector_results = await asyncio.to_thread(
             vector_service.search,
             query_embedding=query_embedding,
@@ -87,18 +87,18 @@ async def vector_search(
             date_to=request.date_to,
         )
 
-        # Получаем текстовые результаты для сравнения
+
         paper_service = PaperService(db)
         text_papers = await paper_service.search(query=request.query, limit=request.limit)
 
-        # Объединяем результаты (приоритет векторным)
+
         seen_ids = set()
         results = []
 
         for vr in vector_results:
             if vr.paper_id not in seen_ids:
                 seen_ids.add(vr.paper_id)
-                # Получаем полную информацию о статье
+
                 paper = await paper_service.get_by_id(vr.paper_id)
                 if paper:
                     results.append(VectorSearchResultItem(
@@ -106,13 +106,13 @@ async def vector_search(
                         similarity=vr.similarity,
                     ))
 
-        # Добавляем текстовые результаты, которых нет в векторных
+
         for p in text_papers:
             if p.id not in seen_ids and len(results) < request.limit:
                 seen_ids.add(p.id)
                 results.append(VectorSearchResultItem(
                     paper=p,
-                    similarity=0.5,  # Приоритет ниже векторных
+                    similarity=0.5,
                 ))
 
         return VectorSearchResponse(
@@ -123,7 +123,7 @@ async def vector_search(
         )
 
     else:
-        # Чистый векторный поиск (vector или semantic)
+
         vector_results = await asyncio.to_thread(
             vector_service.search,
             query_embedding=query_embedding,
@@ -133,7 +133,7 @@ async def vector_search(
             date_to=request.date_to if request.search_type == "semantic" else None,
         )
 
-        # Получаем полные данные о статьях
+
         results = []
         for vr in vector_results:
             paper = await PaperService(db).get_by_id(vr.paper_id)
@@ -163,9 +163,9 @@ async def vector_search_stats():
     vector_stats = await asyncio.to_thread(vector_service.get_stats)
 
     embedding_service = get_embedding_service()
-    # /vector/stats не должен загружать sentence-transformers модель.
-    # Он вызывается dashboard/vector страницами автоматически и может приходить
-    # параллельно несколько раз. Тяжелая загрузка нужна только для search/rebuild.
+
+
+
     embedding_available = embedding_service.is_loaded()
 
     store_count = int(vector_stats.get("count", 0) or 0)
@@ -209,7 +209,7 @@ async def rebuild_vector_index(
 
     logger.info(f"Начало перестройки векторного индекса (limit={limit}, batch_size={batch_size})")
 
-    # Получаем все статьи из БД. Пустая база не должна требовать загруженной ML-модели.
+
     paper_service = PaperService(db)
     all_papers = await paper_service.get_all(limit=limit, offset=0)
 
@@ -224,10 +224,10 @@ async def rebuild_vector_index(
     if not embedding_available:
         raise HTTPException(status_code=500, detail="Модель эмбеддингов недоступна")
 
-    # Генерируем тексты и эмбеддинги
+
     papers_with_embeddings = []
     for paper in all_papers:
-        # Пропускаем если уже есть эмбеддинг
+
         if paper.embedding:
             papers_with_embeddings.append({
                 "paper_id": paper.id,
@@ -240,7 +240,7 @@ async def rebuild_vector_index(
             })
             continue
 
-        # Генерируем новый эмбеддинг
+
         text = await asyncio.to_thread(
             embedding_service.get_paper_embedding_text,
             title=paper.title,
@@ -251,7 +251,7 @@ async def rebuild_vector_index(
         if text:
             embedding = await asyncio.to_thread(embedding_service.get_embedding, text)
             if embedding:
-                # Сохраняем эмбеддинг в БД
+
                 await paper_service.update_paper(paper.id, embedding=embedding)
                 papers_with_embeddings.append({
                     "paper_id": paper.id,
@@ -263,7 +263,7 @@ async def rebuild_vector_index(
                     "embedding": embedding,
                 })
 
-    # Перестраиваем индекс в ChromaDB с пакетным добавлением
+
     indexed_count = await asyncio.to_thread(vector_service.rebuild_index, papers_with_embeddings)
 
     logger.info(f"Векторный индекс перестроен: {indexed_count} статей")

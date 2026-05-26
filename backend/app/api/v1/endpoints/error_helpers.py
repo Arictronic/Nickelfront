@@ -19,7 +19,7 @@ def format_paper_db_error(exc: Exception) -> str:
     ):
         return (
             "Похоже, база данных не обновлена после патча: в таблице papers нет новых "
-            "колонок parser metadata. Запусти из корня проекта: run_migrations.bat "
+            "колонок parser metadata. Запусти из корня проекта: scripts\\run_migrations.bat "
             "или python backend\\apply_migrations.py, затем перезапусти backend."
         )
     return raw

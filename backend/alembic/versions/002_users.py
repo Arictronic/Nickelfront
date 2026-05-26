@@ -4,7 +4,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-# revision identifiers
+
 revision = "002_users"
 down_revision = "001_initial"
 branch_labels = None
@@ -12,7 +12,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Создаём таблицу users
+
     op.create_table(
         "users",
         sa.Column("id", sa.Integer(), nullable=False),
@@ -33,7 +33,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("email"),
     )
 
-    # Индексы
+
     op.create_index(op.f("ix_users_id"), "users", ["id"], unique=False)
     op.create_index(op.f("ix_users_email"), "users", ["email"], unique=False)
 

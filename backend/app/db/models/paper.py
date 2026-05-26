@@ -14,9 +14,9 @@ class Paper(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    # Основные данные
+
     title = Column(Text, nullable=False, index=True)
-    authors = Column(JSON, default=list)  # Список авторов
+    authors = Column(JSON, default=list)
     publication_date = Column(DateTime, nullable=True, index=True)
     journal = Column(String(500), nullable=True)
     doi = Column(String(200), nullable=True, unique=True, index=True)
@@ -24,35 +24,35 @@ class Paper(Base):
     full_text = Column(Text, nullable=True)
     keywords = Column(JSON, default=list)
 
-    # Векторный эмбеддинг (хранится как JSON массив float)
-    # Размерность зависит от модели: all-MiniLM-L6-v2 = 384, all-mpnet-base-v2 = 768
+
+
     embedding = Column(JSON, nullable=True)
 
-    # Полнотекстовый поиск (tsvector для Postgres, Text для SQLite в тестах)
+
     search_vector = Column(TSVECTOR().with_variant(Text, "sqlite"), nullable=True)
 
-    # Информация об источнике
-    source = Column(String(50), nullable=False, index=True)  # CORE, arXiv, etc.
-    source_id = Column(String(200), nullable=True, index=True)  # ID в источнике
+
+    source = Column(String(50), nullable=False, index=True)
+    source_id = Column(String(200), nullable=True, index=True)
     url = Column(String(1000), nullable=True)
     pdf_url = Column(String(1000), nullable=True)
     pdf_local_path = Column(String(1000), nullable=True)
 
-    # Метаданные
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
-    # Статус обработки
+
     processing_status = Column(String(50), nullable=False, default="pending", index=True)
     content_task_id = Column(String(100), nullable=True, index=True)
     processing_error = Column(Text, nullable=True)
 
-    # Результаты AI-обработки
+
     summary_ru = Column(Text, nullable=True)
     analysis_ru = Column(Text, nullable=True)
     translation_ru = Column(Text, nullable=True)
 
-    # Метаданные качества парсинга parser_alpha
+
     parse_confidence = Column(Float, nullable=True)
     provenance = Column(JSON, nullable=False, default=dict)
     quality_flags = Column(JSON, nullable=False, default=list)
@@ -66,9 +66,9 @@ class Paper(Base):
         order_by="PaperContentPart.part_index",
     )
 
-    # Индексы
+
     __table_args__ = (
-        # GIN индекс для полнотекстового поиска
+
         Index('ix_papers_search_vector', 'search_vector', postgresql_using='gin'),
     )
 

@@ -13,24 +13,24 @@ async def clean_db():
     """Очистить базу данных."""
     async with async_session_maker() as db:
         try:
-            # Удаляем все статьи
+
             result = await db.execute(delete(Paper))
             papers_count = result.rowcount
             await db.commit()
             print(f"Удалено статей: {papers_count}")
 
-            # Удаляем всех пользователей кроме админа (id=1)
+
             result = await db.execute(delete(User).where(User.id != 1))
             users_count = result.rowcount
             await db.commit()
             print(f"Удалено пользователей: {users_count}")
 
-            # Сбрасываем последовательности (для PostgreSQL)
-            await db.execute(select(1))  # Проверка подключения
+
+            await db.execute(select(1))
 
             print("\nБаза данных очищена!")
 
-            # Проверка - сколько осталось
+
             result = await db.execute(select(User).where(User.id != 1))
             remaining_users = len(result.scalars().all())
 
@@ -50,11 +50,11 @@ async def clean_db():
 async def full_reset():
     """Полный сброс БД - удалить все таблицы и создать заново."""
     async with engine.begin() as conn:
-        # Удаляем все таблицы
+
         await conn.run_sync(Base.metadata.drop_all)
         print("Все таблицы удалены")
 
-        # Создаём таблицы заново
+
         await conn.run_sync(Base.metadata.create_all)
         print("Все таблицы созданы заново")
 

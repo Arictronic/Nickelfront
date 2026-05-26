@@ -9,7 +9,7 @@ from loguru import logger
 from parsers_pkg.base import BaseParser
 from shared.schemas.paper import Paper
 
-# Стоп-слова для извлечения ключевых слов
+
 STOP_WORDS = {
     "the", "a", "an", "and", "or", "in", "of", "for", "on", "with",
     "at", "to", "from", "by", "as", "is", "are", "was", "were",
@@ -20,7 +20,7 @@ STOP_WORDS = {
     "using", "used", "use", "can", "study", "studies",
 }
 
-# Ключевые слова предметной области (приоритетные)
+
 DOMAIN_KEYWORDS = {
     "nickel", "alloy", "alloys", "superalloy", "superalloys",
     "heat-resistant", "corrosion", "oxidation",
@@ -59,7 +59,7 @@ class ArxivParser(BaseParser):
     def _parse_article(self, data: dict[str, Any]) -> Paper | None:
         """Распарсить одну статью."""
         try:
-            # Дата публикации
+
             publication_date = None
             if "published_date" in data and data["published_date"]:
                 try:
@@ -68,7 +68,7 @@ class ArxivParser(BaseParser):
                 except Exception:
                     pass
 
-            # Ключевые слова из категорий
+
             keywords = data.get("categories", [])
 
             return self.normalize_paper(Paper(
@@ -119,11 +119,11 @@ class ArxivParser(BaseParser):
 
     async def extract_keywords(self, paper: Paper) -> list[str]:
         """Извлечь ключевые слова из статьи."""
-        # Если keywords уже есть (категории arXiv), возвращаем их
+
         if paper.keywords:
             return paper.keywords
 
-        # Если есть аннотация, извлекаем ключевые слова из неё
+
         if paper.abstract:
             return self._extract_keywords_from_abstract(paper.abstract)
 
@@ -135,29 +135,29 @@ class ArxivParser(BaseParser):
         max_keywords: int = 15,
     ) -> list[str]:
         """Извлечь ключевые слова из аннотации."""
-        # Разбиваем текст на слова
+
         words = re.findall(r'\b[a-zA-Z]{3,}\b', abstract.lower())
 
-        # Подсчитываем частоту слов
+
         word_freq = {}
         for word in words:
             if word not in STOP_WORDS:
                 word_freq[word] = word_freq.get(word, 0) + 1
 
-        # Приоритизуем предметные ключевые слова
+
         domain_keywords_found = {
             word: freq for word, freq in word_freq.items()
             if word in DOMAIN_KEYWORDS
         }
 
-        # Сортируем: сначала предметные, потом по частоте
+
         sorted_domain = sorted(domain_keywords_found.items(), key=lambda x: x[1], reverse=True)
         sorted_other = sorted(
             [(w, f) for w, f in word_freq.items() if w not in DOMAIN_KEYWORDS],
             key=lambda x: x[1], reverse=True
         )
 
-        # Комбинируем
+
         domain_count = min(len(sorted_domain), max_keywords // 2)
         other_count = max_keywords - domain_count
 

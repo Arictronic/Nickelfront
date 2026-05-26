@@ -57,7 +57,7 @@ class QwenServiceClient:
         self.queue_enabled = settings.QWEN_QUEUE_ENABLED if queue_enabled is None else queue_enabled
         self._session_id: str | None = None
 
-        logger.info(
+        logger.debug(
             f"Инициализация QwenServiceClient: url={self.base_url}, "
             f"api_key={'***' if self.api_key else 'None'}"
         )
@@ -106,7 +106,17 @@ class QwenServiceClient:
                     json=json_data,
                 )
                 response.raise_for_status()
-                return response.json(), None
+                try:
+                    return response.json(), None
+                except ValueError as e:
+                    logger.error("Qwen Service returned non-JSON response for %s: %s", endpoint, e)
+                    return {
+                        "status": "bad_response",
+                        "valid": False,
+                        "expired": False,
+                        "token_configured": True,
+                        "message": "qwen_service вернул не-JSON ответ. Проверьте лог qwen_service и повторите проверку.",
+                    }, "invalid_json"
 
         except httpx.TimeoutException as e:
             logger.error(f"Timeout запроса к {endpoint}: {e}")
@@ -121,6 +131,7 @@ class QwenServiceClient:
 
             detail_text = detail if isinstance(detail, str) else str(detail or e)
             lowered = detail_text.lower()
+            status_code = getattr(e.response, "status_code", None)
             if "qwen_token_expired" in lowered or "token has expired" in lowered or "please log in again" in lowered:
                 logger.error("Qwen auth error on %s: token expired", endpoint)
                 return {
@@ -130,6 +141,15 @@ class QwenServiceClient:
                     "thinking": "",
                     "can_continue": False,
                 }, "auth_expired"
+            if status_code == 429 or "too many requests" in lowered or "rate limit" in lowered:
+                logger.warning("Qwen provider rate limit on %s: %s", endpoint, detail_text)
+                return {
+                    "error": "qwen_rate_limited",
+                    "message": "Qwen ограничил частоту запросов. Токен может быть действительным, но нагрузку нужно снизить.",
+                    "response": "",
+                    "thinking": "",
+                    "can_continue": False,
+                }, "rate_limited"
 
             logger.error(f"HTTP ошибка запроса к {endpoint}: {e}; detail={detail_text}")
             return None, "http"
@@ -171,14 +191,19 @@ class QwenServiceClient:
         Returns:
             Статус сервиса.
         """
-        # Keep this check short to avoid blocking task workers when Qwen is busy.
+
         result = self._request("GET", "/health", timeout=3.0)
         return result or {"status": "error", "available": False}
 
 
-    def get_auth_status(self) -> dict[str, Any]:
-        """Check Qwen provider token status through qwen_service."""
-        result = self._request("GET", "/auth/status", timeout=10.0)
+    def get_auth_status(self, *, force: bool = False) -> dict[str, Any]:
+        """Return current in-memory Qwen token status from qwen_service.
+
+        force=False uses qwen_service cache/passive status and is safe for page load.
+        force=True asks qwen_service to refresh the provider /api/user check.
+        """
+        endpoint = "/auth/status?force=true" if force else "/auth/status"
+        result = self._request("GET", endpoint, timeout=10.0)
         if not result:
             return {
                 "status": "service_unavailable",
@@ -186,6 +211,23 @@ class QwenServiceClient:
                 "expired": False,
                 "token_configured": False,
                 "message": "Qwen Service недоступен или не вернул статус.",
+            }
+        return result
+
+    def check_active_token(self) -> dict[str, Any]:
+        """Smoke-check the current token already loaded into qwen_service.
+
+        HAR is not used here. qwen_service creates a temporary chat using the
+        active in-memory/.env token and sends a minimal prompt.
+        """
+        result = self._request("POST", "/auth/check", timeout=90.0)
+        if not result:
+            return {
+                "status": "service_unavailable",
+                "valid": False,
+                "expired": False,
+                "token_configured": False,
+                "message": "Qwen Service недоступен или не смог проверить текущий токен.",
             }
         return result
 
@@ -381,7 +423,7 @@ class QwenServiceClient:
     def _should_use_queue(self, purpose: str | None = None) -> bool:
         if not self.queue_enabled or self._queue_disabled_by_env():
             return False
-        # qwen_queue worker itself must call qwen_service directly, otherwise it recurses.
+
         if os.getenv("QWEN_GATEWAY_WORKER", "").strip().lower() in {"1", "true", "yes", "on"}:
             return False
         return True
@@ -612,7 +654,7 @@ class QwenServiceClient:
         return str(health.get("status", "")).lower() == "ok"
 
 
-# Глобальный экземпляр
+
 _qwen_client: QwenServiceClient | None = None
 
 

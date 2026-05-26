@@ -63,9 +63,9 @@ def _env_float(name: str, default: float, *, min_value: float | None = None, max
         value = min(max_value, value)
     return value
 
-# ============================================================================
-# Data Classes (replacing Domain.chat.ports)
-# ============================================================================
+
+
+
 
 @dataclass
 class StreamCallbacks:
@@ -93,9 +93,9 @@ class ContinueRequest:
     fallback_to_resume: bool = True
 
 
-# ============================================================================
-# SSE Parser (replacing AI.Qwen.protocol.qwen_sse_parser)
-# ============================================================================
+
+
+
 
 class QwenSseParser:
     """Parser for Qwen SSE stream responses"""
@@ -130,7 +130,7 @@ class QwenSseParser:
             if not isinstance(data, dict):
                 return
 
-            # SSE-style provider error: {"error":"..."}
+
             error_text = str(data.get("error") or "").strip()
             if error_text:
                 lower = error_text.lower()
@@ -142,7 +142,7 @@ class QwenSseParser:
                     raise QwenInternalStreamError(error_text)
                 raise QwenProviderError(error_text)
 
-            # JSON envelope style: {"success": false, "data": {"code":"Bad_Request","details":"..."}}
+
             if data.get("success") is False:
                 details_obj = data.get("data") or {}
                 details = str(details_obj.get("details") or details_obj.get("message") or "").strip()
@@ -179,7 +179,7 @@ class QwenSseParser:
 
                 _raise_provider_error_payload(data)
 
-                # Extract response ID
+
                 if "id" in data and not response_id:
                     response_id = data["id"]
                 created_meta = data.get("response.created")
@@ -189,14 +189,14 @@ class QwenSseParser:
                     if parent_id:
                         meta["parent_id"] = parent_id
 
-                # Extract choices
+
                 choices = data.get("choices") or []
                 for choice in choices:
                     delta = choice.get("delta") or {}
                     content = delta.get("content") or ""
                     phase = str(delta.get("phase") or "")
 
-                    # Check for thinking phase
+
                     reasoning = delta.get("reasoning_content")
                     if not reasoning and phase.startswith("thinking"):
                         reasoning = self._extract_thinking_text(delta) or content
@@ -210,12 +210,12 @@ class QwenSseParser:
                         if on_parts:
                             on_parts("\n\n".join(think_parts), "".join(response_parts))
 
-                    # Check finish reason
+
                     finish_reason = choice.get("finish_reason")
                     if finish_reason:
                         response_status = "FINISHED" if finish_reason == "stop" else finish_reason
 
-                # Extract usage and metadata
+
                 if "usage" in data:
                     meta["usage"] = data["usage"]
                 if "thinking_enabled" in data:
@@ -225,7 +225,7 @@ class QwenSseParser:
             meta["response_status"] = response_status
             meta["can_continue"] = response_status == "length"
 
-            # Final callbacks
+
             final_think = "\n\n".join(think_parts).strip()
             final_response = "".join(response_parts).strip()
 
@@ -243,9 +243,9 @@ class QwenSseParser:
         return final_think, final_response, meta
 
 
-# ============================================================================
-# Transport Layer (replacing AI.Qwen.transport.qwen_transport)
-# ============================================================================
+
+
+
 
 class QwenTransport:
     """HTTP transport for Qwen API"""
@@ -323,7 +323,7 @@ class QwenTransport:
             text = resp.text or ""
         except Exception:
             return ""
-        # Never log request headers/cookies/tokens; only provider response preview.
+
         return text.replace("\r", " ").replace("\n", " ").strip()[:limit]
 
     def _raise_for_bad_response(self, resp: requests.Response, *, operation: str) -> None:
@@ -438,8 +438,8 @@ class QwenTransport:
                 self._reset_session_after_transport_error()
 
             except ValueError as exc:
-                # Invalid/non-JSON provider response. Retry once/twice; provider may
-                # occasionally return a transient HTML error page behind HTTP 200.
+
+
                 last_error = exc
                 self._log(
                     f"Qwen create_session attempt {attempt}/{attempts} returned invalid JSON: {exc}"
@@ -559,9 +559,9 @@ class QwenTransport:
         return resp
 
 
-# ============================================================================
-# Autonomous QwenAPI Client
-# ============================================================================
+
+
+
 
 class QwenAPI:
     """
@@ -597,7 +597,7 @@ class QwenAPI:
         )
         self.parser = QwenSseParser()
 
-        # Message ID mapping (remote <-> local)
+
         self._remote_to_local: dict[str, dict[str, int]] = {}
         self._local_to_remote: dict[str, dict[int, str]] = {}
         self._next_local_id: dict[str, int] = {}
@@ -710,7 +710,7 @@ class QwenAPI:
             if role == "ASSISTANT":
                 assistants.append({"message_id": local_id, "remote_id": remote_id})
 
-            # Extract content
+
             content_list = value.get("content_list") or []
             think_text = ""
             response_text = ""
@@ -745,10 +745,10 @@ class QwenAPI:
                 "fragments": fragments,
             })
 
-        # Sort by timestamp
+
         messages.sort(key=lambda x: x["inserted_at"])
 
-        # Set last_message_id
+
         if assistants:
             assistants.sort(key=lambda x: x["message_id"])
             self.last_message_id = assistants[-1]["message_id"]
@@ -811,9 +811,9 @@ class QwenAPI:
         try:
             session_id = request.session_id
 
-            # Для первого сообщения parent_id должен быть None.
-            # Используем только локально сохранённый последний response_id,
-            # чтобы не подхватывать случайные/служебные сообщения из истории.
+
+
+
             parent_id = self._last_response_remote_id.get(session_id)
 
             payload = self._build_payload(
@@ -856,10 +856,10 @@ class QwenAPI:
 
             remote_id = self._get_remote_message_id(session_id, message_id)
             if not remote_id and message_id > 0:
-                # The standalone service keeps local<->remote message ids in memory.
-                # After a service restart the local id can arrive from backend/UI while
-                # the mapping is empty. Fetch history once to rebuild the mapping before
-                # sending a broken continue request with parent_id=''.
+
+
+
+
                 self.fetch_history(session_id)
                 remote_id = self._get_remote_message_id(session_id, message_id)
 
@@ -956,7 +956,7 @@ class QwenAPI:
         if meta_snapshots:
             final_meta.update(meta_snapshots[-1])
 
-        # Update message ID mapping
+
         remote_response_id = final_meta.get("response_id")
         if remote_response_id:
             self._last_response_remote_id[session_id] = remote_response_id

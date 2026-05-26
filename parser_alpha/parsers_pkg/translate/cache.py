@@ -126,7 +126,7 @@ class TranslationCache:
         base_keys = set(self._base_data.keys())
         current_keys = set(self._data.keys())
 
-        # Propagate explicit deletes made by this process.
+
         for key in base_keys - current_keys:
             merged.pop(key, None)
 
@@ -143,8 +143,8 @@ class TranslationCache:
 
             if isinstance(disk_entry, dict):
                 next_entry = dict(disk_entry)
-                # If this process changed translation fields, prefer the current
-                # value; otherwise keep the latest value already present on disk.
+
+
                 if current_entry != base_entry:
                     for field in (
                         "original_text",
@@ -183,10 +183,10 @@ class TranslationCache:
             self._data = merged_data
             self._base_data = deepcopy(merged_data)
         except Exception as exc:
-            # Translation cache is an optimization. Never fail a parser run merely
-            # because another process is holding a stale cache lock or the cache
-            # file is temporarily not writable. Keep the in-memory value for this
-            # process and try again on a later get/set.
+
+
+
+
             logger.warning("Failed to save translation cache to %s: %s", self.path, exc)
             if tmp_path is not None:
                 try:

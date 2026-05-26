@@ -1,4 +1,4 @@
-# shared/schemas/task.py
+
 
 from datetime import datetime
 from typing import Any, Literal
@@ -29,7 +29,7 @@ class CeleryTaskStatus(BaseModel):
     result: dict[str, Any] | None = None
     progress: dict[str, Any] | None = None
 
-    # Для задач парсинга
+
     query: str | None = None
     source: str | None = None
     current: int | None = None
@@ -47,7 +47,7 @@ class CeleryTaskStatus(BaseModel):
     total_content_skipped: int | None = None
     errors: list[str] | None = None
 
-    # Метаданные
+
     name: str | None = None
     args: list | None = None
     kwargs: dict[str, Any] | None = None

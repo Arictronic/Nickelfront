@@ -33,14 +33,14 @@ def get_celery_task_status(task_id: str) -> dict[str, Any] | None:
             "successful": result.successful() if result.ready() else None,
         }
 
-        # Если задача завершена, получаем результат
+
         if result.ready():
             try:
                 task_info["result"] = result.get(timeout=1)
             except Exception as e:
                 task_info["error"] = str(e)
 
-        # Получаем метаданные задачи если доступны
+
         if result.info and isinstance(result.info, dict):
             task_info["info"] = result.info
 
@@ -55,27 +55,27 @@ def get_celery_task_status(task_id: str) -> dict[str, Any] | None:
 def process_patent(self, task_id: int, patent_number: str, options: dict):
     """Фоновая обработка патента."""
     try:
-        # Обновляем статус на processing
+
         run_async(update_task_status(task_id, "processing"))
 
-        # Имитация долгой работы (парсинг, ML анализ и т.д.)
+
         time.sleep(10)
 
-        # Результат обработки
+
         result = {
             "patent": patent_number,
             "analysis": "some result",
             "status": "completed"
         }
 
-        # Обновляем статус на completed
+
         run_async(update_task_status(task_id, "completed", result))
 
         return result
 
     except Exception as e:
         logger.error(f"Ошибка обработки патента {patent_number}: {e}")
-        # Обновляем статус на failed
+
         run_async(update_task_status(task_id, "failed", {"error": str(e)}))
         raise
 

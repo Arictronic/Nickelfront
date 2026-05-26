@@ -49,7 +49,7 @@ class LLMService:
             f"base_url={self.base_url}"
         )
 
-        # Проверка наличия API ключа
+
         if not self.api_key:
             logger.warning("API ключ LLM не установлен. Генерация будет недоступна.")
 
@@ -205,7 +205,7 @@ class LLMService:
         return bool(self.api_key)
 
 
-# Глобальный экземпляр LLM сервиса
+
 llm_service = LLMService()
 
 

@@ -86,13 +86,13 @@ class ChromaVectorService:
                 return self._client
 
             try:
-                # Создаем директорию для персистентного хранения
+
                 os.makedirs(self._persist_directory, exist_ok=True)
 
-                # Chroma PersistentClient не любит параллельную инициализацию
-                # в одном процессе. При одновременных /vector/stats запросах
-                # без lock возможны ошибки вида:
-                # 'RustBindingsAPI' object has no attribute 'bindings'.
+
+
+
+
                 self._client = chromadb.PersistentClient(
                     path=self._persist_directory,
                     settings=ChromaSettings(
@@ -123,10 +123,10 @@ class ChromaVectorService:
                 return self._collection
 
             try:
-                # Получаем или создаем коллекцию
+
                 self._collection = client.get_or_create_collection(
                     name=self.COLLECTION_NAME,
-                    metadata={"hnsw:space": "cosine"},  # Косинусное сходство
+                    metadata={"hnsw:space": "cosine"},
                 )
                 logger.info(f"Коллекция {self.COLLECTION_NAME} готова")
             except Exception as e:
@@ -169,10 +169,10 @@ class ChromaVectorService:
             return False
 
         try:
-            # Формируем метаданные для фильтрации
+
             metadata = {
                 "paper_id": paper_id,
-                "title": title[:500],  # Ограничение длины
+                "title": title[:500],
                 "source": source,
             }
 
@@ -185,12 +185,12 @@ class ChromaVectorService:
             if journal:
                 metadata["journal"] = journal[:500]
 
-            # Добавляем или обновляем запись. upsert безопасен при повторной обработке статьи.
+
             self.collection.upsert(
                 ids=[f"paper_{paper_id}"],
                 embeddings=[embedding],
                 metadatas=[metadata],
-                documents=[title],  # Документ для контекста
+                documents=[title],
             )
 
             logger.debug(f"Статья {paper_id} добавлена в векторную базу")
@@ -236,7 +236,7 @@ class ChromaVectorService:
         logger.info(f"Пакетное добавление {total_docs} документов (batch_size={batch_size})")
 
         try:
-            # Добавление пакетами для экономии памяти
+
             for i in range(0, total_docs, batch_size):
                 batch = documents[i : i + batch_size]
                 batch_success = 0
@@ -300,30 +300,30 @@ class ChromaVectorService:
             return []
 
         try:
-            # Формируем фильтр where
+
             where = {}
             if source:
                 where["source"] = source
 
             results = self.collection.query(
                 query_embeddings=[query_embedding],
-                n_results=limit * 2,  # Берем с запасом для фильтрации
+                n_results=limit * 2,
                 where=where if where else None,
                 include=["metadatas", "distances"],
             )
 
-            # Обрабатываем результаты
+
             search_results = []
             if results and results["ids"] and len(results["ids"][0]) > 0:
                 for i, paper_id_str in enumerate(results["ids"][0]):
                     metadata = results["metadatas"][0][i] if results["metadatas"] else {}
                     distance = results["distances"][0][i] if results["distances"] else 0
 
-                    # Конвертируем дистанцию в сходство (cosine similarity)
-                    # distance = 1 - similarity для косинусного расстояния
+
+
                     similarity = 1 - distance
 
-                    # Фильтрация по дате (постобработка)
+
                     pub_date = metadata.get("publication_date", "")
                     if date_from and pub_date and pub_date < date_from:
                         continue
@@ -405,7 +405,7 @@ class ChromaVectorService:
             return False
 
         try:
-            # Коллекция может существовать на диске, даже если текущий процесс её ещё не открывал.
+
             try:
                 self.client.delete_collection(self.COLLECTION_NAME)
             except Exception as exc:
@@ -435,16 +435,16 @@ class ChromaVectorService:
             return 0
 
         try:
-            # Удаляем старую коллекцию
+
             try:
                 self.client.delete_collection(self.COLLECTION_NAME)
             except Exception:
                 pass
 
-            # Создаем новую
-            self._collection = None  # Сбрасываем кэш
 
-            # Пакетное добавление документов
+            self._collection = None
+
+
             count, _ = self.add_documents_batch(papers)
 
             logger.info(f"Перестроено {count} статей в векторной базе")
@@ -491,7 +491,7 @@ class ChromaVectorService:
             }
 
 
-# Глобальный экземпляр сервиса
+
 _vector_service: ChromaVectorService | None = None
 _vector_service_lock = threading.RLock()
 

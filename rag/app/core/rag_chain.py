@@ -20,7 +20,7 @@ from ..services.llm_service import create_llm
 logger = logging.getLogger(__name__)
 
 
-# Промт для RAG-цепи, специализированный для патентов на суперсплавы
+
 RAG_PROMPT_TEMPLATE = """
 Ты — эксперт в области материаловедения и металлургии, специализирующийся
 на суперсплавах и патентном анализе. Твоя задача — отвечать на вопросы
@@ -118,18 +118,18 @@ class RAGChain:
         """
         logger.debug("Построение RAG-цепи")
 
-        # Получение компонентов
+
         vector_store = vector_store_manager.get_vector_store()
         llm = self._get_llm()
         prompt = self._get_prompt_template()
 
-        # Создание retriever с настройками поиска
+
         retriever = vector_store.as_retriever(
             search_type="similarity",
             search_kwargs={"k": self.search_k},
         )
 
-        # Создание RAG-цепи
+
         chain = RetrievalQA.from_chain_type(
             llm=llm,
             chain_type="stuff",
@@ -182,7 +182,7 @@ class RAGChain:
             chain = self.get_chain()
             result = chain.invoke({"query": question})
 
-            # Форматирование результата
+
             response = {
                 "query": question,
                 "result": result.get("result", ""),
@@ -215,7 +215,7 @@ class RAGChain:
         for i, doc in enumerate(documents, 1):
             formatted.append({
                 "index": i,
-                "content": doc.page_content[:500],  # Ограничение длины
+                "content": doc.page_content[:500],
                 "metadata": doc.metadata,
             })
         return formatted
@@ -237,7 +237,7 @@ class RAGChain:
         """
         logger.info(f"Обработка запроса с источниками: {question[:50]}...")
 
-        # Поиск документов
+
         if include_scores:
             search_results = vector_store_manager.similarity_search_with_score(
                 question, k=self.search_k
@@ -250,10 +250,10 @@ class RAGChain:
             )
             scores = None
 
-        # Генерация ответа
+
         result = self.query(question)
 
-        # Добавление информации об источниках
+
         if scores:
             for i, doc_info in enumerate(result["source_documents"]):
                 if i < len(scores):
@@ -263,7 +263,7 @@ class RAGChain:
         return result
 
 
-# Глобальный экземпляр RAG-цепи
+
 rag_chain = RAGChain()
 
 

@@ -102,16 +102,20 @@ class COREParser(BaseParser):
                 journal = _first_text(journals)
 
             if not journal:
+                journal = _first_text(data.get("journal"))
+
+            if not journal:
                 journal = _first_text(data.get("publisher"))
 
             pdf_url = _first_text(data.get("downloadUrl"))
 
-            url = None
+            url = _first_text(data.get("source_fulltext_url"))
             source_urls = _coerce_text_list(data.get("sourceFulltextUrls"))
             if source_urls:
-                # CORE often returns full-text/PDF links here; keep them as PDF/full-text candidates,
-                # while the canonical article URL is derived later from source_id when needed.
+
+
                 pdf_url = pdf_url or source_urls[0]
+                url = url or source_urls[0]
 
             links = _coerce_dict_list(data.get("links"))
             for link in links:
@@ -127,7 +131,7 @@ class COREParser(BaseParser):
                     break
 
             return Paper(
-                title=_first_text(data.get("title")) or "Untitled",
+                title=_first_text(data.get("title")) or "Без названия",
                 authors=authors,
                 publication_date=publication_date,
                 journal=journal,
@@ -146,9 +150,13 @@ class COREParser(BaseParser):
 
     def _parse_publication_date(self, data: dict[str, Any]) -> datetime | None:
         date_candidates = [
+            data.get("published_date"),
             data.get("publishedDate"),
+            data.get("accepted_date"),
             data.get("acceptedDate"),
+            data.get("deposited_date"),
             data.get("depositedDate"),
+            data.get("created_date"),
             data.get("createdDate"),
         ]
 
@@ -164,6 +172,14 @@ class COREParser(BaseParser):
                 pass
             try:
                 return datetime.strptime(raw[:10], "%Y-%m-%d")
+            except ValueError:
+                pass
+            try:
+                return datetime.strptime(raw[:7], "%Y-%m")
+            except ValueError:
+                pass
+            try:
+                return datetime.strptime(raw[:4], "%Y")
             except ValueError:
                 pass
 
@@ -188,7 +204,7 @@ class COREParser(BaseParser):
             return self.normalize_paper(papers[0])
 
         return self.normalize_paper(Paper(
-            title=metadata.get("title", "Untitled"),
+            title=metadata.get("title", "Без названия"),
             authors=metadata.get("authors", []),
             publication_date=metadata.get("publication_date"),
             journal=metadata.get("journal"),

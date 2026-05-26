@@ -5,12 +5,12 @@ import os
 import sys
 from pathlib import Path
 
-# Добавляем корень проекта в PATH
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-# Добавляем backend в PATH для импорта app
+
 BACKEND_DIR = Path(__file__).resolve().parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
@@ -32,9 +32,9 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 if __name__ == "__main__":
-    # На Windows uvicorn --reload создаёт reloader + child process и сильно
-    # замедляет запуск. Для обычного запуска проекта reload выключен по умолчанию.
-    # При необходимости авто-перезагрузки: set NICKELFRONT_BACKEND_RELOAD=1
+
+
+
     reload_enabled = _env_bool("NICKELFRONT_BACKEND_RELOAD", False)
 
     uvicorn.run(
@@ -42,8 +42,8 @@ if __name__ == "__main__":
         host=settings.API_HOST,
         port=settings.API_PORT,
         reload=reload_enabled,
-        # Не следим за корнем проекта целиком: logs/chroma_db/reports/runtime-файлы
-        # часто меняются и провоцируют лишние reload-срабатывания во время старта.
+
+
         reload_dirs=[
             str(BACKEND_DIR),
             str(ROOT_DIR / "shared"),

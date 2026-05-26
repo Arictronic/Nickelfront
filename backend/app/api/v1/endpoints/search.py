@@ -149,14 +149,14 @@ async def get_search_highlight(
     Возвращает заголовок и аннотацию с тегами <mark> вокруг совпадений.
     """
     try:
-        # Получаем статью
+
         paper_service = PaperService(db)
         paper = await paper_service.get_by_id(paper_id)
 
         if not paper:
             raise HTTPException(status_code=404, detail="Статья не найдена")
 
-        # Получаем подсветку
+
         service = FullTextSearchService(db)
         highlight = await service.search_with_highlight(
             query=query,

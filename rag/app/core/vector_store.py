@@ -147,7 +147,7 @@ class VectorStoreManager:
         logger.info(f"Добавление {total_docs} документов в векторное хранилище")
 
         try:
-            # Добавление документами для экономии памяти
+
             for i in range(0, total_docs, batch_size):
                 batch = documents[i : i + batch_size]
                 batch_ids = [str(uuid.uuid4()) for _ in batch]
@@ -196,7 +196,7 @@ class VectorStoreManager:
         k = k or settings.search_k
         vector_store = self.get_vector_store()
 
-        # Проверка на пустую базу
+
         try:
             client = self._init_client()
             collection = self._get_or_create_collection(client)
@@ -308,18 +308,21 @@ class VectorStoreManager:
         logger.warning("Очистка векторного хранилища")
 
         try:
-            if self._vector_store is not None:
-                client = self._init_client()
-                collection = self._get_or_create_collection(client)
-                collection.delete(where={})
-                self._vector_store = None
-                logger.info("Векторное хранилище очищено")
-                return True
+            client = self._init_client()
+            try:
+                client.delete_collection(name=self._collection_name)
+            except Exception:
+                logger.debug("Collection %s is already absent", self._collection_name)
+
+            self._get_or_create_collection(client)
+            self._vector_store = None
+            logger.info("Векторное хранилище очищено")
+            return True
         except Exception as e:
             logger.error(f"Ошибка при очистке хранилища: {e}")
 
         return False
 
 
-# Глобальный экземпляр менеджера векторного хранилища
+
 vector_store_manager = VectorStoreManager()

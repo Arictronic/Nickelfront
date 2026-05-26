@@ -119,18 +119,18 @@ goto :eof
 :start_base_services
 if "%START_REDIS%"=="1" (
   echo [STEP] Starting Redis...
-  call :start_script_window "Redis" "%ROOT%run_redis.bat" "Redis"
+  call :start_script_window "Redis" "%ROOT%scripts\run_redis.bat" "Redis"
   timeout /t %REDIS_START_DELAY_SECONDS% /nobreak >nul
 )
 
 if "%START_QWEN_SERVICE%"=="1" (
   echo [STEP] Starting Qwen service...
-  call :start_script_window "Qwen Service" "%ROOT%run_qwen_service.bat" "Qwen service"
+  call :start_script_window "Qwen Service" "%ROOT%scripts\run_qwen_service.bat" "Qwen service"
 )
 
 if "%START_BACKEND%"=="1" (
   echo [STEP] Starting backend...
-  call :start_script_window "Backend" "%ROOT%run_backend.bat" "Backend"
+  call :start_script_window "Backend" "%ROOT%scripts\run_backend.bat" "Backend"
 )
 goto :eof
 
@@ -140,15 +140,15 @@ if not "%START_FRONTEND%"=="1" goto :eof
 
 echo [STEP] Starting frontend early...
 timeout /t %FRONTEND_START_DELAY_SECONDS% /nobreak >nul
-call :start_script_window "Frontend" "%ROOT%run_frontend.bat" "Frontend"
+call :start_script_window "Frontend" "%ROOT%scripts\run_frontend.bat" "Frontend"
 goto :eof
 
 :start_heavy_services_or_defer
 if not "%DEFER_HEAVY_SERVICES%"=="1" goto :start_heavy_now
 
-if exist "%ROOT%run_deferred_workers.bat" (
+if exist "%ROOT%scripts\run_deferred_workers.bat" (
   echo [STEP] Scheduling heavy services with delay...
-  start "Deferred Workers" cmd /c ""%ROOT%run_deferred_workers.bat" "%DEFER_HEAVY_SERVICES_SECONDS%""
+  start "Deferred Workers" cmd /c ""%ROOT%scripts\run_deferred_workers.bat" "%DEFER_HEAVY_SERVICES_SECONDS%""
   goto :eof
 )
 
@@ -163,47 +163,47 @@ goto :eof
 
 :start_qwen_workers
 if not "%START_QWEN_WORKERS%"=="1" goto :eof
-if not exist "%ROOT%run_qwen_worker.bat" (
-  echo [WARN] Qwen workers were not started because "%ROOT%run_qwen_worker.bat" was not found.
+if not exist "%ROOT%scripts\run_qwen_worker.bat" (
+  echo [WARN] Qwen workers were not started because "%ROOT%scripts\run_qwen_worker.bat" was not found.
   goto :eof
 )
 
 echo [STEP] Starting Qwen workers...
 for /L %%I in (1,1,%QWEN_QUEUE_WORKERS%) do (
-  start "Qwen Gateway %%I" cmd /k ""%ROOT%run_qwen_worker.bat" "%%I" "%QWEN_QUEUE_NAME%" "%QWEN_WORKER_POOL%" "%QWEN_WORKER_CONCURRENCY%""
+  start "Qwen Gateway %%I" cmd /k ""%ROOT%scripts\run_qwen_worker.bat" "%%I" "%QWEN_QUEUE_NAME%" "%QWEN_WORKER_POOL%" "%QWEN_WORKER_CONCURRENCY%""
 )
 goto :eof
 
 :start_content_workers
 if not "%START_CONTENT_WORKERS%"=="1" goto :eof
-if not exist "%ROOT%run_worker.bat" (
-  echo [WARN] Content workers were not started because "%ROOT%run_worker.bat" was not found.
+if not exist "%ROOT%scripts\run_worker.bat" (
+  echo [WARN] Content workers were not started because "%ROOT%scripts\run_worker.bat" was not found.
   goto :eof
 )
 
 echo [STEP] Starting content workers...
 for /L %%I in (1,1,%CONTENT_WORKERS%) do (
-  start "Content Worker %%I" cmd /k ""%ROOT%run_worker.bat" "content-%%I" "%CONTENT_WORKER_CONCURRENCY%" "%CONTENT_WORKER_POOL%" "%CONTENT_QUEUE_NAME%""
+  start "Content Worker %%I" cmd /k ""%ROOT%scripts\run_worker.bat" "content-%%I" "%CONTENT_WORKER_CONCURRENCY%" "%CONTENT_WORKER_POOL%" "%CONTENT_QUEUE_NAME%""
 )
 goto :eof
 
 :start_regular_workers
 if not "%START_WORKERS%"=="1" goto :eof
-if not exist "%ROOT%run_worker.bat" (
-  echo [WARN] Regular workers were not started because "%ROOT%run_worker.bat" was not found.
+if not exist "%ROOT%scripts\run_worker.bat" (
+  echo [WARN] Regular workers were not started because "%ROOT%scripts\run_worker.bat" was not found.
   goto :eof
 )
 
 echo [STEP] Starting regular workers...
 for /L %%I in (1,1,%CELERY_WORKERS%) do (
-  start "Worker %%I" cmd /k ""%ROOT%run_worker.bat" "%%I" "%WORKER_CONCURRENCY%" "%WORKER_POOL%" "%WORKER_QUEUES%""
+  start "Worker %%I" cmd /k ""%ROOT%scripts\run_worker.bat" "%%I" "%WORKER_CONCURRENCY%" "%WORKER_POOL%" "%WORKER_QUEUES%""
 )
 goto :eof
 
 :start_flower
 if not "%START_FLOWER%"=="1" goto :eof
 echo [STEP] Starting Flower...
-call :start_script_window "Flower" "%ROOT%run_flower.bat" "Flower"
+call :start_script_window "Flower" "%ROOT%scripts\run_flower.bat" "Flower"
 goto :eof
 
 :start_frontend_late_if_needed
@@ -212,7 +212,7 @@ if not "%START_FRONTEND%"=="1" goto :eof
 
 echo [STEP] Starting frontend after backend/workers...
 timeout /t 8 /nobreak >nul
-call :start_script_window "Frontend" "%ROOT%run_frontend.bat" "Frontend"
+call :start_script_window "Frontend" "%ROOT%scripts\run_frontend.bat" "Frontend"
 goto :eof
 
 :print_done
@@ -220,7 +220,7 @@ echo.
 echo ============================================================
 echo Startup sequence has been launched.
 if "%DEFER_HEAVY_SERVICES%"=="1" (
-  echo Heavy services will be started later by run_deferred_workers.bat.
+  echo Heavy services will be started later by scripts\run_deferred_workers.bat.
 ) else (
   echo Heavy services were started immediately in this run.
 )

@@ -12,7 +12,7 @@ from app.db.session import get_db
 from app.services.user_service import UserService
 from shared.schemas.auth import UserResponse
 
-# HTTP Bearer схема
+
 security = HTTPBearer()
 
 

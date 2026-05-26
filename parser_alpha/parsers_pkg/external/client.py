@@ -75,8 +75,8 @@ def _date_parts_to_iso(parts: list[int] | None) -> str | None:
     try:
         return datetime(year, month, day).isoformat()
     except Exception:
-        # Crossref occasionally has partial/invalid day values. Keep the year/month
-        # signal instead of dropping the date entirely.
+
+
         try:
             return datetime(year, month, 1).isoformat()
         except Exception:
@@ -221,7 +221,7 @@ def _parse_loose_date(value: Any) -> str | None:
         except Exception:
             continue
 
-    # Last resort for noisy strings such as "2024 Apr; 12(3):1-5".
+
     match = re.search(r"\b(18|19|20)\d{2}\b", raw)
     if match:
         try:
@@ -286,9 +286,9 @@ def _split_author_string(value: Any) -> list[str]:
         text = _collapse_whitespace(value)
         if not text:
             return []
-        # Prefer semicolon/newline as author delimiters when present so names like
-        # "Smith, John; Doe, Jane" do not become four fake authors. EuropePMC
-        # commonly uses commas when there is no semicolon, so keep comma fallback.
+
+
+
         delimiter = r"[;\n]+" if re.search(r"[;\n]", text) else r","
         return [part.strip() for part in re.split(delimiter, text) if part.strip()] or [text]
     if isinstance(value, (list, tuple, set)):
@@ -363,9 +363,9 @@ def _extract_crossref_authors(value: Any) -> list[str]:
     """Extract author names from Crossref rows with list/dict/string variants."""
     authors: list[str] = []
     for author in _coerce_dict_list(value):
-        # Crossref can provide either given/family or a single organization/name.
-        # Some rows wrap these scalars as {"value": "..."}; use _first_text to
-        # avoid saving Python reprs or dropping the author.
+
+
+
         name = _first_text(author.get("name") or author.get("organization"))
         given = _first_text(author.get("given"))
         family = _first_text(author.get("family"))
@@ -517,7 +517,7 @@ def _repair_mojibake_ru(value: str | None) -> str | None:
     if not raw:
         return None
 
-    # Heuristic: typical mojibake markers in Russian text.
+
     suspect = sum(raw.count(marker) for marker in ("Р", "С", "Ð", "Ñ"))
     if suspect < 4:
         return raw
@@ -752,8 +752,8 @@ class OpenAlexClient(_RetryingClient):
             source_name = _first_openalex_source_name(item)
             fallback_work_url = f"https://openalex.org/{work_id}" if work_id else None
             article_url = landing or (f"https://doi.org/{doi}" if doi else None) or fallback_work_url
-            
-            # Extract abstract from inverted index if available
+
+
             abstract = None
             abstract_inverted = item.get("abstract_inverted_index")
             if abstract_inverted and isinstance(abstract_inverted, dict):
@@ -776,7 +776,7 @@ class OpenAlexClient(_RetryingClient):
             )
 
         return results
-    
+
     def _reconstruct_abstract(self, inverted_index: dict[str, Any]) -> str | None:
         """Reconstruct abstract text from OpenAlex inverted index format."""
         try:
@@ -904,10 +904,10 @@ class EuropePMCClient(_RetryingClient):
                     pdf_url = candidate_url
                     break
 
-            # EuropePMC article pages require a real source-specific article id
-            # (for example MED:12345 or PMC:PMC12345).  Falling back to DOI here
-            # produced invalid URLs such as /article/MED/10.1000/..., while a DOI
-            # can still be represented correctly through the doi.org article URL.
+
+
+
+
             article_id = _first_text(item.get("id") or item.get("pmid") or item.get("pmcid"))
             source_db = _first_text(item.get("source"))
             source_ref = None
@@ -1067,7 +1067,7 @@ class ELibraryClient(_RetryingClient):
 
         if not cookie_values:
             return None
-        # HAR usually repeats the same browser cookie per request.
+
         return max(cookie_values, key=lambda v: (len(v), cookie_values.count(v)))
 
     @staticmethod
@@ -1199,7 +1199,7 @@ class ELibraryClient(_RetryingClient):
             "ftext": query,
         }
 
-        # Warm up session and cookies from querybox before submit.
+
         try:
             await client.get("/querybox.asp", headers=request_headers, follow_redirects=True)
             response = await client.post(
@@ -1526,8 +1526,8 @@ class PatentScopeClient(_RetryingClient):
         results: list[dict[str, Any]] = []
         seen: set[str] = set()
 
-        # Exact identifiers may redirect directly to a detail card instead of
-        # rendering a result table.
+
+
         direct_match = re.search(r"[?&]docId=([^&]+)", final_url)
         if direct_match and not rows:
             doc_id = unquote(direct_match.group(1))
@@ -1658,7 +1658,7 @@ def _normalize_rospatent_hit(hit: dict[str, Any]) -> dict[str, Any] | None:
         normalized = dict(source_body)
         if not normalized.get("id") and hit.get("_id") is not None:
             normalized["id"] = hit.get("_id")
-        # Keep useful top-level metadata when the API returns it outside _source.
+
         for key in ("highlight", "fields", "dataset", "index"):
             if key not in normalized and key in hit:
                 normalized[key] = hit.get(key)
@@ -1775,9 +1775,9 @@ class RosPatentClient(_RetryingClient):
         if urlparse(chosen_text).scheme in {"http", "https"}:
             return chosen_text
 
-        # ``media_path`` is a directory returned by the API and ``chosen`` is a file name.
-        # Keep exactly one slash between them; otherwise URLs like
-        # ``.../media_pathfile.pdf`` are produced when the directory lacks a trailing slash.
+
+
+
         chosen_part = chosen_text.lstrip("/")
         if urlparse(media_path).scheme in {"http", "https"}:
             return urljoin(f"{media_path.rstrip('/')}/", chosen_part)

@@ -53,6 +53,11 @@ export interface PaperContentPart {
   status: string;
   error: string | null;
   source: string;
+  contentType: string | null;
+  sectionTitle: string | null;
+  sectionIndex: number | null;
+  pageProfile: string | null;
+  includeInEmbedding: boolean;
   qwenModel: string | null;
   qwenPromptVersion: string | null;
   regenerationCount: number;

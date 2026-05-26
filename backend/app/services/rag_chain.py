@@ -58,7 +58,7 @@ class RAGChain:
             logger.error("Векторное хранилище не инициализировано")
             return None
 
-        # IMPORTANT: manager -> actual LangChain Chroma store
+
         langchain_vector_store = vector_store_manager.get_vector_store()
         if langchain_vector_store is None:
             logger.error("LangChain vector store не инициализирован")

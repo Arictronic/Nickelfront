@@ -144,7 +144,7 @@ async def logout(
 ):
     """Logout and revoke refresh tokens."""
     refresh_service = RefreshTokenService(db)
-    await refresh_service.revoke_user_tokens(current_user.id)
+    await refresh_service.revoke_user_tokens(current_user.id, allow_grace_window=False)
 
     logger.info(f"User logged out: {current_user.email}")
     return {"message": "Все токены отозваны"}

@@ -43,7 +43,7 @@ class QueryTranslator:
             return
 
         try:
-            from deep_translator import GoogleTranslator  # type: ignore
+            from deep_translator import GoogleTranslator
 
             self._google_translator_cls = GoogleTranslator
             self._engine_name = "deep-translator/google"

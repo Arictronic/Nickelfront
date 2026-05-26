@@ -97,14 +97,17 @@ class RefreshTokenService:
         token.revoked_at = datetime.now(UTC)
         await self.db.commit()
 
-    async def revoke_user_tokens(self, user_id: int) -> None:
+    async def revoke_user_tokens(self, user_id: int, *, allow_grace_window: bool = True) -> None:
         """Отозвать все refresh-токены пользователя."""
+        revoked_at = datetime.now(UTC)
+        if not allow_grace_window:
+            revoked_at -= timedelta(seconds=max(1, settings.REFRESH_TOKEN_REUSE_GRACE_SECONDS + 1))
         await self.db.execute(
             update(RefreshToken)
             .where(
                 RefreshToken.user_id == user_id,
                 RefreshToken.revoked_at.is_(None),
             )
-            .values(revoked_at=datetime.now(UTC))
+            .values(revoked_at=revoked_at)
         )
         await self.db.commit()

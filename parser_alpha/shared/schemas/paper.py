@@ -221,9 +221,9 @@ class PaperBase(BaseModel):
     @field_validator("authors", "keywords", "quality_flags", mode="before")
     @classmethod
     def _normalize_list_fields(cls, value, info: ValidationInfo):
-        # Author names commonly contain commas ("Smith, John"). Split authors
-        # only on stronger delimiters, while keywords/quality flags still accept
-        # comma-separated legacy strings.
+
+
+
         return _coerce_json_list(value, split_commas=info.field_name != "authors")
 
     @field_validator("provenance", mode="before")
@@ -367,9 +367,9 @@ class VectorClearResponse(BaseModel):
     success: bool = Field(..., description="Успешность операции")
 
 
-# =============================================================================
-# Qwen Chat Schemas
-# =============================================================================
+
+
+
 
 
 class QwenMessageRequest(BaseModel):

@@ -16,6 +16,7 @@ QWEN_TOKEN_EXPIRED_MARKERS = (
     "please log in again",
     "login again",
     "token expired",
+    "qwen_token_expired",
     "unauthorized",
     "not logged in",
     "登录",

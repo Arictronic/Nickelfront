@@ -31,6 +31,17 @@ def _resolve_service_name(service_name: str) -> str:
 
 
 def _resolve_log_path(service_name: str, log_file: str | None) -> Path:
+    service_env_map = {
+        "backend_api": "BACKEND_API_LOG_FILE",
+        "celery_worker": "CELERY_WORKER_LOG_FILE",
+        "content_worker": "CONTENT_WORKER_LOG_FILE",
+        "qwen_worker": "QWEN_WORKER_LOG_FILE",
+    }
+    service_env_name = service_env_map.get(service_name)
+    if service_env_name:
+        service_env_log_file = (os.getenv(service_env_name) or "").strip()
+        if service_env_log_file:
+            return Path(settings.resolve_path(service_env_log_file))
     env_log_file = (os.getenv("NICKELFRONT_LOG_FILE") or "").strip()
     if env_log_file:
         return Path(settings.resolve_path(env_log_file))
@@ -77,7 +88,7 @@ def setup_logging(
         "{name}:{function}:{line} - {message}"
     )
 
-    # loguru handlers
+
     logger.remove()
     logger.add(
         sys.stdout,
@@ -99,7 +110,7 @@ def setup_logging(
         encoding="utf-8",
     )
 
-    # stdlib logging for uvicorn/celery/sqlalchemy/etc.
+
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
     root_logger.setLevel(numeric_level)
@@ -150,7 +161,7 @@ def setup_logging(
     for logger_name in noisy_dependency_loggers:
         logging.getLogger(logger_name).setLevel(max(numeric_level, logging.WARNING))
 
-    # Celery keeps its own loggers; do not let it duplicate the same message twice.
+
     for logger_name in ("celery.app.trace",):
         logging.getLogger(logger_name).propagate = True
 

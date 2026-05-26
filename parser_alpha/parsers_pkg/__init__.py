@@ -22,46 +22,84 @@
 - translate: модуль перевода поисковых запросов
 
 """
+from __future__ import annotations
 
-from .base import (
-    BaseAPIClient,
-    BaseParser,
-    DeduplicationResult,
-    Deduplicator,
-    check_duplicate,
-)
-from .pipelines import (
-    CleaningStage,
-    DataPipeline,
-    DeduplicationStage,
-    EnrichmentStage,
-    ValidationStage,
-    create_default_pipeline,
-    process_papers,
-)
-from .errors import (
-    AntiBotBlockedError,
-    AuthenticationError,
-    EmptyResultError,
-    MisconfigurationError,
-    ParsingError,
-    RateLimitedError,
-    SchemaChangedError,
-    SourceError,
-    SourceTimeoutError,
-    SourceUnavailableError,
-)
-from .sources import (
-    SourceCapabilities,
-    SourceMetadata,
-    SourceRegistry,
-    SourceRuntimeDefaults,
-    build_default_source_registry,
-)
+import sys
+from pathlib import Path
+
+_PARSER_ALPHA_DIR = Path(__file__).resolve().parents[1]
+_PROJECT_ROOT = _PARSER_ALPHA_DIR.parent
+_BACKEND_DIR = _PROJECT_ROOT / "backend"
+for _path in (_PROJECT_ROOT, _BACKEND_DIR, _PARSER_ALPHA_DIR):
+    _path_str = str(_path)
+    if _path.exists() and _path_str not in sys.path:
+        sys.path.insert(0, _path_str)
+
+
+
+def _is_missing_optional_module(exc: ModuleNotFoundError, module_name: str) -> bool:
+    """Return True only when this trimmed parser package misses its own module."""
+    missing = str(getattr(exc, "name", "") or "")
+    return missing in {module_name, f"{__name__}.{module_name}"}
+
+try:
+    from .base import (
+        BaseAPIClient,
+        BaseParser,
+        DeduplicationResult,
+        Deduplicator,
+        check_duplicate,
+    )
+except ModuleNotFoundError as exc:
+    if not _is_missing_optional_module(exc, "base"):
+        raise
+
+try:
+    from .pipelines import (
+        CleaningStage,
+        DataPipeline,
+        DeduplicationStage,
+        EnrichmentStage,
+        ValidationStage,
+        create_default_pipeline,
+        process_papers,
+    )
+except ModuleNotFoundError as exc:
+    if not _is_missing_optional_module(exc, "pipelines"):
+        raise
+
+try:
+    from .errors import (
+        AntiBotBlockedError,
+        AuthenticationError,
+        EmptyResultError,
+        MisconfigurationError,
+        ParsingError,
+        RateLimitedError,
+        SchemaChangedError,
+        SourceError,
+        SourceTimeoutError,
+        SourceUnavailableError,
+    )
+except ModuleNotFoundError as exc:
+    if not _is_missing_optional_module(exc, "errors"):
+        raise
+
+try:
+    from .sources import (
+        SourceCapabilities,
+        SourceMetadata,
+        SourceRegistry,
+        SourceRuntimeDefaults,
+        build_default_source_registry,
+    )
+except ModuleNotFoundError as exc:
+    if not _is_missing_optional_module(exc, "sources"):
+        raise
 
 __version__ = "1.0.0"
 
-__all__ = [
+_PUBLIC_NAMES = [
     "BaseParser",
     "BaseAPIClient",
     "Deduplicator",
@@ -90,3 +128,5 @@ __all__ = [
     "SourceRegistry",
     "build_default_source_registry",
 ]
+
+__all__ = [name for name in _PUBLIC_NAMES if name in globals()]

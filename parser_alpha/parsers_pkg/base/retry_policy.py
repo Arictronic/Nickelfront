@@ -32,7 +32,7 @@ class RetryDecision:
 
 
 def _exp_delay(config: RetryConfig, attempt: int) -> float:
-    # attempt is 1-based.
+
     return config.base_delay * (config.backoff_base ** (attempt - 1)) + random.uniform(0.0, config.jitter_max)
 
 

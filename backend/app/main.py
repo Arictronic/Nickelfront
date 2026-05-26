@@ -3,7 +3,7 @@
 
 Запускает REST API сервер для платформы анализа патентов и научных статей.
 """
-# ruff: noqa: E402
+
 
 import asyncio
 import sys
@@ -19,7 +19,7 @@ from loguru import logger
 import redis.asyncio as redis
 from sqlalchemy import text
 
-# Добавляем корневую директорию проекта в sys.path
+
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
@@ -90,24 +90,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     Выполняет инициализацию при запуске и очистку при остановке приложения.
     """
-    # === Инициализация при запуске ===
+
     logger.info("=" * 60)
     logger.info("Запуск платформы Nickelfront")
     logger.info("=" * 60)
 
-    # Логирование конфигурации
+
     logger.info(f"Хост: {settings.API_HOST}:{settings.API_PORT}")
     logger.info(f"Режим отладки: {settings.DEBUG}")
     logger.info(f"Database URL: {_redact_url(settings.DATABASE_URL)}")
     logger.info(f"Redis URL: {_redact_url(settings.REDIS_URL)}")
     logger.info(f"CORS origins: {settings.get_cors_origins()}")
 
-    # Векторный поиск
+
     logger.info(f"ChromaDB path: {settings.CHROMA_DB_PATH}")
     logger.info(f"Embedding model: {settings.EMBEDDING_MODEL}")
     logger.info(f"Embedding dim: {settings.EMBEDDING_DIM}")
 
-    # LLM
+
     if settings.QWEN_TOKEN:
         logger.info(f"Qwen модель: {settings.QWEN_MODEL}")
         if settings.QWEN_USE_STANDALONE:
@@ -118,7 +118,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("Qwen токен не установлен. Генерация ответов будет недоступна.")
         logger.warning("Установите QWEN_TOKEN в .env файле.")
 
-    # Создание директорий
+
     log_dir = Path(settings.LOG_FILE).parent
     log_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Директория для логов: {log_dir}")
@@ -128,12 +128,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     yield
 
-    # === Очистка при остановке ===
+
     logger.info("Остановка платформы Nickelfront...")
     logger.info("Платформа остановлена")
 
 
-# Создание приложения FastAPI
+
 app = FastAPI(
     title="Nickelfront API",
     description="""
@@ -163,7 +163,7 @@ app = FastAPI(
 )
 
 
-# CORS middleware
+
 cors_origins = settings.get_cors_origins()
 allow_credentials = "*" not in cors_origins
 
@@ -195,7 +195,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
     )
 
 
-# Подключение роутеров
+
 app.include_router(admin_settings_router.router, prefix="/api/v1")
 app.include_router(tasks_router.router, prefix="/api/v1")
 app.include_router(parse_router.router, prefix="/api/v1")

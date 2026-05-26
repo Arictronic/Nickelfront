@@ -8,7 +8,7 @@ from app.db.models.task import PatentTask
 
 async def create_task(db: AsyncSession, task_data: dict) -> PatentTask:
     """Создать задачу в БД и отправить в Celery."""
-    # 1. Создаём запись в БД
+
     db_task = PatentTask(
         patent_number=task_data["patent_number"],
         status="pending",
@@ -18,8 +18,8 @@ async def create_task(db: AsyncSession, task_data: dict) -> PatentTask:
     await db.commit()
     await db.refresh(db_task)
 
-    # 2. Отправляем в Celery. Импорт внутри функции, чтобы обычный backend startup
-    # не подтягивал Celery task-модули и тяжёлые parser/RAG зависимости.
+
+
     from app.tasks.tasks import process_patent
 
     process_patent.delay(db_task.id, task_data["patent_number"], task_data.get("options", {}))

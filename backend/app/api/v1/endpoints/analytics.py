@@ -32,7 +32,7 @@ def _format_analytics_error(exc: Exception) -> str:
     ):
         return (
             "Похоже, база данных не обновлена после патча: в таблице papers нет новых "
-            "колонок parser metadata. Запусти из корня проекта: run_migrations.bat "
+            "колонок parser metadata. Запусти из корня проекта: scripts\\run_migrations.bat "
             "или python backend\\apply_migrations.py, затем перезапусти backend."
         )
     return raw
@@ -118,12 +118,12 @@ async def get_analytics_summary(
         Dict с основными метриками
     """
     try:
-        # Базовые запросы
+
         base_query = select(PaperModel)
         if source and source != "all":
             base_query = base_query.where(PaperModel.source == source)
 
-        # Общее количество
+
         count_query = select(func.count()).select_from(PaperModel)
         if source and source != "all":
             count_query = count_query.where(PaperModel.source == source)
@@ -131,7 +131,7 @@ async def get_analytics_summary(
         total_count_result = await db.execute(count_query)
         total_count = total_count_result.scalar() or 0
 
-        # Количество по источникам
+
         source_query = select(
             PaperModel.source,
             func.count().label("count")
@@ -140,7 +140,7 @@ async def get_analytics_summary(
         source_result = await db.execute(source_query)
         sources = {row.source: row.count for row in source_result}
 
-        # Количество с эмбеддингами
+
         embedding_query = select(func.count()).where(
             PaperModel.embedding.isnot(None)
         )
@@ -150,12 +150,12 @@ async def get_analytics_summary(
         embedding_result = await db.execute(embedding_query)
         with_embedding = embedding_result.scalar() or 0
 
-        # Средняя полнота данных
+
         papers_query = base_query.limit(1000)
         papers_result = await db.execute(papers_query)
         papers = papers_result.scalars().all()
 
-        # Вычисляем метрики
+
         quality_scores = []
         for paper in papers:
             score = 0
@@ -205,7 +205,7 @@ async def get_publications_trend(
         bind = db.get_bind()
         dialect_name = bind.dialect.name if bind is not None else ""
 
-        # В зависимости от group_by используем разные функции
+
         if dialect_name == "sqlite":
             if group_by == "year":
                 date_trunc = func.strftime("%Y-01-01", PaperModel.publication_date)
@@ -284,7 +284,7 @@ async def get_top_items(
         if source and source != "all":
             query = query.where(PaperModel.source == source)
 
-        query = query.limit(2000)  # Ограничение для обработки
+        query = query.limit(2000)
 
         result = await db.execute(query)
         papers = result.scalars().all()
@@ -397,7 +397,7 @@ async def get_source_distribution(
         distribution = {
             row.source: {
                 "count": row.count,
-                "percent": 0  # Будет вычислено ниже
+                "percent": 0
             }
             for row in rows
         }
@@ -465,7 +465,7 @@ async def get_quality_report(
                 "generated_at": datetime.now().isoformat(),
             }
 
-        # Метрики качества
+
         total = len(papers)
 
         with_abstract = sum(1 for p in papers if _has_text(p.abstract))
@@ -475,11 +475,11 @@ async def get_quality_report(
         with_authors = sum(1 for p in papers if _as_list(p.authors))
         with_embedding = sum(1 for p in papers if _has_embedding(p.embedding))
 
-        # Средние значения
+
         avg_abstract_len = sum(_text_len(p.abstract) for p in papers if _has_text(p.abstract)) / max(1, with_abstract)
         avg_keywords = sum(len(_as_list(p.keywords)) for p in papers if _as_list(p.keywords)) / max(1, with_keywords)
 
-        # Оценка качества
+
         quality_scores = []
         for paper in papers:
             score = 0

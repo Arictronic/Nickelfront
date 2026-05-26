@@ -11,11 +11,15 @@ param(
     [int]$FrontendPort = 0,
     [int]$CeleryWorkers = -1,
     [int]$QwenWorkers = -1,
+    [int]$ContentWorkers = -1,
     [string]$QwenQueue = '',
+    [string]$ContentQueue = '',
     [int]$WorkerConcurrency = 0,
     [int]$QwenWorkerConcurrency = 0,
+    [int]$ContentWorkerConcurrency = 0,
     [string]$WorkerPool = '',
     [string]$QwenWorkerPool = '',
+    [string]$ContentWorkerPool = '',
     [string]$WorkerQueues = ''
 )
 
@@ -119,22 +123,37 @@ $RagPort = Get-EnvInt -ExplicitValue 0 -Name 'RAG_PORT' -DefaultValue 8000
 
 $CeleryWorkers = Get-EnvInt -ExplicitValue $CeleryWorkers -Name 'CELERY_WORKERS' -DefaultValue 3 -AllowZero
 $QwenWorkers = Get-EnvInt -ExplicitValue $QwenWorkers -Name 'QWEN_QUEUE_WORKERS' -DefaultValue 5 -AllowZero
+$ContentWorkers = Get-EnvInt -ExplicitValue $ContentWorkers -Name 'CONTENT_WORKERS' -DefaultValue 1 -AllowZero
 $QwenQueue = Get-EnvString -ExplicitValue $QwenQueue -Name 'QWEN_QUEUE_NAME' -DefaultValue 'qwen'
+$ContentQueue = Get-EnvString -ExplicitValue $ContentQueue -Name 'CONTENT_QUEUE_NAME' -DefaultValue 'content'
 $WorkerConcurrency = Get-EnvInt -ExplicitValue $WorkerConcurrency -Name 'WORKER_CONCURRENCY' -DefaultValue 1
 $QwenWorkerConcurrency = Get-EnvInt -ExplicitValue $QwenWorkerConcurrency -Name 'QWEN_WORKER_CONCURRENCY' -DefaultValue 1
+$ContentWorkerConcurrency = Get-EnvInt -ExplicitValue $ContentWorkerConcurrency -Name 'CONTENT_WORKER_CONCURRENCY' -DefaultValue 1
 $WorkerPool = Get-EnvString -ExplicitValue $WorkerPool -Name 'WORKER_POOL' -DefaultValue 'solo'
 $QwenWorkerPool = Get-EnvString -ExplicitValue $QwenWorkerPool -Name 'QWEN_WORKER_POOL' -DefaultValue $WorkerPool
+$ContentWorkerPool = Get-EnvString -ExplicitValue $ContentWorkerPool -Name 'CONTENT_WORKER_POOL' -DefaultValue $WorkerPool
 $WorkerQueues = Get-EnvString -ExplicitValue $WorkerQueues -Name 'WORKER_QUEUES' -DefaultValue 'celery'
+$FlowerUnauthenticatedApi = Get-EnvString -ExplicitValue '' -Name 'FLOWER_UNAUTHENTICATED_API' -DefaultValue ''
+$FlowerApiFlag = ''
+if ($FlowerUnauthenticatedApi.ToLowerInvariant() -in @('true', '1', 'yes', 'y', 'on')) {
+    $FlowerApiFlag = ' --unauthenticated_api=true'
+}
 
 Write-Host 'Nickelfront startup configuration from .env / CLI:'
 Write-Host "  CELERY_WORKERS=$CeleryWorkers"
 Write-Host "  WORKER_CONCURRENCY=$WorkerConcurrency"
 Write-Host "  WORKER_POOL=$WorkerPool"
 Write-Host "  WORKER_QUEUES=$WorkerQueues"
+Write-Host "  CONTENT_WORKERS=$ContentWorkers"
+Write-Host "  CONTENT_QUEUE_NAME=$ContentQueue"
+Write-Host "  CONTENT_WORKER_CONCURRENCY=$ContentWorkerConcurrency"
+Write-Host "  CONTENT_WORKER_POOL=$ContentWorkerPool"
 Write-Host "  QWEN_QUEUE_WORKERS=$QwenWorkers"
 Write-Host "  QWEN_QUEUE_NAME=$QwenQueue"
 Write-Host "  QWEN_WORKER_CONCURRENCY=$QwenWorkerConcurrency"
 Write-Host "  QWEN_WORKER_POOL=$QwenWorkerPool"
+Write-Host "  FLOWER_PORT=$FlowerPort"
+Write-Host "  FLOWER_UNAUTHENTICATED_API=$FlowerUnauthenticatedApi"
 
 $VenvPython = Join-Path $RepoRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path $VenvPython)) {
@@ -189,7 +208,7 @@ $Services = @(
         Tag = 'NF_FLOWER'
         WorkDir = Join-Path $RepoRoot 'backend'
         Ports = @($FlowerPort)
-        Command = "`$host.UI.RawUI.WindowTitle='NF_FLOWER'; Set-Location '$($RepoRoot.Replace("'", "''"))\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app flower --address=0.0.0.0 --port=$FlowerPort"
+        Command = "`$host.UI.RawUI.WindowTitle='NF_FLOWER'; Set-Location '$($RepoRoot.Replace("'", "''"))\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app flower --address=0.0.0.0 --port=$FlowerPort$FlowerApiFlag"
         Optional = $false
     },
     @{
@@ -215,6 +234,18 @@ if ($CeleryWorkers -gt 0) {
             WorkDir = Join-Path $RepoRoot 'backend'
             Ports = @()
             Command = "`$host.UI.RawUI.WindowTitle='NF_CELERY_$i'; Set-Location '$($RepoRoot.Replace("'", "''"))\backend'; `$env:PYTHONIOENCODING='utf-8'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app worker --loglevel=info --pool=$WorkerPool --concurrency=$WorkerConcurrency -Q $WorkerQueues -E --without-gossip --without-mingle -n worker-$i@`$env:COMPUTERNAME"
+            Optional = $false
+        }
+    }
+}
+
+if ($ContentWorkers -gt 0) {
+    for ($i = 1; $i -le $ContentWorkers; $i++) {
+        $script:Services += @{
+            Tag = "NF_CONTENT_$i"
+            WorkDir = Join-Path $RepoRoot 'backend'
+            Ports = @()
+            Command = "`$host.UI.RawUI.WindowTitle='NF_CONTENT_$i'; Set-Location '$($RepoRoot.Replace("'", "''"))\backend'; `$env:PYTHONIOENCODING='utf-8'; `$env:NICKELFRONT_WORKER_ROLE='content'; `$env:NICKELFRONT_WORKER_QUEUES='$ContentQueue'; & '$($VenvPython.Replace("'", "''"))' -m celery -A app.tasks.celery_app worker --loglevel=info --pool=$ContentWorkerPool --concurrency=$ContentWorkerConcurrency -Q $ContentQueue -E --without-gossip --without-mingle -n content-$i@`$env:COMPUTERNAME"
             Optional = $false
         }
     }

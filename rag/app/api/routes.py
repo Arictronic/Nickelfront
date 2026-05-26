@@ -27,7 +27,7 @@ from ..services.parser_service import pdf_parser
 
 logger = logging.getLogger(__name__)
 
-# Создание роутера
+
 router = APIRouter()
 
 
@@ -55,7 +55,7 @@ async def health_check() -> HealthResponse:
     """
     logger.info("Проверка здоровья приложения")
 
-    # Получение статистики векторного хранилища
+
     stats = vector_store_manager.get_stats()
 
     return HealthResponse(
@@ -101,7 +101,7 @@ async def ask_question(request: AskRequest) -> AskResponse:
     logger.info(f"Получен вопрос: {request.question[:100]}...")
 
     try:
-        # Обработка запроса через RAG-цепь
+
         if request.include_sources:
             result = process_query_with_sources(
                 question=request.question,
@@ -110,7 +110,7 @@ async def ask_question(request: AskRequest) -> AskResponse:
         else:
             result = process_query(request.question)
 
-        # Форматирование источников
+
         sources: list[SourceDocument] = []
         for doc in result.get("source_documents", []):
             source_doc = SourceDocument(
@@ -177,7 +177,7 @@ async def upload_patent(
     """
     logger.info(f"Получен файл для загрузки: {file.filename}")
 
-    # Проверка типа файла
+
     if not file.filename.lower().endswith(".pdf"):
         logger.warning(f"Попытка загрузить файл не PDF: {file.filename}")
         raise HTTPException(
@@ -185,7 +185,7 @@ async def upload_patent(
             detail="Поддерживаются только PDF файлы",
         )
 
-    # Проверка размера файла
+
     file_size = 0
     file_bytes = await file.read()
     file_size = len(file_bytes)
@@ -207,7 +207,7 @@ async def upload_patent(
         )
 
     try:
-        # Парсинг PDF в документы
+
         logger.info(f"Парсинг PDF: {file.filename} ({file_size} байт)")
         documents = pdf_parser.parse_bytes_to_documents(
             file_bytes=file_bytes,
@@ -222,7 +222,7 @@ async def upload_patent(
                 detail="Не удалось извлечь текст из PDF. Возможно, файл содержит только изображения.",
             )
 
-        # Добавление документов в векторное хранилище
+
         logger.info(f"Добавление {len(documents)} документов в векторную базу")
         vector_store_manager.add_documents(documents)
 

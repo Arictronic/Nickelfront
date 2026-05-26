@@ -29,8 +29,14 @@ class AIEnrichmentResult:
 MAX_KEYWORD_SOURCE_CHARS = 32000
 PDF_MARKDOWN_PROMPT_VERSION = "pdf-markdown-v2-parts"
 
-# Callback arguments: processed pages, total pages, current markdown.
+
 MarkdownProgressCallback = Callable[[int, int, str], None]
+
+
+def _page_markdown_heading(page_start: int, page_end: int) -> str:
+    if page_start == page_end:
+        return f"### Страница {page_start}"
+    return f"### Страницы {page_start}-{page_end}"
 
 
 _PAGE_MARKER_SPLIT_RE = re.compile("(?=\\[(?:\\u0421\\u0442\\u0440\\u0430\\u043d\\u0438\\u0446\\u0430|Page)\\s+\\d+\\])")
@@ -115,9 +121,9 @@ def resolve_pdf_url(source: str, source_id: str | None, url: str | None) -> str 
     if _is_probably_pdf_url(raw_url):
         return raw_url
 
-    # EuropePMC: do not synthesize PDF links from source_id.
-    # Many records (MED/AGR/etc.) do not provide real PDF and generated links return 404.
-    # We keep only explicit PDF URLs received from the upstream source.
+
+
+
     if src == "europepmc":
         return None
 
@@ -146,7 +152,7 @@ def download_pdf_bytes(pdf_url: str, timeout_sec: float = 45.0) -> bytes | None:
             if "pdf" in content_type or content.startswith(b"%PDF"):
                 return content
 
-            # Fallback: landing page with a direct PDF link.
+
             html_text = response.text or ""
             guessed_pdf = _extract_pdf_link_from_html(str(response.url), html_text)
             if guessed_pdf:
@@ -176,7 +182,7 @@ def save_pdf_locally(paper_id: int, pdf_bytes: bytes) -> str:
 def extract_pdf_text(pdf_bytes: bytes) -> str:
     """Извлечь текст из PDF в legacy-формате одной строкой."""
     try:
-        from app.services.rag_parser import pdf_parser
+        from app.services.pdf_content_parser import pdf_parser
 
         return pdf_parser.extract_text_from_bytes(pdf_bytes)
     except Exception as exc:
@@ -188,10 +194,10 @@ def extract_pdf_page_items(pdf_bytes: bytes, options: dict | None = None) -> lis
     """Извлечь PDF постранично с диагностикой качества.
 
     Возвращает список dict, чтобы content task не зависел от конкретного
-    dataclass rag_parser и мог безопасно передавать данные в service-layer.
+    dataclass pdf_content_parser и мог безопасно передавать данные в service-layer.
     """
     try:
-        from app.services.rag_parser import pdf_parser
+        from app.services.pdf_content_parser import pdf_parser
 
         pages = pdf_parser.extract_pages_from_bytes(pdf_bytes, options=options or {})
         return [page.as_dict() if hasattr(page, "as_dict") else dict(page) for page in pages]
@@ -218,14 +224,14 @@ def extract_pdf_pages(pdf_bytes: bytes) -> list[str]:
 
 
 def _clean_html_text(raw: str) -> str:
-    # Decode entities first so encoded tags (&lt;div&gt;) are also removed.
+
     text = html.unescape(raw or "")
     text = html.unescape(text)
     text = re.sub(r"<script[\s\S]*?</script>", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"<noscript[\s\S]*?</noscript>", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", text)
-    # Second pass to catch tags revealed by unescape cascades.
+
     text = html.unescape(text)
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -246,7 +252,7 @@ def _fetch_europepmc_fulltext(source_id: str) -> str:
     if not source_db or not article_id:
         return ""
 
-    # Prefer fullTextXML endpoint for maximal text extraction.
+
     xml_url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{source_db}/{article_id}/fullTextXML"
     try:
         with httpx.Client(timeout=45.0, follow_redirects=True) as client:
@@ -329,7 +335,7 @@ def _split_pdf_text_into_pages(raw_text: str) -> list[str]:
     if parts:
         return parts
 
-    # Fallback split for PDFs without explicit page markers.
+
     chunk_size = 9000
     return [text[i : i + chunk_size].strip() for i in range(0, len(text), chunk_size) if text[i : i + chunk_size].strip()]
 
@@ -347,28 +353,28 @@ def _clean_markdown_response(text: str, *, normalize_math: bool = True) -> str:
     if not value:
         return ""
 
-    # Remove accidental markdown fences around the whole answer.
+
     value = re.sub(r"^```(?:markdown|md)?\s*", "", value, flags=re.IGNORECASE).strip()
     value = re.sub(r"\s*```$", "", value).strip()
     value = value.replace("\r\n", "\n").replace("\r", "\n")
 
-    # Keep Markdown readable: separate headings and tables from surrounding text.
+
     value = re.sub(r"(?<!\n)\n(#{1,6}\s+)", r"\n\n\1", value)
     value = re.sub(r"(#{1,6}[^\n]+)\n(?!\n)", r"\1\n\n", value)
     value = re.sub(r"(?<!\n)\n(\|.+\|)", r"\n\n\1", value)
     value = re.sub(r"(\|.+\|)\n(?!\n|\|)", r"\1\n\n", value)
 
-    # Normalize common LaTeX delimiters for remark-math / KaTeX rendering.
+
     if normalize_math:
         value = re.sub(r"\\\((.+?)\\\)", lambda m: f"${m.group(1).strip()}$", value, flags=re.DOTALL)
         value = re.sub(r"\\\[(.+?)\\\]", lambda m: f"$$\n{m.group(1).strip()}\n$$", value, flags=re.DOTALL)
 
-    # Separate glued headings commonly returned by LLMs from compact PDF text.
+
     value = re.sub(r"(?<!\n)(#{1,6}\s+)", r"\n\n\1", value)
     value = re.sub(r"(?<!\n)(\b(?:Abstract|Keywords|References|Acknowledg(?:e)?ments)\b\s*:?)", r"\n\n## \1", value, flags=re.IGNORECASE)
     value = re.sub(r"(?<!\n)(\b[IVX]{1,6}\.\s+[A-Z][A-Z0-9 ,:;()\-/]{3,})", r"\n\n## \1", value)
 
-    # Collapse excessive blank lines, but keep paragraph breaks.
+
     value = re.sub(r"\n{3,}", "\n\n", value)
     return value.strip()
 
@@ -472,7 +478,7 @@ def normalize_pdf_text_markdown(
 
     for batch in page_batches:
         response_text = ""
-        batch_text = "\n\n".join(f"[Page {current_page + offset}]\n{page[:page_char_limit]}" for offset, page in enumerate(batch))
+        batch_text = "\n\n".join(f"[Страница {current_page + offset}]\n{page[:page_char_limit]}" for offset, page in enumerate(batch))
         batch_range_start = current_page
         batch_range_end = current_page + len(batch) - 1
 
@@ -527,7 +533,7 @@ def normalize_pdf_text_markdown(
                         )
 
         page_payload = _clean_markdown_response(response_text or batch_text, normalize_math=normalize_math)
-        normalized_parts.append(f"### Pages {batch_range_start}-{batch_range_end}\n\n{page_payload}".strip())
+        normalized_parts.append(f"{_page_markdown_heading(batch_range_start, batch_range_end)}\n\n{page_payload}".strip())
         if on_page_markdown:
             try:
                 on_page_markdown(batch_range_end, len(pages), "\n\n".join(normalized_parts).strip())

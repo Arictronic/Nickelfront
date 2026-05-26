@@ -151,7 +151,7 @@ class Deduplicator:
 
         return DeduplicationResult(is_duplicate=False, confidence=0.0, reason="No duplicate found")
 
-    # Backward-compatible API used by old pipeline code.
+
     def is_duplicate(self, paper: dict[str, Any]) -> tuple[bool, str]:
         publication_year = None
         publication_date = paper.get("publication_date")

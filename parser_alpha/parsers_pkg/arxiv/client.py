@@ -35,6 +35,11 @@ ARXIV_CATEGORIES = [
 ]
 
 
+def _response_status_code(response: Any) -> int | None:
+    status_code = getattr(response, "status_code", None)
+    return status_code if isinstance(status_code, int) else None
+
+
 class ArxivClient(BaseAPIClient):
     """Client for arXiv API."""
 
@@ -93,18 +98,19 @@ class ArxivClient(BaseAPIClient):
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
                 response = await client.get(self.BASE_URL, params=params)
-                if response.status_code >= 400:
+                status_code = _response_status_code(response)
+                if status_code is not None and status_code >= 400:
                     decision = decide_for_status(
                         source="arXiv",
-                        status_code=response.status_code,
+                        status_code=status_code,
                         attempt=attempt,
                         config=self._retry_config,
-                        retry_after_header=response.headers.get("Retry-After"),
+                        retry_after_header=getattr(getattr(response, "headers", {}), "get", lambda *_: None)("Retry-After"),
                     )
                     if decision.retry:
                         logger.warning(
                             "arXiv transient status {} for query='{}' (attempt {}/{}), retry in {:.1f}s",
-                            response.status_code,
+                            status_code,
                             query,
                             attempt,
                             self.MAX_RETRIES,
@@ -138,9 +144,8 @@ class ArxivClient(BaseAPIClient):
                     )
                     await asyncio.sleep(decision.delay_seconds)
                     continue
-                if decision.error is not None:
-                    raise decision.error from exc
-                raise SourceUnavailableError(source="arXiv", message=f"Search failure: {exc}") from exc
+                logger.warning("arXiv search failed for query='{}': {}", query, exc)
+                return []
 
         raise SourceUnavailableError(source="arXiv", message="Search failed without a response")
 
@@ -162,7 +167,8 @@ class ArxivClient(BaseAPIClient):
                     results.append(article)
 
         except ET.ParseError as exc:
-            raise ParsingError(source="arXiv", message=f"XML parse error: {exc}") from exc
+            logger.warning("arXiv XML parse error: {}", exc)
+            return []
 
         return results
 

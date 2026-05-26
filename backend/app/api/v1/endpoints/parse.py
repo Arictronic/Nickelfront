@@ -33,6 +33,30 @@ from shared.schemas.paper import (
 router = APIRouter(prefix="/papers", tags=["papers"])
 
 
+class _LazyTaskProxy:
+    """Backwards-compatible proxy for Celery tasks used by tests and endpoints."""
+
+    def __init__(self, task_name: str):
+        self._task_name = task_name
+
+    def _task(self):
+        return getattr(_get_parse_task_module(), self._task_name)
+
+    def delay(self, *args, **kwargs):
+        return self._task().delay(*args, **kwargs)
+
+    def apply_async(self, *args, **kwargs):
+        return self._task().apply_async(*args, **kwargs)
+
+    def __getattr__(self, item):
+        return getattr(self._task(), item)
+
+
+parse_papers_task = _LazyTaskProxy("parse_papers_task")
+parse_all_sources_task = _LazyTaskProxy("parse_all_sources_task")
+parse_multiple_queries_task = _LazyTaskProxy("parse_multiple_queries_task")
+
+
 def _get_parse_task_module():
     """Lazy import Celery parser tasks only when a parse endpoint is used."""
     from app.tasks import parse_tasks
@@ -266,9 +290,10 @@ async def start_parsing(
     _ensure_parallel_parse_limit(parser_settings)
     effective_limit = _effective_parse_limit(limit, parser_settings, source)
 
-    task = parse_tasks.parse_papers_task.apply_async(
-        kwargs={"query": normalized_query, "limit": effective_limit, "source": source},
-        queue="celery",
+    task = parse_papers_task.delay(
+        query=normalized_query,
+        limit=effective_limit,
+        source=source,
     )
     initial_count = await _count_papers_for_source(db, source)
     _record_parse_job(
@@ -324,44 +349,32 @@ async def start_parsing_all(
 
     if source == "all":
         effective_limit = min(_effective_parse_limit(limit_per_query, parser_settings, src) for src in enabled_sources)
-        task = parse_tasks.parse_all_sources_task.apply_async(
-            kwargs={
-                "limit_per_query": effective_limit,
-                "queries": user_queries,
-                "query": normalized_query or None,
-                "sources": enabled_sources,
-            },
-            queue="celery",
+        task = parse_all_sources_task.delay(
+            limit_per_query=effective_limit,
+            queries=user_queries,
+            query=normalized_query or None,
+            sources=enabled_sources,
         )
         source_list = enabled_sources
     elif source == "arXiv":
-        task = parse_tasks.parse_multiple_queries_task.apply_async(
-            kwargs={
-                "queries": user_queries or parse_tasks.ARXIV_SEARCH_QUERIES,
-                "limit_per_query": _effective_parse_limit(limit_per_query, parser_settings, "arXiv"),
-                "source": "arXiv",
-            },
-            queue="celery",
+        task = parse_multiple_queries_task.delay(
+            queries=user_queries or parse_tasks.ARXIV_SEARCH_QUERIES,
+            limit_per_query=_effective_parse_limit(limit_per_query, parser_settings, "arXiv"),
+            source="arXiv",
         )
         source_list = ["arXiv"]
     elif source == "CORE":
-        task = parse_tasks.parse_multiple_queries_task.apply_async(
-            kwargs={
-                "queries": user_queries or parse_tasks.DEFAULT_SEARCH_QUERIES,
-                "limit_per_query": _effective_parse_limit(limit_per_query, parser_settings, "CORE"),
-                "source": "CORE",
-            },
-            queue="celery",
+        task = parse_multiple_queries_task.delay(
+            queries=user_queries or parse_tasks.DEFAULT_SEARCH_QUERIES,
+            limit_per_query=_effective_parse_limit(limit_per_query, parser_settings, "CORE"),
+            source="CORE",
         )
         source_list = ["CORE"]
     else:
-        task = parse_tasks.parse_multiple_queries_task.apply_async(
-            kwargs={
-                "queries": user_queries or parse_tasks.DEFAULT_SEARCH_QUERIES,
-                "limit_per_query": _effective_parse_limit(limit_per_query, parser_settings, source),
-                "source": source,
-            },
-            queue="celery",
+        task = parse_multiple_queries_task.delay(
+            queries=user_queries or parse_tasks.DEFAULT_SEARCH_QUERIES,
+            limit_per_query=_effective_parse_limit(limit_per_query, parser_settings, source),
+            source=source,
         )
         source_list = [source]
 
@@ -579,6 +592,9 @@ async def reprocess_paper_content(
     if not paper:
         raise HTTPException(status_code=404, detail="Статья не найдена")
 
+    part_service = PaperContentPartService(db)
+    cleared_parts = await part_service.clear_parts(paper_id)
+
     process_paper_content_task = _get_content_task()
     task = process_paper_content_task.apply_async(
         args=[paper_id],
@@ -595,7 +611,7 @@ async def reprocess_paper_content(
         translation_ru=None,
         embedding=None,
     )
-    return {"paper_id": paper_id, "task_id": task.id, "status": "queued"}
+    return {"paper_id": paper_id, "task_id": task.id, "status": "queued", "cleared_content_parts": cleared_parts}
 
 
 @router.post("/reprocess-all")
@@ -614,9 +630,12 @@ async def reprocess_all_papers(
         raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
 
     process_paper_content_task = _get_content_task()
+    part_service = PaperContentPartService(db)
     queued = 0
+    cleared_total = 0
     task_ids: list[str] = []
     for paper in papers:
+        cleared_total += await part_service.clear_parts(paper.id)
         task = process_paper_content_task.apply_async(
             args=[paper.id],
             queue=settings.CONTENT_QUEUE_NAME,
@@ -630,7 +649,7 @@ async def reprocess_all_papers(
         task_ids.append(task.id)
         queued += 1
 
-    return {"queued": queued, "task_ids": task_ids}
+    return {"queued": queued, "task_ids": task_ids, "cleared_content_parts": cleared_total}
 
 
 @router.delete("/id/{paper_id}")

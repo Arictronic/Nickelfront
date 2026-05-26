@@ -27,7 +27,7 @@ class FullTextSearchService:
         limit: int = 20,
         offset: int = 0,
         source: str | None = None,
-        search_mode: str = "plain",  # plain, phrase, websearch
+        search_mode: str = "plain",
     ) -> tuple[list[PaperModel], int]:
         """
         Полнотекстовый поиск статей.
@@ -42,18 +42,18 @@ class FullTextSearchService:
         Returns:
             (список статей, общее количество)
         """
-        # Создаём tsquery из поискового запроса
+
         if search_mode == "phrase":
-            # Поиск точной фразы
+
             tsquery = func.plainto_tsquery("english", func.quote_literal(query))
         elif search_mode == "websearch":
-            # Веб-поиск с поддержкой AND, OR, NOT
+
             tsquery = func.websearch_to_tsquery("english", query)
         else:
-            # Обычный поиск (AND между словами)
+
             tsquery = func.plainto_tsquery("english", query)
 
-        # Базовый запрос с поиском
+
         search_query = select(
             PaperModel,
             func.ts_rank(PaperModel.search_vector, tsquery).label("rank")
@@ -61,18 +61,18 @@ class FullTextSearchService:
             PaperModel.search_vector.op("@@")(tsquery)
         )
 
-        # Фильтр по источнику
+
         if source and source != "all":
             search_query = search_query.where(PaperModel.source == source)
 
-        # Подсчёт общего количества
+
         count_query = select(func.count()).select_from(
             search_query.subquery()
         )
         count_result = await self.db.execute(count_query)
         total = count_result.scalar() or 0
 
-        # Сортировка по релевантности и пагинация
+
         search_query = search_query.order_by(
             text("rank DESC"),
             PaperModel.publication_date.desc()
@@ -103,7 +103,7 @@ class FullTextSearchService:
         """
         tsquery = func.plainto_tsquery("english", query)
 
-        # Создаём сниппеты с подсветкой
+
         title_snippet = func.ts_headline(
             "english",
             PaperModel.title,
@@ -118,7 +118,7 @@ class FullTextSearchService:
             "StartSel=<mark>, StopSel=</mark>, MaxWords=30, MinWords=15"
         )
 
-        # Выполняем запрос
+
         snippet_query = select(
             title_snippet.label("title_highlight"),
             abstract_snippet.label("abstract_highlight")
@@ -149,7 +149,7 @@ class FullTextSearchService:
         Returns:
             Список подсказок
         """
-        # Используем trgm индекс для поиска по префиксу
+
         suggest_query = select(
             func.distinct(PaperModel.title).label("suggestion")
         ).where(
@@ -181,24 +181,24 @@ class FullTextSearchService:
         Returns:
             Список статей
         """
-        # Создаём условия для каждого ключевого слова
+
         conditions = []
         for keyword in keywords:
             conditions.append(
                 PaperModel.keywords.cast(String).ilike(f"%{keyword}%")
             )
 
-        # Комбинируем условия
+
         if match_all:
-            # AND - все ключевые слова должны совпасть
+
             from sqlalchemy import and_
             filter_condition = and_(*conditions)
         else:
-            # OR - любое ключевое слово
+
             from sqlalchemy import or_
             filter_condition = or_(*conditions)
 
-        # Выполняем поиск
+
         search_query = select(PaperModel).where(
             filter_condition
         ).order_by(
@@ -222,7 +222,7 @@ class FullTextSearchService:
         """
         tsquery = func.plainto_tsquery("english", query)
 
-        # Статистика
+
         stats_query = select(
             func.count().label("total"),
             func.avg(func.ts_rank(PaperModel.search_vector, tsquery)).label("avg_rank"),

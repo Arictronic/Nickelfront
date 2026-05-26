@@ -1,67 +1,87 @@
 # Nickelfront
 
-Nickelfront - платформа для сбора, обработки и анализа научных статей и патентов по материаловедению, с акцентом на никелевые сплавы, суперсплавы и смежные темы.
+Nickelfront - локальная платформа для сбора, парсинга, индексации и анализа научных статей, патентов и PDF-документов. Проект ориентирован на Windows-сценарий запуска и объединяет FastAPI backend, React frontend, Celery workers, Redis, Qwen service и пайплайн обработки PDF.
 
-Проект включает:
-- backend на FastAPI + SQLAlchemy + Alembic
-- frontend на React + Vite + TypeScript
-- фоновые очереди Celery + Redis
-- автономный `qwen_service` для работы с Qwen
-- `parser_alpha` с парсерами источников
-- векторный поиск на ChromaDB
-- набор bat/ps1-скриптов для локального запуска под Windows
+## Что умеет проект
 
-## Что Умеет Проект
+- собирать и обогащать метаданные статей и патентов
+- скачивать и разбирать PDF
+- извлекать текст, структуру и служебные признаки документов
+- строить векторный поиск по ChromaDB
+- отдавать API для поиска, аналитики, отчетов и мониторинга
+- запускать AI-функции через `qwen_service`
+- работать с очередями Celery и фоновыми задачами
 
-- собирает статьи из нескольких источников через задачи парсинга
-- хранит метаданные, историю задач и результаты обработки в PostgreSQL
-- скачивает PDF и выполняет постобработку в фоновых очередях
-- строит векторный поиск через эмбеддинги и ChromaDB
-- выполняет полнотекстовый поиск, аналитику и построение отчетов
-- генерирует AI-анализ и русскоязычные сводки через Qwen
-- предоставляет веб-интерфейс для поиска, мониторинга и администрирования
-
-## Основные Каталоги
+## Структура репозитория
 
 ```text
 Nickelfront/
-|- backend/                  FastAPI-приложение, сервисы, задачи, миграции
-|- frontend/                 интерфейс на React
-|- parser_alpha/             парсеры, маршрутизация источников, тесты
-|- qwen_service/             автономный HTTP-сервис Qwen и токен-утилиты
-|- analytics/                метрики и отчеты
-|- rag/                      модули и тесты RAG
-|- shared/                   общие схемы и модели обмена
-|- scripts/                  вспомогательные bat/ps1-скрипты
-|- install_all.bat           установка локального окружения
-|- run_all.bat               основной сценарий локального запуска
-|- run_cleanup_tasks_and_papers.bat
-|- Qwen_scaner.py            wrapper для извлечения Qwen-токена из HAR
+|- backend/                    FastAPI API, сервисы, Celery tasks, Alembic
+|- frontend/                   React + Vite frontend
+|- parser_alpha/               парсеры источников и вспомогательные зависимости
+|- qwen_service/               отдельный локальный сервис для AI/Qwen
+|- rag/                        RAG-логика и связанные модули
+|- shared/                     общие модели и схемы
+|- scripts/                    bat/ps1 сценарии запуска, установки и диагностики
+|- deploy/                     конфиги деплоя, включая nginx
+|- storage/                    артефакты аудита, отчеты, runtime-данные
+|- requirements.txt            общие Python-зависимости
+|- install_all.bat             основной вход в установку
+`- run_all.bat                 основной вход в локальный запуск
 ```
+
+## Технологии
+
+- Backend: FastAPI, SQLAlchemy, Alembic, Pydantic, Loguru
+- Очереди: Celery, Redis, Flower
+- Поиск и RAG: ChromaDB, sentence-transformers, LangChain
+- PDF и экспорт: pdfplumber, PyMuPDF, reportlab, python-docx, WeasyPrint
+- Frontend: React 18, Vite 5, TypeScript, Zustand, Recharts
+- AI: локальный `qwen_service` и backend-интеграция
 
 ## Требования
 
-Локальный сценарий ориентирован в первую очередь на Windows.
+Основной локальный сценарий рассчитан на Windows.
 
-Нужно установить:
-- Python 3.11 или новее
-- Node.js 18 или новее
+Нужно:
+- Python `3.13+`
+- Node.js `20` или `22` LTS желательно
 - npm
 - PostgreSQL
 
 Опционально:
 - Git
-- Redis можно не ставить заранее: `run_redis.bat` умеет скачать локальную сборку автоматически
+- Redis
+  Если Redis не установлен, `scripts/run_redis.bat` умеет поднимать локальную portable-сборку.
 
-Порты по умолчанию:
-- frontend: `5173`
-- backend API: `8001`
-- qwen_service: `8767`
+Типовые локальные порты:
+- Frontend: `5173`
+- Backend API: `8001`
+- Qwen service: `8767`
 - Flower: `5555`
 - Redis: `6380`
 - PostgreSQL: обычно `5433`
 
-## Быстрый Старт
+## Настройка окружения
+
+Шаблон переменных лежит в [.env.example](/d:/Project/Nickelfront/.env.example).
+
+Минимально проверьте:
+- `DATABASE_URL`
+- `REDIS_URL`
+- `SECRET_KEY`
+- `QWEN_TOKEN`
+- `QWEN_API_KEY`
+- `API_PORT`
+- `QWEN_SERVICE_PORT`
+- `VITE_API_URL`
+
+Важно:
+- `.env` хранится локально и не должен коммититься
+- плейсхолдеры в `.env.example` надо заменить на реальные значения
+- без `QWEN_TOKEN` backend может стартовать, но AI-функции будут ограничены
+
+## Быстрый старт
 
 ### 1. Установка
 
@@ -71,169 +91,174 @@ Nickelfront/
 install_all.bat
 ```
 
-Скрипт:
-- создает `.venv`
-- обновляет `pip`, `setuptools`, `wheel`
-- ставит Python-зависимости из `requirements.txt`
-- ставит frontend-зависимости через `npm install`
-- ставит Playwright Chromium
-- создает `.env` из [`.env.example`](/d:/Project/Nickelfront/.env.example), если `.env` отсутствует
-- создает рабочие каталоги проекта
+Сейчас `install_all.bat` делегирует в `scripts/nickelfront_doctor_setup_FIXED_v18.bat`. Если вы поддерживаете несколько вариантов doctor/setup-скриптов, сначала проверьте, какой из них считается каноническим для вашей ветки.
 
-### 2. Настройка `.env`
+Ожидаемое поведение установки:
+- создание `.venv`
+- установка зависимостей из `requirements.txt`
+- установка зависимостей frontend
+- подготовка runtime-директорий
+- установка Playwright Chromium при необходимости
+- создание `.env` из `.env.example`, если `.env` отсутствует
 
-Минимально проверьте:
+### 2. Проверка `.env`
+
+Перед первым полным запуском проверьте хотя бы:
 - `DATABASE_URL`
 - `REDIS_URL`
 - `SECRET_KEY`
-- `QWEN_TOKEN`, если нужен рабочий Qwen
+- `QWEN_TOKEN`
+- `QWEN_API_KEY`
 
-Важно:
-- `.env` игнорируется git
-- реальные токены и секреты нельзя коммитить
-- если токен или ключ уже куда-то утек, его нужно заменить
+### 3. Локальный запуск
 
-### 3. Какие ключи и токены нужны
-
-Обязательно для запуска:
-- `DATABASE_URL` - PostgreSQL
-- `REDIS_URL` - Redis
-- `SECRET_KEY` - JWT и подпись внутренних токенов
-
-Обязательно для AI-функций Qwen:
-- `QWEN_TOKEN` - основной токен доступа к Qwen
-
-Опционально:
-- `QWEN_API_KEY` - защита локального `qwen_service`
-- `CORE_API_KEY` - улучшает работу с источником CORE
-- `SEMANTIC_SCHOLAR_API_KEY` - нужен для соответствующих интеграций, если вы их используете
-
-Если `QWEN_TOKEN` пустой:
-- backend и frontend могут запускаться
-- но чат, AI-анализ, markdown-нормализация и связанные Qwen-задачи работать не будут
-
-### 4. Подготовка PostgreSQL
-
-Создайте базу данных из `DATABASE_URL`.
-
-Типичный локальный пример:
-
-```env
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:5433/nickelfront
-```
-
-### 5. Запуск всего проекта
-
-Основной сценарий:
+Основной стартовый скрипт:
 
 ```bat
 run_all.bat
 ```
 
-Что делает `run_all.bat`:
-- загружает переменные из `.env`
-- запускает Redis
-- запускает `qwen_service`
-- запускает backend
-- рано поднимает frontend
-- откладывает тяжелые сервисы через `run_deferred_workers.bat`
+`run_all.bat` стартует сервисы в отдельных окнах примерно в таком порядке:
+1. Redis
+2. `qwen_service`
+3. backend
+4. frontend
+5. отложенно: Qwen workers, content workers, обычные Celery workers и Flower
 
-Тяжелые сервисы:
-- qwen workers
-- content workers
-- обычные Celery workers
-- Flower
+Важно:
+- PostgreSQL должен быть запущен заранее
+- отдельный RAG-сервис локально не поднимается, RAG идет через backend
 
-После старта обычно доступны:
-- frontend: `http://localhost:5173`
-- backend docs: `http://localhost:8001/docs`
-- backend health: `http://localhost:8001/health`
+### 4. Основные URL
+
+- Frontend: `http://localhost:5173`
+- Backend docs: `http://localhost:8001/docs`
+- Backend health: `http://localhost:8001/health`
 - Flower: `http://localhost:5555`
 
-## Все Основные Bat-Скрипты
+## Главные скрипты
 
-### Установка и базовый запуск
+### Установка и orchestration
 
-- [install_all.bat](/d:/Project/Nickelfront/install_all.bat) - устанавливает локальное окружение и зависимости
-- [run_all.bat](/d:/Project/Nickelfront/run_all.bat) - основной сценарий запуска всего проекта
-- [run_deferred_workers.bat](/d:/Project/Nickelfront/run_deferred_workers.bat) - запускает тяжелые worker-сервисы с задержкой
+- [install_all.bat](/d:/Project/Nickelfront/install_all.bat)  
+  Точка входа для установки.
+- [run_all.bat](/d:/Project/Nickelfront/run_all.bat)  
+  Точка входа для локального старта всего стека.
+- [scripts/run_deferred_workers.bat](/d:/Project/Nickelfront/scripts/run_deferred_workers.bat)  
+  Отложенный старт тяжелых фоновых сервисов.
 
 ### Backend и frontend
 
-- [run_backend.bat](/d:/Project/Nickelfront/run_backend.bat) - запускает backend и перед этим применяет Alembic-миграции
-- [run_frontend.bat](/d:/Project/Nickelfront/run_frontend.bat) - запускает Vite dev server
-- [run_migrations.bat](/d:/Project/Nickelfront/run_migrations.bat) - применяет только миграции
+- [scripts/run_backend.bat](/d:/Project/Nickelfront/scripts/run_backend.bat)  
+  Активирует окружение, применяет миграции при необходимости и запускает backend.
+- [scripts/run_frontend.bat](/d:/Project/Nickelfront/scripts/run_frontend.bat)  
+  Запускает Vite dev server.
+- [scripts/run_migrations.bat](/d:/Project/Nickelfront/scripts/run_migrations.bat)  
+  Запускает только миграции.
 
-### Redis и очереди
+### Redis и воркеры
 
-- [run_redis.bat](/d:/Project/Nickelfront/run_redis.bat) - запускает Redis; при необходимости скачивает локальную сборку
-- [run_worker.bat](/d:/Project/Nickelfront/run_worker.bat) - запускает обычный Celery worker или content worker, в зависимости от очереди
-- [run_qwen_worker.bat](/d:/Project/Nickelfront/run_qwen_worker.bat) - запускает отдельный worker только для очереди Qwen
-- [run_flower.bat](/d:/Project/Nickelfront/run_flower.bat) - запускает Flower для мониторинга Celery
+- [scripts/run_redis.bat](/d:/Project/Nickelfront/scripts/run_redis.bat)  
+  Старт Redis, при необходимости с локальной portable-сборкой.
+- [scripts/run_worker.bat](/d:/Project/Nickelfront/scripts/run_worker.bat)  
+  Старт обычного или content worker в зависимости от аргументов.
+- [scripts/run_qwen_worker.bat](/d:/Project/Nickelfront/scripts/run_qwen_worker.bat)  
+  Старт Qwen worker.
+- [scripts/run_flower.bat](/d:/Project/Nickelfront/scripts/run_flower.bat)  
+  Мониторинг очередей через Flower.
 
-### Qwen и диагностика
+### Диагностика и PDF
 
-- [run_qwen_service.bat](/d:/Project/Nickelfront/run_qwen_service.bat) - запускает автономный `qwen_service`
-- [Qwen_scaner.py](/d:/Project/Nickelfront/Qwen_scaner.py) - обертка над `qwen_service.har_token_scanner`, извлекает `QWEN_TOKEN` из HAR-файла
-- [scripts/test_qwen.bat](/d:/Project/Nickelfront/scripts/test_qwen.bat) - сценарий проверки параллельной работы Qwen через backend API
+- [scripts/PDF_PARSER_AUDIT.bat](/d:/Project/Nickelfront/scripts/PDF_PARSER_AUDIT.bat)  
+  Основной запуск аудита PDF parser.
+- [scripts/run_pdf_parser_audit.bat](/d:/Project/Nickelfront/scripts/run_pdf_parser_audit.bat)  
+  Вспомогательный запуск audit-процесса.
+- [scripts/verify_pdf_parser_patch.bat](/d:/Project/Nickelfront/scripts/verify_pdf_parser_patch.bat)  
+  Проверка патча PDF parser.
+- [scripts/test_qwen.bat](/d:/Project/Nickelfront/scripts/test_qwen.bat)  
+  Базовая проверка интеграции с Qwen.
 
-### Очистка и вспомогательные инструменты
+### Вспомогательные утилиты
 
-- [run_cleanup_tasks_and_papers.bat](/d:/Project/Nickelfront/run_cleanup_tasks_and_papers.bat) - очищает runtime-данные: статьи, очереди, Chroma, PDF, логи и т.п.
-- [scripts/load_env.bat](/d:/Project/Nickelfront/scripts/load_env.bat) - загружает `.env` в текущий bat-процесс
-- [scripts/nickelfront_doctor_setup_FIXED_v18.bat](/d:/Project/Nickelfront/scripts/nickelfront_doctor_setup_FIXED_v18.bat) - большой диагностический/setup-скрипт
-- [scripts/nf-server.ps1](/d:/Project/Nickelfront/scripts/nf-server.ps1) - вспомогательный PowerShell-скрипт
+- [run_cleanup_tasks_and_papers.bat](/d:/Project/Nickelfront/run_cleanup_tasks_and_papers.bat)  
+  Очистка runtime-данных задач, буферов и части служебных артефактов.
+- [scripts/load_env.bat](/d:/Project/Nickelfront/scripts/load_env.bat)  
+  Загрузка `.env` в текущий batch-процесс.
+- [scripts/load_env.ps1](/d:/Project/Nickelfront/scripts/load_env.ps1)  
+  PowerShell-вариант загрузки `.env`.
+- [scripts/nf-server.ps1](/d:/Project/Nickelfront/scripts/nf-server.ps1)  
+  Вспомогательный PowerShell runner.
 
-## `Qwen_scaner.py`
+## Backend API
 
-Файл [Qwen_scaner.py](/d:/Project/Nickelfront/Qwen_scaner.py) - это совместимый wrapper над `qwen_service/har_token_scanner.py`.
+Ключевые backend endpoint-ы:
+- `/`
+- `/ping`
+- `/health`
+- `/docs`
+- `/api/v1/...`
 
-Он нужен, чтобы:
-- извлечь `QWEN_TOKEN` из HAR-файла `chat.qwen.ai`
-- записать токен в `.env`
-- отправить токен в уже запущенный `qwen_service`
-- проверить, что токен сервисом принимается
+Основная сборка роутеров находится в [backend/app/main.py](/d:/Project/Nickelfront/backend/app/main.py). Там подключены модули:
+- auth
+- parse
+- tasks
+- analytics
+- reports
+- monitoring
+- search
+- qwen
+- rag
+- vector
+- admin settings
 
-Примеры:
+## Qwen service
+
+`qwen_service` используется как отдельный локальный сервис для AI-функций.
+
+Типовой сценарий:
+1. заполнить `QWEN_TOKEN` в `.env`
+2. запустить `scripts/run_qwen_service.bat`
+3. при очередном режиме дополнительно запустить `scripts/run_qwen_worker.bat`
+
+Полезные команды для токена из HAR:
 
 ```bat
-python Qwen_scaner.py --instructions
-python Qwen_scaner.py "chat.qwen.ai.har" --apply
-python Qwen_scaner.py "chat.qwen.ai.har" --apply --push-service --validate
+python qwen_service/har_token_scanner.py --instructions
+python qwen_service/har_token_scanner.py "chat.qwen.ai.har" --apply
+python qwen_service/har_token_scanner.py "chat.qwen.ai.har" --apply --push-service --validate
 ```
 
-Полезные флаги:
-- `--apply` - записать токен в `.env`
-- `--push-service` - отправить токен в работающий `qwen_service`
-- `--validate` - проверить токен через `/auth/status`
-- `--instructions` - показать инструкцию, как снять HAR из браузера
-- `--print-token` - печатает полный токен; использовать осторожно
+## PDF parsing
 
-## Роли Очередей И Worker-Процессов
+PDF-пайплайн сосредоточен в `backend/app/services/pdf_parser/`.
 
-В проекте есть разделение по очередям:
-- `qwen` - задачи Qwen
-- `content` - PDF, извлечение текста, embedding и связанная постобработка
-- `celery` - обычные фоновые задачи
+Важно:
+- в коде используется `import fitz`, но правильная зависимость в проекте это `PyMuPDF`
+- отдельный пакет `fitz` ставить не нужно
+- аудит и проверочные артефакты пишутся в `storage/pdf_parser_audit/`
+- для части OCR-сценариев может использоваться `pytesseract`
 
-Отсюда и разные bat-скрипты:
-- `run_qwen_worker.bat` обслуживает только очередь `qwen`
-- `run_worker.bat` в обычном режиме обслуживает очередь `celery`
-- `run_worker.bat` с очередью `content` превращается в content worker
+## Frontend
 
-## Первый Вход
+Основные команды:
 
-При логине backend автоматически гарантирует наличие встроенной админской учетной записи.
+```bat
+cd frontend
+npm install
+npm run dev
+npm run build
+npm test -- --run
+```
 
-Данные по умолчанию:
-- email: `admin@admin.com`
-- password: `admin`
+Сейчас frontend использует:
+- React 18
+- Vite 5
+- Vitest 1
+- Axios 1.16.x
 
-Используйте их только для первого локального входа.
+## Тесты
 
-## Тестирование
-
-Python/backend:
+Python / backend:
 
 ```bat
 .venv\Scripts\python -m pytest
@@ -243,49 +268,38 @@ Frontend:
 
 ```bat
 cd frontend
-npm test
+npm test -- --run
 ```
 
-Qwen-проверка через bat-сценарий:
+Qwen smoke-check:
 
 ```bat
 scripts\test_qwen.bat
 ```
 
-Также в репозитории есть тесты в:
-- `tests/`
-- `parser_alpha/tests/`
-- `rag/tests/`
+## Частые проблемы
 
-## Диагностика
-
-Если backend не стартует:
+Если не стартует backend:
 - проверьте PostgreSQL и `DATABASE_URL`
-- выполните `run_migrations.bat`
-- проверьте логи в `logs/`
+- прогоните `scripts/run_migrations.bat`
+- посмотрите логи в `logs/`
 
-Если frontend открылся, но API не отвечает:
+Если frontend поднялся, но не видит API:
 - проверьте backend на `http://127.0.0.1:8001`
-- проверьте `API_PORT`, `VITE_API_URL`, `VITE_PROXY_TARGET`
+- проверьте `API_PORT`
+- проверьте `VITE_API_URL`
 
-Если не работают функции Qwen:
+Если не работают Qwen-функции:
 - проверьте `QWEN_TOKEN`
-- запустите `run_qwen_service.bat`
-- при фоновых задачах проверьте `run_qwen_worker.bat`
+- запустите `scripts/run_qwen_service.bat`
+- если используется очередь, запустите `scripts/run_qwen_worker.bat`
 
-Если нужен браузерный runtime для парсеров:
+Если не хватает Playwright browser runtime:
 
 ```bat
 .venv\Scripts\python -m playwright install chromium
 ```
 
-Если хотите почти чистый runtime-reset:
+Если нужен почти чистый runtime reset:
 - используйте `run_cleanup_tasks_and_papers.bat`
-- по умолчанию пользователи и refresh tokens сохраняются
-
-## Примечания
-
-- `run_backend.bat` автоматически применяет миграции, если не задан `SKIP_BACKEND_MIGRATIONS=1`
-- `run_all.bat` не поднимает отдельный RAG-сервис, потому что RAG обслуживается через backend
-- Redis и PostgreSQL нужны одновременно для полноценной работы проекта
-- в рабочем дереве появляются runtime-данные и сгенерированные артефакты: `logs/`, `chroma_db/`, `storage/`, `archives/`, `redis/`
+- перед этим убедитесь, что понимаете, какие локальные данные и временные артефакты будут очищены

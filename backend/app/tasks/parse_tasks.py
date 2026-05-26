@@ -363,10 +363,10 @@ def _extract_json_payload(stdout_text: str) -> dict[str, Any]:
     last_valid: dict[str, Any] | None = None
     last_error: Exception | None = None
 
-    # parser_alpha with --explain prints a JSON object, but some libraries may
-    # write extra text before it. Try every JSON-object start and keep the last
-    # object that looks like the parser report. This is safer than slicing from
-    # first '{' to last '}', which breaks when logs contain braces.
+
+
+
+
     for idx, char in enumerate(text):
         if char != "{":
             continue
@@ -521,7 +521,7 @@ def _run_parser_alpha_sync(
             if thread is not None:
                 thread.join(timeout=1)
 
-    # Drain late output after process exit.
+
     while True:
         try:
             _, line = output_events.get_nowait()
@@ -1012,26 +1012,34 @@ async def _parse_async(
                         task_id=task_id,
                     )
 
+                title = _clean_text(paper.get("title")) or "Untitled"
+                abstract = _clean_text(paper.get("abstract"))
+                full_text = _clean_text(paper.get("full_text"))
+                keywords = [x for x in (_clean_text(k) for k in _to_str_list(paper.get("keywords"), split_commas=True)) if x]
+                quality_flags = [
+                    x
+                    for x in (_clean_text(flag) for flag in _to_str_list(paper.get("quality_flags"), split_commas=True))
+                    if x
+                ]
+                provenance = _to_str_dict(paper.get("provenance"))
+                paper_source = _clean_text(paper.get("source")) or source
+
                 paper_create = PaperCreate(
-                    title=(_clean_text(paper.get("title")) or "Untitled"),
+                    title=title,
                     authors=[x for x in (_clean_text(a) for a in _to_str_list(paper.get("authors"), split_commas=False)) if x],
                     publication_date=_normalize_publication_date(paper.get("publication_date")),
                     journal=_clean_text(paper.get("journal")),
                     doi=_clean_text(paper.get("doi")),
-                    abstract=_clean_text(paper.get("abstract")),
-                    full_text=_clean_text(paper.get("full_text")),
-                    keywords=[x for x in (_clean_text(k) for k in _to_str_list(paper.get("keywords"), split_commas=True)) if x],
-                    source=(_clean_text(paper.get("source")) or source),
+                    abstract=abstract,
+                    full_text=full_text,
+                    keywords=keywords,
+                    source=paper_source,
                     source_id=_clean_text(paper.get("source_id")),
                     url=_clean_text(paper.get("url")),
                     pdf_url=_clean_text(paper.get("pdf_url")),
                     parse_confidence=_normalize_parse_confidence(paper.get("parse_confidence")),
-                    provenance=_to_str_dict(paper.get("provenance")),
-                    quality_flags=[
-                        x
-                        for x in (_clean_text(flag) for flag in _to_str_list(paper.get("quality_flags"), split_commas=True))
-                        if x
-                    ],
+                    provenance=provenance,
+                    quality_flags=quality_flags,
                     schema_version=_clean_text(paper.get("schema_version")) or "2.0",
                 )
                 saved_paper = await paper_service.create_paper(paper_create)
@@ -1076,6 +1084,12 @@ async def _parse_async(
                                 content_task_id=content_task.id,
                                 pdf_url=final_pdf_url,
                                 processing_error=None,
+                            )
+                            logger.info(
+                                "Queued content pipeline entry: paper_id={}, task_id={}, queue={}",
+                                saved_paper.id,
+                                content_task.id,
+                                settings.CONTENT_QUEUE_NAME,
                             )
                             stats["content_queued_count"] += 1
                         except Exception as e:

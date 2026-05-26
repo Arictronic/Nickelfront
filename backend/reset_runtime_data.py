@@ -14,17 +14,15 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.config import settings
 from app.db.session import engine
 
-# Tables that are project structure / identity, not runtime data.
-# users and refresh_tokens are preserved by default so the local admin account and
-# current browser session keep working after runtime cleanup.
-ALWAYS_PRESERVE_TABLES = {"alembic_version"}
-DEFAULT_PRESERVE_TABLES = ALWAYS_PRESERVE_TABLES | {"users", "refresh_tokens"}
 
-# Runtime files/dirs that should be reset to make the project look like a fresh start.
+
+
+ALWAYS_PRESERVE_TABLES = {"alembic_version"}
+DEFAULT_PRESERVE_TABLES = ALWAYS_PRESERVE_TABLES | {"users", "refresh_tokens", "system_settings"}
+
+
 RUNTIME_DIRS_TO_CLEAR = (
     "logs",
-    "backend/logs",
-    "qwen_service/logs",
     "parser_alpha/logs",
     "rag/logs",
     "data",
@@ -32,7 +30,6 @@ RUNTIME_DIRS_TO_CLEAR = (
     "storage/papers_pdf",
     "archives",
     "chroma_db",
-    "backend/chroma_db",
     "rag/data/uploads",
     "rag/data/db",
     ".pytest_cache",
@@ -127,7 +124,7 @@ def _clear_alloy_analysis_results(project_root: Path, stats: CleanupStats) -> No
         return
 
     for child in target.iterdir():
-        # Keep editable prompt template, remove only generated artifacts.
+
         if child == prompt_path:
             continue
         if child.is_dir():
@@ -170,7 +167,7 @@ def _clear_papers_count_cache() -> None:
 
         _papers_count_cache.clear()
     except Exception:
-        # Cleanup must not fail because of an optional in-memory cache.
+
         pass
 
 
@@ -240,7 +237,7 @@ async def _list_tables(conn, dialect_name: str) -> list[str]:
         )
         return [str(row[0]) for row in result.fetchall()]
 
-    # Generic fallback for tests/alternate DBs.
+
     result = await conn.execute(
         text(
             """
@@ -305,8 +302,13 @@ async def _reset_database_runtime(stats: CleanupStats, preserve_tables: set[str]
                 stats.db_rows_after[table] = -1
 
 
-async def reset_runtime_data(include_users: bool = False) -> CleanupStats:
-    preserve_tables = set(ALWAYS_PRESERVE_TABLES if include_users else DEFAULT_PRESERVE_TABLES)
+async def reset_runtime_data(include_users: bool = False, include_settings: bool = False) -> CleanupStats:
+    preserve_tables = set(DEFAULT_PRESERVE_TABLES)
+    if include_users:
+        preserve_tables.discard("users")
+        preserve_tables.discard("refresh_tokens")
+    if include_settings:
+        preserve_tables.discard("system_settings")
     stats = CleanupStats()
 
     await _reset_database_runtime(stats, preserve_tables=preserve_tables)
@@ -319,9 +321,18 @@ async def reset_runtime_data(include_users: bool = False) -> CleanupStats:
     return stats
 
 
-def _print_stats(stats: CleanupStats, include_users: bool) -> None:
+def _print_stats(stats: CleanupStats, include_users: bool, include_settings: bool) -> None:
     print("\nОчистка завершена:")
-    print("- режим:", "полный сброс БД, включая пользователей" if include_users else "сброс runtime-данных, пользователи сохранены")
+    mode_parts = []
+    if include_users:
+        mode_parts.append("пользователи очищаются")
+    else:
+        mode_parts.append("пользователи сохранены")
+    if include_settings:
+        mode_parts.append("system_settings очищается")
+    else:
+        mode_parts.append("system_settings сохранена")
+    print("- режим:", ", ".join(mode_parts))
 
     print("\nБаза данных:")
     if stats.db_tables_cleaned:
@@ -373,6 +384,14 @@ def parse_args() -> argparse.Namespace:
             "и текущие browser-сессии сохраняются. Таблица миграций Alembic всегда сохраняется."
         ),
     )
+    parser.add_argument(
+        "--include-settings",
+        action="store_true",
+        help=(
+            "Также очистить system_settings. По умолчанию технические настройки, включая "
+            "Qwen-настройки, сохраняются."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -381,23 +400,24 @@ def main() -> int:
 
     if not args.yes:
         print("Будут УДАЛЕНЫ runtime-данные:")
-        print("1. по умолчанию все таблицы БД, кроме `users`, `refresh_tokens` и `alembic_version`")
+        print("1. по умолчанию все таблицы БД, кроме `users`, `refresh_tokens`, `system_settings` и `alembic_version`")
         print("2. истории задач, статьи, patent_tasks, статистика парсеров")
         print("3. Chroma/vector/RAG-хранилища, загруженные RAG-файлы, PDF, результаты анализа")
         print("4. логи, очереди Celery/Redis, runtime-данные парсеров и временные кэши")
-        print("\nПользователи и refresh-токены по умолчанию сохраняются. Используй --include-users только если точно хочешь удалить и их.")
+        print("\nПользователи, refresh-токены и system_settings по умолчанию сохраняются.")
+        print("Используй --include-users и/или --include-settings только если точно хочешь удалить и их.")
         confirm = input("Введите YES для продолжения: ").strip()
         if confirm != "YES":
             print("Отменено.")
             return 1
 
     try:
-        stats = asyncio.run(reset_runtime_data(include_users=bool(args.include_users)))
+        stats = asyncio.run(reset_runtime_data(include_users=bool(args.include_users), include_settings=bool(args.include_settings)))
     except SQLAlchemyError as exc:
         print(f"Ошибка очистки БД: {exc}")
         return 2
 
-    _print_stats(stats, include_users=bool(args.include_users))
+    _print_stats(stats, include_users=bool(args.include_users), include_settings=bool(args.include_settings))
     return 0
 
 

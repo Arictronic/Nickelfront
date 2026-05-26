@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from playwright_stealth import stealth_async
-except Exception:  # pragma: no cover - optional dependency
+except Exception:
     stealth_async = None
 
 
@@ -70,7 +70,7 @@ class BasePlaywrightClient:
         if stealth_async is not None:
             try:
                 await stealth_async(page)
-            except Exception as exc:  # pragma: no cover - optional addon failures
+            except Exception as exc:
                 logger.debug("playwright-stealth setup failed: %s", exc)
 
         return page

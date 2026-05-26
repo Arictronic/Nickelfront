@@ -35,24 +35,52 @@ export default function Pagination({
   const pages = buildPages(safePage, safeTotal);
 
   return (
-    <div className="pagination">
-      <button className="btn" disabled={safePage <= 1} onClick={() => onChange(safePage - 1)}>
-        Назад
+    <div
+      className="pagination"
+      style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}
+    >
+      <button
+        className="btn btn-sm"
+        disabled={safePage <= 1}
+        onClick={() => onChange(safePage - 1)}
+        aria-label="Предыдущая страница"
+      >
+        ←
       </button>
+
       {pages.map((p) =>
         typeof p === "number" ? (
-          <button key={p} className={`btn ${p === safePage ? "btn-primary" : ""}`} onClick={() => onChange(p)}>
+          <button
+            key={p}
+            className={`btn btn-sm${p === safePage ? " btn-primary" : ""}`}
+            onClick={() => onChange(p)}
+            aria-current={p === safePage ? "page" : undefined}
+          >
             {p}
           </button>
         ) : (
-          <span key={p} className="muted" style={{ padding: "0 4px" }}>
-            ...
+          <span
+            key={p}
+            className="muted"
+            style={{ padding: "0 2px", fontSize: 13 }}
+          >
+            …
           </span>
         )
       )}
-      <button className="btn" disabled={safePage >= safeTotal} onClick={() => onChange(safePage + 1)}>
-        Вперёд
+
+      <button
+        className="btn btn-sm"
+        disabled={safePage >= safeTotal}
+        onClick={() => onChange(safePage + 1)}
+        aria-label="Следующая страница"
+      >
+        →
       </button>
+
+      <span className="muted" style={{ fontSize: 12, marginLeft: 4 }}>
+        {safePage} / {safeTotal}
+      </span>
     </div>
   );
 }

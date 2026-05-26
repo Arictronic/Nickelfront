@@ -36,9 +36,9 @@ class EmbeddingService:
     - Нормализация эмбеддингов
     """
 
-    # Модель по умолчанию
-    # all-MiniLM-L6-v2 - быстрая и легкая модель (384 измерения)
-    # all-mpnet-base-v2 - более качественная модель (768 измерений)
+
+
+
     DEFAULT_MODEL_NAME = "all-MiniLM-L6-v2"
     DEFAULT_EMBEDDING_DIM = 384
     DEFAULT_BATCH_SIZE = 32
@@ -101,7 +101,7 @@ class EmbeddingService:
                 )
                 logger.info(f"Модель {self.MODEL_NAME} успешно загружена")
             except TypeError:
-                # Старая версия sentence-transformers не поддерживает local_files_only
+
                 try:
                     self._model = SentenceTransformer(self.MODEL_NAME, cache_folder=cache_dir)
                     logger.info(f"Модель {self.MODEL_NAME} успешно загружена")
@@ -141,11 +141,11 @@ class EmbeddingService:
             return None
 
         try:
-            # Генерируем эмбеддинг
+
             embedding = self.model.encode(
                 text,
                 convert_to_numpy=True,
-                normalize_embeddings=True,  # Нормализация для косинусного сходства
+                normalize_embeddings=True,
                 show_progress_bar=False,
             )
             return embedding.tolist()
@@ -184,7 +184,7 @@ class EmbeddingService:
         if not self.model:
             return []
 
-        # Фильтруем пустые тексты
+
         valid_texts = [t for t in texts if t and t.strip()]
         if not valid_texts:
             return []
@@ -243,9 +243,9 @@ class EmbeddingService:
                 - embedding_dim: Размерность эмбеддингов
                 - cache_info: Информация о кэше (если доступен)
         """
-        # Важно: get_stats не должен грузить ML-модель.
-        # Статистика может вызываться при открытии dashboard/vector страницы,
-        # и раньше из-за self.model здесь запускалась тяжелая загрузка all-MiniLM-L6-v2.
+
+
+
         loaded = self.is_loaded()
         stats = {
             "available": loaded,
@@ -256,7 +256,7 @@ class EmbeddingService:
             "loaded": loaded,
         }
 
-        # Информация о кэше lru_cache
+
         if hasattr(self.get_embedding_cached, 'cache_info'):
             stats["cache_info"] = str(self.get_embedding_cached.cache_info())
 
@@ -272,7 +272,7 @@ class EmbeddingService:
         return self.model is not None
 
 
-# Глобальный экземпляр сервиса
+
 _embedding_service: EmbeddingService | None = None
 _embedding_service_lock = threading.RLock()
 

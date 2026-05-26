@@ -64,8 +64,8 @@ def send_qwen_message_via_queue(
     try:
         result = task.get(timeout=wait_timeout, propagate=True, disable_sync_subtasks=False)
     except CeleryTimeoutError as exc:
-        # The caller has stopped waiting. Revoke the queued task if it has not started yet;
-        # the qwen task itself also has a hard time limit so a running worker cannot hang forever.
+
+
         try:
             task.revoke(terminate=False)
         except Exception:

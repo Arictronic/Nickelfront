@@ -30,10 +30,10 @@ class QwenTranslationAdapter:
     def __init__(self) -> None:
         self.enabled = os.getenv("PARSER_TRANSLATE_QWEN_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
         self._celery_available = importlib.util.find_spec("celery") is not None
-        # Parser-specific setting wins, generic Qwen queue is fallback.
-        # Guard against the removed legacy queue: a stale .env with
-        # PARSER_TRANSLATE_QWEN_QUEUE=qwen_translation would silently hang because
-        # run_qwen_translation_worker.bat is intentionally removed.
+
+
+
+
         configured_queue = (os.getenv("PARSER_TRANSLATE_QWEN_QUEUE") or os.getenv("QWEN_QUEUE_NAME") or "qwen").strip()
         allow_legacy_queue = os.getenv("PARSER_TRANSLATE_QWEN_ALLOW_LEGACY_QUEUE", "0").strip().lower() in {"1", "true", "yes", "on"}
         if configured_queue == "qwen_translation" and not allow_legacy_queue:
@@ -77,8 +77,8 @@ class QwenTranslationAdapter:
     def _clean_translation_output(value: str) -> str:
         """Normalize a model translation answer to a one-line query candidate."""
         raw = str(value or "").replace("\r", "\n").strip()
-        # Prefer the first non-empty line. If Qwen returns a short list, this prevents
-        # caching several alternatives as one broken search query.
+
+
         for line in raw.split("\n"):
             candidate = line.strip()
             if candidate:
@@ -122,13 +122,13 @@ class QwenTranslationAdapter:
             return False
         if re.match(r"^\s*(?:[-*•]|\d+[.)])\s+", translated):
             return False
-        # Avoid caching explanatory answers like "nickel alloys - common search term".
+
         if any(marker in lower for marker in (" means ", " should be ", " can be translated", " translates to ")):
             return False
 
         if target_lang.lower().startswith("en"):
-            # English search sources handle ASCII technical terms best. Do not cache
-            # Cyrillic or mixed explanatory answers as future route translations.
+
+
             if re.search(r"[А-Яа-яЁё]", translated):
                 return False
             ascii_chars = sum(1 for ch in translated if ord(ch) < 128)
@@ -176,7 +176,7 @@ class QwenTranslationAdapter:
             else:
                 logger.warning("Qwen queued translation failed for '{}': {}", raw, exc)
             return None
-        except CeleryTimeoutError as exc:  # type: ignore[name-defined]
+        except CeleryTimeoutError as exc:
             if async_result is not None:
                 try:
                     async_result.revoke(terminate=False)

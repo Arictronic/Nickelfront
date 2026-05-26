@@ -5,6 +5,7 @@ import type {
   ParserSettings,
   PdfMarkdownSettings,
   QwenSettings,
+  QwenTestResult,
   SettingsSectionKey,
   SystemSettings,
   SystemSettingsSchema,
@@ -537,16 +538,43 @@ function PdfMarkdownSettingsPanel({
 
 function qwenStatusLabel(status: any) {
   if (!status) return "не проверялся";
-  if (status.valid) return "действителен";
   if (status.expired) return "истёк";
   if (status.status === "missing") return "не задан";
+  if (status.status === "rate_limited" || status.rate_limited) return "действителен / rate limit";
+  if (status.valid) return "действителен";
   if (status.status === "service_unavailable") return "сервис недоступен";
+  if (status.status === "unknown" || status.status === "bad_response") return "неизвестно";
   return "не прошёл проверку";
 }
 
 function qwenStatusClass(status: any) {
   if (!status) return "";
   if (status.valid) return "ok";
+  if (status.expired || status.status === "invalid") return "danger";
+  return "warn";
+}
+
+function qwenCheckLabel(status: any) {
+  const check = status?.checked_by || status?.source;
+  if (check === "smoke_chat") return "действующий токен / тестовый чат";
+  if (check === "provider_user_api") return "live /api/user";
+  if (status?.cached) return "cache";
+  return "не проверялся";
+}
+
+function qwenTestStatusLabel(result: QwenTestResult | null) {
+  if (!result) return "тест не запускался";
+  if (result.status === "ok") return "успешно";
+  if (result.status === "rate_limited") return "rate limit";
+  if (result.status === "partial") return "частично";
+  if (result.status === "warning") return "нужно проверить";
+  return "ошибка";
+}
+
+function qwenTestStatusClass(result: QwenTestResult | null) {
+  if (!result) return "";
+  if (result.status === "ok") return "ok";
+  if (result.status === "error") return "danger";
   return "warn";
 }
 
@@ -570,6 +598,11 @@ function QwenSettingsPanel({
   const [harFile, setHarFile] = useState<File | null>(null);
   const [tokenMessage, setTokenMessage] = useState<string | null>(null);
   const [tokenError, setTokenError] = useState<string | null>(null);
+  const [testBusy, setTestBusy] = useState(false);
+  const [testResult, setTestResult] = useState<QwenTestResult | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
+  const [testChatCount, setTestChatCount] = useState(5);
+  const [testMessage, setTestMessage] = useState("Напиши короткий ответ: OK");
 
   async function loadTokenStatus() {
     setTokenBusy(true);
@@ -607,6 +640,22 @@ function QwenSettingsPanel({
     }
   }
 
+  async function runQwenTest() {
+    setTestBusy(true);
+    setTestError(null);
+    try {
+      const result = await settingsApi.runQwenServiceTest({
+        chat_count: testChatCount,
+        message: testMessage.trim() || "Напиши короткий ответ: OK",
+      });
+      setTestResult(result);
+    } catch (err: any) {
+      setTestError(err?.message || "Не удалось запустить проверку Qwen Service");
+    } finally {
+      setTestBusy(false);
+    }
+  }
+
   useEffect(() => {
     let active = true;
     settingsApi
@@ -624,26 +673,55 @@ function QwenSettingsPanel({
     <div className="settings-grid">
       <section className="panel settings-card settings-card-wide">
         <div className="settings-card-title">
-          <h3>Состояние токена</h3>
+          <h3>Состояние действующего Qwen токена</h3>
           <span className={`settings-pill ${qwenStatusClass(tokenStatus)}`}>
             {qwenStatusLabel(tokenStatus)}
           </span>
         </div>
-        <div className="qwen-token-status-card">
+
+        <div className={`qwen-token-status-card qwen-token-status-card-${qwenStatusClass(tokenStatus) || "neutral"}`}>
           <div>
-            <strong>{tokenStatus?.message || "Проверка токена ещё не выполнялась."}</strong>
+            <strong>{tokenStatus?.message || "Проверка действующего токена ещё не выполнялась."}</strong>
             <small>
-              Токен не показывается и не сохраняется в браузере. HAR читается qwen_service в памяти, из него берётся последний token chat.qwen.ai.
+              Кнопка ниже проверяет текущий токен, уже загруженный в qwen_service из .env или последнего HAR. Сам токен не показывается, не попадает в браузер и не хранится во frontend.
             </small>
           </div>
           <div className="qwen-token-actions">
-            <button className="btn" disabled={tokenBusy} onClick={loadTokenStatus}>
-              {tokenBusy ? "Проверка..." : "Проверить токен"}
+            <button className="btn btn-primary" disabled={tokenBusy} onClick={loadTokenStatus}>
+              {tokenBusy ? "Проверка..." : "Проверить действующий токен"}
             </button>
           </div>
         </div>
+
+        <div className="settings-kv-grid qwen-token-metrics">
+          <div className="settings-kv-row">
+            <span>Активный токен</span>
+            <strong>{tokenStatus?.valid ? "да" : tokenStatus?.expired ? "истёк" : "не подтверждён"}</strong>
+          </div>
+          <div className="settings-kv-row">
+            <span>Токен задан</span>
+            <strong>{tokenStatus?.token_configured || settings.token_configured ? "да" : "нет"}</strong>
+          </div>
+          <div className="settings-kv-row">
+            <span>Проверка</span>
+            <strong>{qwenCheckLabel(tokenStatus)}</strong>
+          </div>
+          <div className="settings-kv-row">
+            <span>Модель</span>
+            <strong>{tokenStatus?.model || settings.model || "—"}</strong>
+          </div>
+          <div className="settings-kv-row">
+            <span>Активных чатов</span>
+            <strong>{tokenStatus?.active_sessions ?? "—"} / {tokenStatus?.max_active_sessions ?? 50}</strong>
+          </div>
+          <div className="settings-kv-row">
+            <span>Provider concurrency</span>
+            <strong>{tokenStatus?.provider_max_concurrent_requests ?? "—"}</strong>
+          </div>
+        </div>
+
         <div className="qwen-har-guide">
-          <strong>Как получить HAR для обновления токена:</strong>
+          <strong>HAR нужен только для обновления токена, не для проверки.</strong>
           <ol>
             <li>Открой chat.qwen.ai и выйди из аккаунта Qwen.</li>
             <li>Открой инструменты разработчика: F12 или Ctrl+Shift+I.</li>
@@ -661,16 +739,16 @@ function QwenSettingsPanel({
             accept=".har,application/json"
             onChange={(event) => setHarFile(event.target.files?.[0] || null)}
           />
-          <button className="btn btn-primary" disabled={tokenBusy || !harFile} onClick={updateTokenFromHar}>
-            {tokenBusy ? "Обновление..." : "Обновить из HAR"}
+          <button className="btn" disabled={tokenBusy || !harFile} onClick={updateTokenFromHar}>
+            {tokenBusy ? "Обновление..." : "Обновить токен из HAR"}
           </button>
         </div>
         {tokenSource && (
           <div className="settings-muted-box">
-            Источник: {tokenSource.source || "—"}; кандидатов: {tokenSource.candidates_count || 0}; токен: {tokenSource.token_preview || "***"}
+            Источник HAR: {tokenSource.source || "—"}; кандидатов: {tokenSource.candidates_count || 0}; токен: {tokenSource.token_preview || "***"}
           </div>
         )}
-        {tokenMessage && <div className="alert alert-success">{tokenMessage}</div>}
+        {tokenMessage && <div className={`alert ${tokenStatus?.valid ? "alert-success" : "alert-info"}`}>{tokenMessage}</div>}
         {tokenError && <div className="alert alert-danger">{tokenError}</div>}
       </section>
 
@@ -732,6 +810,99 @@ function QwenSettingsPanel({
         </div>
       </section>
 
+      <section className="panel settings-card settings-card-wide">
+        <div className="settings-card-title">
+          <h3>Проверка Qwen Service</h3>
+          <span className={`settings-pill ${qwenTestStatusClass(testResult)}`}>{qwenTestStatusLabel(testResult)}</span>
+        </div>
+        <div className="settings-form-grid">
+          <NumberField
+            label="Параллельных чатов"
+            min={1}
+            max={50}
+            value={testChatCount}
+            onChange={setTestChatCount}
+            hint="Максимум 50 активных тестовых чатов. Если Qwen отдаёт rate limit, токен может быть рабочим — просто слишком высокая нагрузка."
+            suffix="чатов"
+          />
+          <label className="settings-field settings-card-wide">
+            <span>Стартовое сообщение</span>
+            <textarea
+              className="input"
+              rows={4}
+              value={testMessage}
+              onChange={(event) => setTestMessage(event.target.value)}
+              placeholder="Введите сообщение, которое нужно параллельно отправить в несколько новых чатов."
+            />
+            <small>Это сообщение будет отправлено одинаковым текстом в каждый тестовый чат.</small>
+          </label>
+        </div>
+        <div className="qwen-token-status-card">
+          <div>
+            <strong>Запускает указанное число новых чатов и отправляет в каждый одно и то же стартовое сообщение.</strong>
+            <small>
+              Этот тест помогает быстро понять, доступен ли сервис, работает ли токен и есть ли реальная параллельная обработка.
+            </small>
+          </div>
+          <div className="qwen-token-actions">
+            <button className="btn" disabled={testBusy} onClick={runQwenTest}>
+              {testBusy ? "Проверка..." : "Запустить тест"}
+            </button>
+          </div>
+        </div>
+        {testError && <div className="alert alert-danger">{testError}</div>}
+        {testResult && (
+          <>
+            <div className={testResult.ok ? "alert alert-success" : testResult.provider_limited || testResult.status === "rate_limited" ? "alert alert-warning" : "alert alert-danger"}>{testResult.message}</div>
+            <div className="settings-kv-grid">
+              <div className="settings-kv-row">
+                <span>Отправленное сообщение</span>
+                <strong>{testResult.message_used || "—"}</strong>
+              </div>
+              <div className="settings-kv-row">
+                <span>Адрес сервиса</span>
+                <strong>{testResult.service_url}</strong>
+              </div>
+              <div className="settings-kv-row">
+                <span>Успешных чатов</span>
+                <strong>{testResult.successful_count} / {testResult.chat_count}</strong>
+              </div>
+              <div className="settings-kv-row">
+                <span>Ошибок</span>
+                <strong>{testResult.failed_count}</strong>
+              </div>
+              <div className="settings-kv-row">
+                <span>Rate limit</span>
+                <strong>{testResult.rate_limited_count ?? 0}</strong>
+              </div>
+              <div className="settings-kv-row">
+                <span>Параллельность</span>
+                <strong>{testResult.looks_parallel ? "похоже, есть" : "неочевидна"}</strong>
+              </div>
+              <div className="settings-kv-row">
+                <span>Разброс старта</span>
+                <strong>{testResult.start_spread_sec ?? "—"} сек</strong>
+              </div>
+              <div className="settings-kv-row">
+                <span>Разброс завершения</span>
+                <strong>{testResult.finished_spread_sec ?? "—"} сек</strong>
+              </div>
+              <div className="settings-kv-row">
+                <span>Разброс длительности</span>
+                <strong>{testResult.duration_spread_sec ?? "—"} сек</strong>
+              </div>
+            </div>
+            <div className="settings-warning-list">
+              {testResult.results.map((item) => (
+                <div key={item.chat} className="settings-warning">
+                  Чат #{item.chat}: {item.duration_sec} сек; ошибка: {item.error || "нет"}; ответ: {item.response_start || "пусто"}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </section>
+
       <SaveBar saving={saving} saveLabel="Сохранить Qwen / AI" onSave={onSave} onReset={onReset} />
     </div>
   );
@@ -754,7 +925,7 @@ function JsonReadOnlyPanel({ title, value }: { title: string; value: Record<stri
 }
 
 export default function TechnicalSettings() {
-  const [settings, setSettings] = useState<SystemSettings | null>(null);
+  const [, setSettings] = useState<SystemSettings | null>(null);
   const [schema, setSchema] = useState<SystemSettingsSchema | null>(null);
   const [activeTab, setActiveTab] = useState<SettingsSectionKey | string>("parser");
   const [draftParser, setDraftParser] = useState<ParserSettings | null>(null);
@@ -800,9 +971,9 @@ export default function TechnicalSettings() {
       const result = await settingsApi.updateSystemSettingsSection(section, value);
       const nextValue = result.value as T;
       setSettings((prev) => (prev ? { ...prev, [section]: nextValue } : prev));
-      if (section === "parser") setDraftParser(nextValue as ParserSettings);
-      if (section === "pdf_markdown") setDraftPdfMarkdown(nextValue as PdfMarkdownSettings);
-      if (section === "qwen") setDraftQwen(nextValue as QwenSettings);
+      if (section === "parser") setDraftParser(nextValue as unknown as ParserSettings);
+      if (section === "pdf_markdown") setDraftPdfMarkdown(nextValue as unknown as PdfMarkdownSettings);
+      if (section === "qwen") setDraftQwen(nextValue as unknown as QwenSettings);
       setMessage(successMessage);
     } catch (err: any) {
       setError(err?.message || "Не удалось сохранить настройки");
@@ -819,9 +990,9 @@ export default function TechnicalSettings() {
       const result = await settingsApi.resetSystemSettingsSection(section);
       const nextValue = result.value;
       setSettings((prev) => (prev ? { ...prev, [section]: nextValue } : prev));
-      if (section === "parser") setDraftParser(nextValue as ParserSettings);
-      if (section === "pdf_markdown") setDraftPdfMarkdown(nextValue as PdfMarkdownSettings);
-      if (section === "qwen") setDraftQwen(nextValue as QwenSettings);
+      if (section === "parser") setDraftParser(nextValue as unknown as ParserSettings);
+      if (section === "pdf_markdown") setDraftPdfMarkdown(nextValue as unknown as PdfMarkdownSettings);
+      if (section === "qwen") setDraftQwen(nextValue as unknown as QwenSettings);
       setMessage(successMessage);
     } catch (err: any) {
       setError(err?.message || "Не удалось сбросить настройки");

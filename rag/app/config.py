@@ -18,48 +18,48 @@ class Settings(BaseSettings):
     типизированный доступ к конфигурации проекта.
     """
 
-    # === Настройки LLM API ===
-    #: API ключ для доступа к LLM
+
+
     llm_api_key: str = ""
-    #: Базовый URL API для LLM (OpenAI-compatible)
+
     llm_api_base_url: str = "https://api.openai.com/v1"
-    #: Название модели LLM для генерации ответов
+
     llm_model_name: str = "gpt-3.5-turbo"
 
-    # === Настройки эмбеддингов ===
-    #: Название модели для создания эмбеддингов (легковесная)
+
+
     embedding_model_name: str = "all-MiniLM-L6-v2"
-    #: Устройство для вычислений эмбеддингов (cpu/cuda)
+
     embedding_device: str = "cpu"
 
-    # === Настройки ChromaDB ===
-    #: Директория для постоянного хранения векторной базы
+
+
     chroma_persist_directory: str = "./data/db"
 
-    # === Настройки сервера ===
-    #: Хост для запуска FastAPI сервера
+
+
     host: str = "0.0.0.0"
-    #: Порт для запуска FastAPI сервера
+
     port: int = 8000
 
-    # === Лимиты и параметры обработки ===
-    #: Максимальный размер загружаемого файла в МБ
+
+
     max_file_size_mb: int = 50
-    #: Максимальный размер чанка текста (символов)
+
     max_chunk_size: int = 1000
-    #: Перекрытие между чанками (символов)
+
     chunk_overlap: int = 200
-    #: Количество документов для поиска при ответе на вопрос
+
     search_k: int = 4
 
-    # === Пути к директориям ===
-    #: Корневая директория проекта rag
+
+
     root_dir: Path = Path(__file__).parent.parent
-    #: Директория для хранения данных (БД, загруженные файлы)
+
     data_dir: Path = Path(__file__).parent.parent / "data"
-    #: Директория для загруженных файлов
+
     uploads_dir: Path = Path(__file__).parent.parent / "data" / "uploads"
-    #: Директория для векторной базы данных
+
     db_dir: Path = Path(__file__).parent.parent / "data" / "db"
 
     class Config:
@@ -101,5 +101,5 @@ class Settings(BaseSettings):
         return self.max_file_size_mb * 1024 * 1024
 
 
-# Глобальный экземпляр настроек
+
 settings = Settings()

@@ -19,7 +19,7 @@ def _get_process_query():
 
 
 def _get_pdf_parser():
-    from app.services.rag_parser import pdf_parser
+    from app.services.pdf_content_parser import pdf_parser
 
     return pdf_parser
 
@@ -142,16 +142,17 @@ async def upload_document(
         if len(file_bytes) == 0:
             raise HTTPException(status_code=400, detail="Файл пуст")
 
-        if len(file_bytes) > 50 * 1024 * 1024:  # 50 MB
+        if len(file_bytes) > 50 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="Файл слишком большой")
 
         logger.info(f"Парсинг PDF: {file.filename} ({len(file_bytes)} байт)")
 
         pdf_parser = _get_pdf_parser()
         documents = await asyncio.to_thread(
-            pdf_parser.parse_bytes_to_documents,
+            pdf_parser.parse_bytes_to_structured_documents,
             file_bytes=file_bytes,
             filename=file.filename,
+            options={"parser_mode": "auto"},
         )
 
         if not documents:

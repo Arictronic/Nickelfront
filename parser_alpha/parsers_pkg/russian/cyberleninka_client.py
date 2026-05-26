@@ -146,8 +146,8 @@ class CyberLeninkaClient(BaseAPIClient):
     def _clean_markup(text: str | None) -> str | None:
         if not text:
             return None
-        # Important: decode entities before stripping tags, otherwise encoded tags
-        # like &lt;em&gt; survive the first cleanup pass.
+
+
         normalized = html.unescape(str(text))
         normalized = html.unescape(normalized)
         normalized = re.sub(r"<[^>]+>", " ", normalized)
@@ -163,7 +163,7 @@ class CyberLeninkaClient(BaseAPIClient):
         for tag in soup(["script", "style", "noscript", "template"]):
             tag.decompose()
 
-        # Prefer OCR/body blocks; fallback to broader containers.
+
         selectors = [
             ".ocr",
             "[itemprop='articleBody']",
@@ -173,7 +173,7 @@ class CyberLeninkaClient(BaseAPIClient):
             "main",
         ]
 
-        # Keep selector priority: OCR/article body is cleaner than generic containers.
+
         for selector in selectors:
             best_for_selector = ""
             for node in soup.select(selector):

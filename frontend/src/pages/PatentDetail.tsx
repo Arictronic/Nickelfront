@@ -11,6 +11,7 @@ import {
   getPaperContentParts,
   getPaperPdfUrl,
   regeneratePaperContentPart,
+  regeneratePaperMarkdownPages,
   reprocessPaperContent,
 } from "../api/papers";
 import { getPublicDisplaySettings } from "../api/settings";
@@ -49,6 +50,12 @@ type DisplayPart = {
   extractionQualityScore: number | null;
   extractionWarnings: string[];
   extractionMetadata: Record<string, unknown> | null;
+  contentType: string | null;
+  sectionTitle: string | null;
+  sectionIndex: number | null;
+  pageProfile: string | null;
+  includeInEmbedding: boolean;
+  sourcePartIds: number[];
 };
 
 const RU = {
@@ -70,7 +77,7 @@ const RU = {
   openPdf: "Открыть PDF",
   workerTask: "Worker task",
   tabMain: "Главная",
-  tabParts: "Страницы по частям",
+  tabParts: "Текст по страницам",
   tabReport: "Отчет",
   gist: "Суть статьи",
   gistNotReady: "Здесь будет короткий пересказ всего документа: о чём он, какие ключевые результаты и почему он полезен для анализа.",
@@ -78,9 +85,9 @@ const RU = {
   articleText: "Текст статьи",
   reportBtn: "Открыть отчет на отдельной странице",
   reprocessBtn: "Перезапустить обработку всего документа",
-  parts: "Страницы по частям",
+  parts: "Текст по страницам",
   emptyText: "Текст пуст.",
-  selectedPart: "Выбранная часть",
+  selectedPart: "Выбранная страница",
   localMetrics: "Локальные метрики (эвристики)",
   localMetricsHint: "Быстрый локальный разбор выбранной части без обращения к AI.",
   temps: "Температуры (°C)",
@@ -90,7 +97,7 @@ const RU = {
   translationNotReady: "Перевод ещё не готов.",
   processingError: "Ошибка обработки",
   noTextForReport: "Нет текста для отчета.",
-  quickOverview: "Части (быстрый обзор)",
+  quickOverview: "Страницы (быстрый обзор)",
   deletePaper: "Удалить статью",
   copyGist: "Копировать суть",
   backToList: "Назад к списку",
@@ -100,8 +107,8 @@ const RU = {
   deleteError: "Не удалось удалить статью",
   reprocessQueued: "Повторная обработка поставлена в очередь.",
   reprocessError: "Не удалось перезапустить обработку",
-  regenerateQueued: "Перегенерация части поставлена в очередь.",
-  regenerateError: "Не удалось перегенерировать часть",
+  regenerateQueued: "Перегенерация страницы поставлена в очередь.",
+  regenerateError: "Не удалось перегенерировать страницу",
   regenerate: "Перегенерировать",
   regenerating: "Перегенерация...",
   actionInProgress: "Выполняется...",
@@ -117,12 +124,12 @@ const RU = {
   quality: "Целостность",
   extractionDiagnostics: "Диагностика извлечения",
   extractionDiagnosticsHidden: "Диагностика извлечения скрыта настройками.",
-  noStoredParts: "Сохранённых частей пока нет. Показываю legacy-разбиение полного текста.",
+  noStoredParts: "Сохранённых страниц пока нет. Показываю legacy-разбиение полного текста.",
   confirmDelete: "Удалить статью из базы?",
   unknown: "—",
 };
 
-const LEGACY_PAGE_BLOCK_RE = /(?:^|\n)\s*#{1,6}\s*Pages\s+(\d+)\s*-\s*(\d+)\s*\n+/gi;
+const LEGACY_PAGE_BLOCK_RE = /(?:^|\n)\s*#{1,6}\s*(?:Pages|Страницы?)\s+(\d+)(?:\s*-\s*(\d+))?[^\n]*\n+/gi;
 
 function isMarkdownStructuralLine(line: string): boolean {
   const value = line.trim();
@@ -171,6 +178,13 @@ function normalizeMarkdownForDisplay(text: string): string {
   return value;
 }
 
+
+function pageTitle(pageStart: number | null, pageEnd: number | null, fallback: string): string {
+  if (!pageStart || !pageEnd) return fallback;
+  if (pageStart === pageEnd) return `Страница ${pageStart}`;
+  return `Страницы ${pageStart}-${pageEnd}`;
+}
+
 function splitLegacyMarkdownParts(text: string): DisplayPart[] {
   const value = (text || "").trim();
   if (!value) return [];
@@ -182,11 +196,11 @@ function splitLegacyMarkdownParts(text: string): DisplayPart[] {
         const start = (match.index ?? 0) + match[0].length;
         const end = idx + 1 < matches.length ? matches[idx + 1].index ?? value.length : value.length;
         const pageStart = Number(match[1]);
-        const pageEnd = Number(match[2]);
+        const pageEnd = Number(match[2] || match[1]);
         const markdown = value.slice(start, end).trim();
         return {
           id: null,
-          title: `Pages ${pageStart}-${pageEnd}`,
+          title: pageTitle(pageStart, pageEnd, `Часть ${idx + 1}`),
           pageStart,
           pageEnd,
           markdown,
@@ -200,6 +214,12 @@ function splitLegacyMarkdownParts(text: string): DisplayPart[] {
           extractionQualityScore: null,
           extractionWarnings: [],
           extractionMetadata: null,
+          contentType: null,
+          sectionTitle: null,
+          sectionIndex: null,
+          pageProfile: null,
+          includeInEmbedding: true,
+          sourcePartIds: [],
         };
       })
       .filter((part) => part.markdown.trim().length > 0);
@@ -226,13 +246,19 @@ function splitLegacyMarkdownParts(text: string): DisplayPart[] {
       extractionQualityScore: null,
       extractionWarnings: [],
       extractionMetadata: null,
+      contentType: null,
+      sectionTitle: null,
+      sectionIndex: null,
+      pageProfile: null,
+      includeInEmbedding: true,
+      sourcePartIds: [],
     });
   }
   return chunks;
 }
 
 function mapStoredPart(part: PaperContentPart): DisplayPart {
-  const title = `Pages ${part.pageStart}-${part.pageEnd}`;
+  const title = pageTitle(part.pageStart, part.pageEnd, `Часть ${part.partIndex}`);
   return {
     id: part.id,
     title,
@@ -249,12 +275,122 @@ function mapStoredPart(part: PaperContentPart): DisplayPart {
     extractionQualityScore: part.extractionQualityScore ?? null,
     extractionWarnings: part.extractionWarnings ?? [],
     extractionMetadata: part.extractionMetadata ?? null,
+    contentType: part.contentType ?? null,
+    sectionTitle: part.sectionTitle ?? null,
+    sectionIndex: part.sectionIndex ?? null,
+    pageProfile: part.pageProfile ?? null,
+    includeInEmbedding: part.includeInEmbedding ?? true,
+    sourcePartIds: [part.id],
   };
 }
 
-function approxTokenCount(text: string) {
-  return text.trim().split(/\s+/).filter(Boolean).length;
+function mergePartStatus(parts: PaperContentPart[]): string {
+  const statuses = parts.map((part) => normalizePartStatus(part.status));
+
+  if (statuses.includes("processing")) return "processing";
+  if (statuses.includes("failed")) return "failed";
+  if (statuses.every((status) => status === "ready")) return "ready";
+  if (statuses.includes("raw_extracted")) return "raw_extracted";
+  if (statuses.includes("ready")) return "ready";
+
+  return parts[0]?.status ?? "raw_extracted";
 }
+
+function averageQuality(parts: PaperContentPart[]): number | null {
+  const scores = parts
+    .map((part) => part.extractionQualityScore)
+    .filter((score): score is number => score !== null && score !== undefined && !Number.isNaN(Number(score)))
+    .map((score) => Number(score));
+
+  if (!scores.length) return null;
+  return scores.reduce((sum, value) => sum + value, 0) / scores.length;
+}
+
+function mergeExtractionMethod(parts: PaperContentPart[]): string | null {
+  const methods = Array.from(
+    new Set(
+      parts
+        .map((part) => part.extractionMethod)
+        .filter((method): method is string => Boolean(method?.trim())),
+    ),
+  );
+
+  if (!methods.length) return null;
+  if (methods.length === 1) return methods[0];
+  return "mixed";
+}
+
+function aggregateStoredPartsByPage(parts: PaperContentPart[]): DisplayPart[] {
+  const groups = new Map<string, PaperContentPart[]>();
+
+  for (const part of parts) {
+    const key = `${part.pageStart}-${part.pageEnd}`;
+    const current = groups.get(key) ?? [];
+    current.push(part);
+    groups.set(key, current);
+  }
+
+  return Array.from(groups.values()).map((group) => {
+    const first = group[0];
+
+    if (group.length === 1) return mapStoredPart(first);
+
+    const rawText = group
+      .map((part) => part.rawText?.trim() ?? "")
+      .filter(Boolean)
+      .join("\n\n");
+
+    const markdown = group
+      .map((part) => part.markdownText?.trim() ?? "")
+      .filter(Boolean)
+      .join("\n\n");
+
+    const errors = group
+      .map((part) => part.error?.trim() ?? "")
+      .filter(Boolean);
+
+    const warnings = Array.from(new Set(group.flatMap((part) => part.extractionWarnings ?? [])));
+    const sourcePartIds = group.map((part) => part.id);
+
+    return {
+      id: null,
+      title: pageTitle(first.pageStart, first.pageEnd, `Часть ${first.partIndex}`),
+      pageStart: first.pageStart,
+      pageEnd: first.pageEnd,
+      markdown,
+      rawText,
+      status: mergePartStatus(group),
+      error: errors.length ? errors.join("\n") : null,
+      regenerationCount: group.reduce((sum, part) => sum + Number(part.regenerationCount || 0), 0),
+      rawTextChars: rawText.length,
+      markdownTextChars: markdown.length,
+      extractionMethod: mergeExtractionMethod(group),
+      extractionQualityScore: averageQuality(group),
+      extractionWarnings: warnings,
+      extractionMetadata: {
+        aggregatedByPage: true,
+        sourcePartIds,
+        sourcePartsCount: group.length,
+        pageStart: first.pageStart,
+        pageEnd: first.pageEnd,
+      },
+      contentType: "body",
+      sectionTitle: first.sectionTitle ?? null,
+      sectionIndex: first.sectionIndex ?? null,
+      pageProfile: first.pageProfile ?? null,
+      includeInEmbedding: group.some((part) => part.includeInEmbedding),
+      sourcePartIds,
+    };
+  });
+}
+
+function getRegenerationKey(part: DisplayPart | null): string | null {
+  if (!part) return null;
+  if (part.id) return `part-${part.id}`;
+  if (part.pageStart && part.pageEnd) return `pages-${part.pageStart}-${part.pageEnd}`;
+  return null;
+}
+
 
 function localExtractMetrics(text: string) {
   const lower = text.toLowerCase();
@@ -307,6 +443,18 @@ const PDF_WARNING_LABELS: Record<string, string> = {
   extraction_failed: "текст не извлечён",
 };
 
+const CONTENT_TYPE_LABELS: Record<string, string> = {
+  body: "основной текст",
+  heading: "заголовок",
+  caption: "подпись",
+  formula: "формулы",
+  table: "таблицы",
+  reference: "список литературы",
+  footnote: "сноски",
+  affiliation: "аффилиация",
+  abstract: "аннотация",
+};
+
 const EXTRACTION_METHOD_LABELS: Record<string, string> = {
   auto: "авто",
   pdfplumber_auto: "авто",
@@ -328,6 +476,12 @@ function methodLabel(method: string | null | undefined): string | null {
   const key = (method || "").trim();
   if (!key) return null;
   return EXTRACTION_METHOD_LABELS[key] ?? key.replace(/_/g, " ");
+}
+
+function contentTypeLabel(contentType: string | null | undefined): string | null {
+  const key = (contentType || "").trim();
+  if (!key) return null;
+  return CONTENT_TYPE_LABELS[key] ?? key.replace(/_/g, " ");
 }
 
 function formatQuality(score: number | null | undefined): string | null {
@@ -419,15 +573,6 @@ function StatusPill({ status }: { status: PartLayerStatus }) {
   );
 }
 
-function partStatusLabel(status: string) {
-  const value = normalizePartStatus(status);
-  if (value === "ready") return "Готово";
-  if (value === "processing") return "Оцифровка файла";
-  if (value === "failed") return "Ошибка";
-  if (value === "raw_extracted") return "Сырой текст сохранён";
-  if (value === "legacy") return "Legacy-текст";
-  return status || RU.unknown;
-}
 
 function MarkdownText({ text }: { text: string }) {
   return (
@@ -447,8 +592,9 @@ function MarkdownText({ text }: { text: string }) {
 function PartExtractionInfo({ part, compact = false }: { part: DisplayPart; compact?: boolean }) {
   const quality = formatQuality(part.extractionQualityScore);
   const method = methodLabel(part.extractionMethod);
+  const contentType = contentTypeLabel(part.contentType);
   const warnings = part.extractionWarnings || [];
-  const hasInfo = quality || method || warnings.length || part.error;
+  const hasInfo = quality || method || contentType || part.pageProfile || warnings.length || part.error;
   if (!hasInfo) return null;
 
   return (
@@ -456,6 +602,8 @@ function PartExtractionInfo({ part, compact = false }: { part: DisplayPart; comp
       <div className="part-extraction-info-main">
         {quality && <span>целостность {quality}</span>}
         {method && <span>метод: {method}</span>}
+        {contentType && <span>тип: {contentType}</span>}
+        {part.pageProfile && <span>профиль: {part.pageProfile}</span>}
         {part.error && <span>замечание: {part.error}</span>}
       </div>
       {warnings.length > 0 && (
@@ -474,21 +622,6 @@ type PlainTextBlock = {
   text: string;
 };
 
-function isRawTableLine(line: string): boolean {
-  const value = line.trim();
-  if (!value) return false;
-  if (/^\[[^\]]*table[^\]]*\]/i.test(value)) return true;
-  if (/^\|.+\|$/.test(value)) return true;
-
-  const pipeColumns = value.split("|").map((item) => item.trim()).filter(Boolean);
-  if (pipeColumns.length >= 3) return true;
-
-  const spacedColumns = value.split(/\s{3,}/).map((item) => item.trim()).filter(Boolean);
-  if (spacedColumns.length < 3) return false;
-
-  const shortColumns = spacedColumns.filter((item) => item.length <= 40).length;
-  return shortColumns >= 3 && value.length <= 180;
-}
 
 function looksLikeRawHeading(line: string): boolean {
   const value = line.trim();
@@ -588,7 +721,7 @@ export default function PatentDetail() {
   const [textViewMode, setTextViewMode] = useState<TextViewMode>("ai");
   const [showExtractionDiagnostics, setShowExtractionDiagnostics] = useState(true);
   const [actionBusy, setActionBusy] = useState<BusyAction>(null);
-  const [regeneratingPartId, setRegeneratingPartId] = useState<number | null>(null);
+  const [regeneratingPartKey, setRegeneratingPartKey] = useState<string | null>(null);
 
   const loadPaper = async (showLoading = true) => {
     const paperId = Number(id);
@@ -627,7 +760,6 @@ export default function PatentDetail() {
     getPublicDisplaySettings()
       .then((value) => setShowExtractionDiagnostics(value.show_extraction_diagnostics ?? true))
       .catch(() => setShowExtractionDiagnostics(true));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   useEffect(() => {
@@ -636,7 +768,6 @@ export default function PatentDetail() {
       loadPaper(false).catch(() => null);
     }, 4000);
     return () => window.clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paper?.id, paper?.processingStatus]);
 
   const fullText = paper?.fullText ?? "";
@@ -644,7 +775,7 @@ export default function PatentDetail() {
   const hasFullTextOrPdf = Boolean(hasFullText || paper?.pdfUrl || paper?.pdfLocalPath);
 
   const displayParts = useMemo<DisplayPart[]>(() => {
-    if (contentParts.length) return contentParts.map(mapStoredPart);
+    if (contentParts.length) return aggregateStoredPartsByPage(contentParts);
     return splitLegacyMarkdownParts(fullText);
   }, [contentParts, fullText]);
 
@@ -708,11 +839,16 @@ export default function PatentDetail() {
   };
 
   const onRegeneratePart = async (part: DisplayPart) => {
-    if (!paper || !part.id || regeneratingPartId) return;
-    setRegeneratingPartId(part.id);
+    const key = getRegenerationKey(part);
+    if (!paper || !key || regeneratingPartKey) return;
+    setRegeneratingPartKey(key);
     setActionError(null);
     try {
-      await regeneratePaperContentPart(paper.id, part.id);
+      if (part.id) {
+        await regeneratePaperContentPart(paper.id, part.id);
+      } else if (part.pageStart && part.pageEnd) {
+        await regeneratePaperMarkdownPages(paper.id, part.pageStart, part.pageEnd);
+      }
       toast.success(RU.regenerateQueued);
       await loadPaper(false);
     } catch (e) {
@@ -720,7 +856,7 @@ export default function PatentDetail() {
       setActionError(`${RU.regenerateError}: ${message}`);
       toast.error(`${RU.regenerateError}: ${message}`);
     } finally {
-      setRegeneratingPartId(null);
+      setRegeneratingPartKey(null);
     }
   };
 
@@ -863,11 +999,11 @@ export default function PatentDetail() {
                               {textViewMode === "ai" && (
                                 <button
                                   className="btn btn-primary"
-                                  disabled={!part.id || regeneratingPartId === part.id}
+                                  disabled={!getRegenerationKey(part) || regeneratingPartKey === getRegenerationKey(part)}
                                   onClick={() => onRegeneratePart(part)}
-                                  title={!part.id ? "Перегенерация доступна только для сохранённых частей" : undefined}
+                                  title={!getRegenerationKey(part) ? "Перегенерация доступна только для сохранённых страниц" : undefined}
                                 >
-                                  {regeneratingPartId === part.id ? RU.regenerating : RU.regenerate}
+                                  {regeneratingPartKey === getRegenerationKey(part) ? RU.regenerating : RU.regenerate}
                                 </button>
                               )}
                             </div>
@@ -883,7 +1019,7 @@ export default function PatentDetail() {
                   </div>
                 </>
               ) : (
-                <MarkdownText text={paper.fullText} />
+                <MarkdownText text={paper.fullText ?? ""} />
               )}
             </section>
           )}
@@ -951,11 +1087,11 @@ export default function PatentDetail() {
                       </button>
                       <button
                         className="btn btn-primary"
-                        disabled={!selectedPart.id || regeneratingPartId === selectedPart.id}
+                        disabled={!getRegenerationKey(selectedPart) || regeneratingPartKey === getRegenerationKey(selectedPart)}
                         onClick={() => onRegeneratePart(selectedPart)}
-                        title={!selectedPart.id ? "Перегенерация доступна только для сохранённых частей" : undefined}
+                        title={!getRegenerationKey(selectedPart) ? "Перегенерация доступна только для сохранённых страниц" : undefined}
                       >
-                        {regeneratingPartId === selectedPart.id ? RU.regenerating : RU.regenerate}
+                        {regeneratingPartKey === getRegenerationKey(selectedPart) ? RU.regenerating : RU.regenerate}
                       </button>
                     </div>
                   </div>

@@ -3,8 +3,8 @@ import asyncio
 
 from app.db.base import Base
 from app.db.models import (
-    RefreshToken,  # noqa: F401
-    User,  # noqa: F401
+    RefreshToken,
+    User,
 )
 from app.db.session import engine
 

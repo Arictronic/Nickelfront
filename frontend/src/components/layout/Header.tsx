@@ -39,21 +39,32 @@ export default function Header() {
     <header className="header">
       <div className="brand-block">
         <div className="brand-mark">N</div>
-        <h1>Nickelfront</h1>
+        <div>
+          <h1>Nickelfront</h1>
+        </div>
       </div>
+
       <div className="header-actions">
         <ThemeToggle />
+
         <div className={`session-status ${sessionClass}`} title={sessionLabel}>
           <span className="session-dot" />
           <span>{sessionLabel}</span>
         </div>
-        <span className="user-chip">{user?.username || user?.email || (isAuthenticated && sessionError ? "пользователь не подтверждён" : "guest@local")}</span>
+
+        <span
+          className="user-chip"
+          title={user?.email || ""}
+        >
+          {user?.username || user?.email || (isAuthenticated && sessionError ? "пользователь" : "guest")}
+        </span>
+
         {user || (isAuthenticated && sessionError) ? (
-          <button className="btn btn-ghost" onClick={handleLogout}>
+          <button className="btn btn-ghost btn-sm" onClick={handleLogout}>
             {user ? "Выйти" : "Сбросить сессию"}
           </button>
         ) : (
-          <button className="btn btn-ghost" onClick={() => navigate("/login")}>
+          <button className="btn btn-ghost btn-sm" onClick={() => navigate("/login")}>
             Войти
           </button>
         )}

@@ -111,7 +111,7 @@ async def export_paper_pdf(
         paper = await _load_paper_or_404(paper_id, db)
         paper_dict = _paper_to_report_dict(paper)
 
-        # Генерируем PDF
+
         pdf_bytes = await asyncio.to_thread(generate_paper_pdf, paper_dict)
 
         return Response(
@@ -149,7 +149,7 @@ async def export_paper_docx(
         paper = await _load_paper_or_404(paper_id, db)
         paper_dict = _paper_to_report_dict(paper)
 
-        # Генерируем DOCX
+
         docx_bytes = await asyncio.to_thread(generate_paper_docx, paper_dict)
 
         return Response(
@@ -186,7 +186,7 @@ async def get_paper_report(
     try:
         paper = await _load_paper_or_404(paper_id, db)
 
-        # Импортируем сервис отчётов из analytics
+
         try:
             from analytics.reports import generate_paper_report
 
@@ -195,7 +195,7 @@ async def get_paper_report(
             return report
 
         except ImportError:
-            # Fallback если analytics модуль недоступен
+
             return _fallback_paper_report(paper)
 
     except HTTPException:

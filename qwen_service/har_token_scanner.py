@@ -32,7 +32,7 @@ QWEN_HAR_EXPORT_INSTRUCTIONS = """
 6. Не закрывая вкладку Network, войдите в аккаунт Qwen.
 7. После успешного входа нажмите правой кнопкой по списку запросов во вкладке Network.
 8. Выберите Save all as HAR with content / Сохранить все как HAR с содержимым.
-9. Передайте этот .har файл в Qwen_scaner.py или загрузите его в настройках Nickelfront.
+9. Передайте этот .har файл в qwen_service/har_token_scanner.py или загрузите его в настройках Nickelfront.
 
 Важно:
 - HAR может содержать cookies и токены авторизации. Не отправляйте его посторонним.

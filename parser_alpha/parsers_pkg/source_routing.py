@@ -234,7 +234,7 @@ class SourceHealthStore:
                 if delta:
                     merged_entry[key] = _safe_int_counter(merged_entry.get(key, 0)) + delta
                 else:
-                    # Normalize stale/corrupt disk values such as null or "bad" to ints.
+
                     merged_entry[key] = _safe_int_counter(merged_entry.get(key, current_value))
 
             for key in last_fields:

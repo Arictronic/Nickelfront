@@ -54,7 +54,18 @@ DEFAULT_SYSTEM_SETTINGS: dict[str, dict[str, Any]] = {
         "save_markdown_parts": True,
         "normalize_math": True,
         "show_extraction_diagnostics": True,
+        "parser_mode": "auto",
+        "ocr_mode": "auto",
+        "ai_mode": "off",
+        "force_strategy": "",
         "extraction_mode": "auto",
+        "ocr_engine": "auto",
+        "ai_provider": "",
+        "ai_model": "",
+        "ai_endpoint": "",
+        "ai_render_dpi": 220,
+        "ai_page_image_format": "png",
+        "ai_timeout_sec": 120,
         "detect_columns": True,
         "extract_tables": True,
         "remove_headers_footers": True,
@@ -237,14 +248,43 @@ def sanitize_section(section: str, value: Mapping[str, Any]) -> dict[str, Any]:
         merged["show_extraction_diagnostics"] = _to_bool(
             merged.get("show_extraction_diagnostics"), True
         )
+        parser_mode = str(merged.get("parser_mode") or "auto").strip().lower()
+        merged["parser_mode"] = parser_mode if parser_mode in {"auto", "ai"} else "auto"
+
+        ocr_mode = str(merged.get("ocr_mode") or "auto").strip().lower()
+        merged["ocr_mode"] = ocr_mode if ocr_mode in {"auto", "force", "off"} else "auto"
+
+        ai_mode = str(merged.get("ai_mode") or ("force" if merged["parser_mode"] == "ai" else "off")).strip().lower()
+        merged["ai_mode"] = ai_mode if ai_mode in {"off", "auto", "force"} else ("force" if merged["parser_mode"] == "ai" else "off")
+
+        force_strategy = str(merged.get("force_strategy") or "").strip().lower()
+        merged["force_strategy"] = force_strategy if force_strategy in {"", "simple", "layout", "columns", "ocr", "ai"} else ""
+
         mode = str(merged.get("extraction_mode") or "auto").strip().lower()
-        merged["extraction_mode"] = mode if mode in {"auto", "layout", "columns", "simple", "ocr"} else "auto"
+        merged["extraction_mode"] = mode if mode in {"auto", "layout", "columns", "simple", "ocr", "ai"} else "auto"
+        if merged["extraction_mode"] in {"layout", "columns", "simple", "ocr", "ai"} and not merged["force_strategy"]:
+            merged["force_strategy"] = merged["extraction_mode"]
+        if merged["force_strategy"] == "ai":
+            merged["parser_mode"] = "ai"
+            merged["ai_mode"] = "force"
+        if merged["force_strategy"] == "ocr":
+            merged["ocr_mode"] = "force"
+
+        merged["ocr_engine"] = str(merged.get("ocr_engine") or "auto").strip().lower() or "auto"
+        merged["ai_provider"] = str(merged.get("ai_provider") or "").strip()
+        merged["ai_model"] = str(merged.get("ai_model") or "").strip()
+        merged["ai_endpoint"] = str(merged.get("ai_endpoint") or "").strip()
+        merged["ai_render_dpi"] = _to_int(merged.get("ai_render_dpi"), 220, minimum=120, maximum=500)
+        image_format = str(merged.get("ai_page_image_format") or "png").strip().lower()
+        merged["ai_page_image_format"] = image_format if image_format in {"png", "jpeg", "jpg", "webp"} else "png"
+        merged["ai_timeout_sec"] = _to_int(merged.get("ai_timeout_sec"), 120, minimum=5, maximum=1800)
+
         merged["detect_columns"] = _to_bool(merged.get("detect_columns"), True)
         merged["extract_tables"] = _to_bool(merged.get("extract_tables"), True)
         merged["remove_headers_footers"] = _to_bool(merged.get("remove_headers_footers"), True)
         merged["merge_hyphenated_words"] = _to_bool(merged.get("merge_hyphenated_words"), True)
         merged["mark_formula_candidates"] = _to_bool(merged.get("mark_formula_candidates"), True)
-        merged["ocr_enabled"] = _to_bool(merged.get("ocr_enabled"), False)
+        merged["ocr_enabled"] = merged["ocr_mode"] != "off"
         merged["ocr_dpi"] = _to_int(merged.get("ocr_dpi"), 220, minimum=120, maximum=400)
         merged["ocr_languages"] = str(merged.get("ocr_languages") or "eng+rus").strip() or "eng+rus"
         merged["min_text_chars"] = _to_int(merged.get("min_text_chars"), 300, minimum=0, maximum=10000)
@@ -258,7 +298,7 @@ def sanitize_section(section: str, value: Mapping[str, Any]) -> dict[str, Any]:
             merged.get("request_timeout_seconds"), int(settings.QWEN_QUEUE_TIMEOUT), minimum=30, maximum=1800
         )
         merged["model"] = str(merged.get("model") or settings.QWEN_MODEL).strip() or settings.QWEN_MODEL
-        # Runtime-only flag. Never trust/save token value from UI.
+
         merged["token_configured"] = bool(settings.QWEN_TOKEN)
 
     return merged

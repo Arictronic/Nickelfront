@@ -107,6 +107,25 @@ async def _set_stage(
     )
 
 
+def _content_flags(
+    *,
+    text_available: bool = False,
+    text_source: str = "none",
+    fresh_content_available: bool = False,
+    fresh_parts_created: bool = False,
+    content_parts_count: int = 0,
+) -> dict[str, Any]:
+    """Small, explicit contract passed between content and Qwen stages."""
+    return {
+        "text_available": bool(text_available),
+        "text_source": text_source,
+        "fresh_content_available": bool(fresh_content_available),
+        "fresh_parts_created": bool(fresh_parts_created),
+        "content_parts_count": int(content_parts_count or 0),
+        "markdown_input_available": bool(fresh_content_available and text_source in {"pdf", "fallback_fulltext"}),
+    }
+
+
 def enqueue_paper_content_pipeline(paper_id: int, root_task_id: str | None = None):
     """Start the article post-processing pipeline for one paper.
 
@@ -181,6 +200,15 @@ async def _download_pdf_async(
         if not paper:
             return {"status": "error", "paper_id": paper_id, "error": "paper_not_found", "root_task_id": root_task_id}
 
+
+
+
+
+        part_service = PaperContentPartService(db)
+        cleared_parts = await part_service.clear_parts(paper_id)
+        if cleared_parts:
+            logger.info("Cleared stale content parts before pipeline: paper_id={}, parts={}", paper_id, cleared_parts)
+
         postprocess = await _get_postprocess_settings(db)
         if not postprocess.get("download_pdf", True):
             await _set_stage(paper_service, paper_id, "pdf_download_skipped", task_id=task_id, error="download_pdf_disabled")
@@ -191,6 +219,11 @@ async def _download_pdf_async(
                 "pdf_downloaded": False,
                 "pdf_skipped": True,
                 "pipeline": PIPELINE_VERSION,
+                **_content_flags(
+                    text_available=bool((paper.full_text or paper.abstract or "").strip()),
+                    text_source="existing_or_abstract",
+                    fresh_content_available=False,
+                ),
             }
 
         await _set_stage(paper_service, paper_id, "pdf_pending", task_id=task_id, error=None)
@@ -224,7 +257,13 @@ async def _download_pdf_async(
                 "root_task_id": root_task_id,
                 "pdf_downloaded": False,
                 "pdf_url": pdf_url,
+                "pdf_local_path": None,
                 "pipeline": PIPELINE_VERSION,
+                **_content_flags(
+                    text_available=bool((paper.abstract or "").strip()),
+                    text_source="abstract" if (paper.abstract or "").strip() else "none",
+                    fresh_content_available=False,
+                ),
             }
 
         pdf_local_path = await asyncio.to_thread(save_pdf_locally, paper_id, pdf_bytes)
@@ -239,6 +278,7 @@ async def _download_pdf_async(
             "pdf_local_path": pdf_local_path,
             "pdf_url": pdf_url,
             "pipeline": PIPELINE_VERSION,
+            **_content_flags(text_available=False, text_source="pdf_pending", fresh_content_available=False),
         }
 
 
@@ -272,6 +312,7 @@ async def _extract_pdf_text_async(
         if not paper:
             return _merge_previous(previous, status="error", error="paper_not_found")
 
+
         postprocess = await _get_postprocess_settings(db)
         if not postprocess.get("extract_pdf_text", True):
             await _set_stage(paper_service, paper_id, "pdf_text_skipped", task_id=task_id, error="extract_pdf_text_disabled")
@@ -280,9 +321,12 @@ async def _extract_pdf_text_async(
                 status="ok",
                 paper_id=paper_id,
                 root_task_id=root_task_id,
-                text_available=bool((paper.full_text or paper.abstract or "").strip()),
-                text_source="existing_or_abstract",
                 text_skipped=True,
+                **_content_flags(
+                    text_available=bool((paper.full_text or paper.abstract or "").strip()),
+                    text_source="existing_or_abstract",
+                    fresh_content_available=False,
+                ),
             )
 
         pdf_markdown = await _get_pdf_markdown_settings(db)
@@ -292,21 +336,43 @@ async def _extract_pdf_text_async(
         extracted_page_items: list[dict[str, Any]] = []
         extracted_pages: list[str] = []
         extracted_text = ""
-        pdf_local_path = (paper.pdf_local_path or "").strip()
+
+
+
+        pdf_local_path = str(previous.get("pdf_local_path") or "").strip() if previous.get("pdf_downloaded") else ""
         if pdf_local_path and Path(pdf_local_path).exists():
             await _set_stage(paper_service, paper_id, "extracting_pdf_text", task_id=task_id, error=None)
             pdf_bytes = await asyncio.to_thread(Path(pdf_local_path).read_bytes)
+            parser_mode = str(pdf_markdown.get("parser_mode") or "auto").strip().lower() or "auto"
+            ocr_mode = str(pdf_markdown.get("ocr_mode") or "auto").strip().lower() or "auto"
+            ai_mode = str(pdf_markdown.get("ai_mode") or ("force" if parser_mode == "ai" else "off")).strip().lower() or "off"
+            force_strategy = str(pdf_markdown.get("force_strategy") or "").strip().lower()
+            legacy_extraction_mode = str(pdf_markdown.get("extraction_mode") or "auto").strip().lower() or "auto"
+
             extraction_options = {
-                "extraction_mode": pdf_markdown.get("extraction_mode", "auto"),
+                "parser_mode": parser_mode,
+                "ocr_mode": ocr_mode,
+                "ai_mode": ai_mode,
+                "force_strategy": force_strategy,
+                "extraction_mode": legacy_extraction_mode,
                 "detect_columns": pdf_markdown.get("detect_columns", True),
                 "extract_tables": pdf_markdown.get("extract_tables", True),
                 "remove_headers_footers": pdf_markdown.get("remove_headers_footers", True),
                 "merge_hyphenated_words": pdf_markdown.get("merge_hyphenated_words", True),
                 "normalize_math": pdf_markdown.get("normalize_math", True),
                 "mark_formula_candidates": pdf_markdown.get("mark_formula_candidates", True),
-                "ocr_enabled": pdf_markdown.get("ocr_enabled", False),
+                "ocr_enabled": ocr_mode != "off",
+                "ocr_force": ocr_mode == "force",
+                "ocr_engine": pdf_markdown.get("ocr_engine", "auto"),
                 "ocr_dpi": pdf_markdown.get("ocr_dpi", 220),
                 "ocr_languages": pdf_markdown.get("ocr_languages", "eng+rus"),
+                "ai_enabled": parser_mode == "ai" or ai_mode in {"auto", "force"} or force_strategy == "ai",
+                "ai_provider": pdf_markdown.get("ai_provider", ""),
+                "ai_model": pdf_markdown.get("ai_model", ""),
+                "ai_endpoint": pdf_markdown.get("ai_endpoint", ""),
+                "ai_render_dpi": pdf_markdown.get("ai_render_dpi", 220),
+                "ai_page_image_format": pdf_markdown.get("ai_page_image_format", "png"),
+                "ai_timeout_sec": pdf_markdown.get("ai_timeout_sec", 120),
                 "min_text_chars": pdf_markdown.get("min_text_chars", 300),
                 "max_page_chars": pdf_markdown.get("max_page_chars", 60000),
             }
@@ -315,9 +381,11 @@ async def _extract_pdf_text_async(
             extracted_text = "\n\n".join(page for page in extracted_pages if page and page.strip()).strip()
 
         if extracted_text:
+            content_parts_count = len(extracted_pages or [extracted_text])
             if save_raw_parts:
                 part_service = PaperContentPartService(db)
-                await part_service.replace_raw_parts(paper_id, extracted_page_items or extracted_pages or [extracted_text], source="pdf", pages_per_part=pages_per_part)
+                stored_parts = await part_service.replace_raw_parts(paper_id, extracted_page_items or extracted_pages or [extracted_text], source="pdf", pages_per_part=pages_per_part)
+                content_parts_count = len(stored_parts)
             await paper_service.update_paper(paper_id, full_text=extracted_text)
             await _set_stage(paper_service, paper_id, "pdf_parsed", task_id=task_id, error=None)
             return _merge_previous(
@@ -325,9 +393,13 @@ async def _extract_pdf_text_async(
                 status="ok",
                 paper_id=paper_id,
                 root_task_id=root_task_id,
-                text_available=True,
-                text_source="pdf",
-                content_parts_count=len(extracted_pages or [extracted_text]),
+                **_content_flags(
+                    text_available=True,
+                    text_source="pdf",
+                    fresh_content_available=True,
+                    fresh_parts_created=bool(save_raw_parts and content_parts_count > 0),
+                    content_parts_count=content_parts_count,
+                ),
             )
 
         fallback_text = await asyncio.to_thread(
@@ -338,9 +410,11 @@ async def _extract_pdf_text_async(
             paper.abstract or "",
         )
         if fallback_text:
+            fallback_parts_count = 0
             if save_raw_parts:
                 part_service = PaperContentPartService(db)
-                await part_service.replace_raw_parts(paper_id, [fallback_text], source="fallback_fulltext", pages_per_part=1)
+                stored_parts = await part_service.replace_raw_parts(paper_id, [fallback_text], source="fallback_fulltext", pages_per_part=1)
+                fallback_parts_count = len(stored_parts)
             await paper_service.update_paper(paper_id, full_text=fallback_text)
             await _set_stage(paper_service, paper_id, "fulltext_fallback_parsed", task_id=task_id, error=None)
             return _merge_previous(
@@ -348,9 +422,13 @@ async def _extract_pdf_text_async(
                 status="ok",
                 paper_id=paper_id,
                 root_task_id=root_task_id,
-                text_available=True,
-                text_source="fallback_fulltext",
-                content_parts_count=1,
+                **_content_flags(
+                    text_available=True,
+                    text_source="fallback_fulltext",
+                    fresh_content_available=True,
+                    fresh_parts_created=bool(fallback_parts_count),
+                    content_parts_count=fallback_parts_count,
+                ),
             )
 
         await _set_stage(paper_service, paper_id, "fulltext_unavailable", task_id=task_id, error=None)
@@ -359,8 +437,11 @@ async def _extract_pdf_text_async(
             status="ok",
             paper_id=paper_id,
             root_task_id=root_task_id,
-            text_available=bool((paper.abstract or "").strip()),
-            text_source="abstract" if (paper.abstract or "").strip() else "none",
+            **_content_flags(
+                text_available=bool((paper.abstract or "").strip()),
+                text_source="abstract" if (paper.abstract or "").strip() else "none",
+                fresh_content_available=False,
+            ),
         )
 
 
@@ -394,6 +475,7 @@ async def _build_embedding_async(
         if not paper:
             return _merge_previous(previous, status="error", error="paper_not_found")
 
+
         postprocess = await _get_postprocess_settings(db)
         if not postprocess.get("embedding", True):
             await _set_stage(paper_service, paper_id, "embedding_skipped", task_id=task_id, error="embedding_disabled")
@@ -401,7 +483,9 @@ async def _build_embedding_async(
 
         await _set_stage(paper_service, paper_id, "indexing_vector", task_id=task_id, error=None)
 
-        content_text = (paper.full_text or paper.abstract or "").strip()
+        part_service = PaperContentPartService(db)
+        embedding_source_text = await part_service.assemble_embedding_text(paper_id, max_chars=12000)
+        content_text = (embedding_source_text or paper.full_text or paper.abstract or "").strip()
         embedded = False
         if content_text:
             embedding_service = get_embedding_service()

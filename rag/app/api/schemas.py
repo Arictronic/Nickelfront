@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-# === Модели для эндпоинта /ask ===
+
 
 
 class AskRequest(BaseModel):
@@ -84,7 +84,7 @@ class AskResponse(BaseModel):
     )
 
 
-# === Модели для эндпоинта /upload ===
+
 
 
 class UploadResponse(BaseModel):
@@ -104,7 +104,7 @@ class UploadResponse(BaseModel):
     file_size: int = Field(..., description="Размер файла в байтах")
 
 
-# === Модели для эндпоинта /health ===
+
 
 
 class HealthResponse(BaseModel):
@@ -127,7 +127,7 @@ class HealthResponse(BaseModel):
     )
 
 
-# === Модели для эндпоинта /stats ===
+
 
 
 class VectorStoreStats(BaseModel):
@@ -163,7 +163,7 @@ class StatsResponse(BaseModel):
     embedding_model: str = Field(..., description="Модель эмбеддингов")
 
 
-# === Модели ошибок ===
+
 
 
 class ErrorResponse(BaseModel):

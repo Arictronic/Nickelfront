@@ -16,7 +16,7 @@ def set_cancel_flag(task_id: str) -> None:
     try:
         _get_client().setex(_cancel_key(task_id), CANCEL_TTL_SECONDS, "1")
     except Exception:
-        # If Redis is unavailable, do not break API calls
+
         pass
 
 

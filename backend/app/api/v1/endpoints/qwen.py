@@ -154,7 +154,7 @@ async def create_session(
 
     title = request.title if request else "Новый чат"
 
-    # Переименовываем сессию если указан заголовок
+
     if title != "Новый чат":
         await asyncio.to_thread(qwen_service.rename_session, session_id, title)
 
@@ -336,9 +336,9 @@ async def send_message(
             error=_qwen_unavailable_message(health),
         )
 
-    # Interactive chat also goes through the shared Qwen gateway when
-    # QWEN_QUEUE_ENABLED=1. With QWEN_QUEUE_WORKERS=5 and each worker
-    # concurrency=1 this gives exactly 5 parallel Qwen slots for one token.
+
+
+
     qwen_client = get_qwen_client()
     result = await asyncio.to_thread(
         qwen_client.send_message,

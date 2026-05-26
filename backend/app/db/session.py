@@ -11,7 +11,7 @@ engine = create_async_engine(
     max_overflow=settings.DB_MAX_OVERFLOW,
     pool_timeout=settings.DB_POOL_TIMEOUT,
     connect_args={
-        # Fail fast on broken local TCP/DB state instead of long hangs.
+
         "timeout": settings.DB_CONNECT_TIMEOUT,
     },
 )

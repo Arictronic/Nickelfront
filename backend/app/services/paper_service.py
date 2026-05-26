@@ -58,8 +58,8 @@ class PaperService:
             await self.db.commit()
             await self.db.refresh(existing)
 
-        # Transient flags used by parser Celery tasks for honest statistics.
-        # They are not mapped DB columns and are not exposed through Pydantic schemas.
+
+
         setattr(existing, "_nickelfront_created", False)
         setattr(existing, "_nickelfront_updated", updated)
         return existing
@@ -74,14 +74,14 @@ class PaperService:
         Returns:
             Созданная статья
         """
-        # Проверяем, нет ли уже статьи с таким DOI
+
         if paper_data.doi:
             existing = await self.get_by_doi(paper_data.doi)
             if existing:
                 logger.info(f"Статья с DOI {paper_data.doi} уже существует")
                 return await self._enrich_existing_paper(existing, paper_data)
 
-        # Проверяем по source_id
+
         if paper_data.source_id:
             existing = await self.get_by_source_id(
                 paper_data.source, paper_data.source_id
@@ -90,7 +90,7 @@ class PaperService:
                 logger.info(f"Статья {paper_data.source_id} из {paper_data.source} уже существует")
                 return await self._enrich_existing_paper(existing, paper_data)
 
-        # Создаём новую статью
+
         db_paper = PaperModel(
             title=paper_data.title,
             authors=paper_data.authors,
@@ -169,7 +169,7 @@ class PaperService:
         Returns:
             Список статей
         """
-        # Простой поиск по подстроке (для PostgreSQL можно использовать full-text search)
+
         search_pattern = f"%{query}%"
         stmt = select(PaperModel).where(
             (PaperModel.title.ilike(search_pattern)) |

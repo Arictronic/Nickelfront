@@ -157,7 +157,7 @@ async def get_celery_task_status_endpoint(
     if task_info is None:
         raise HTTPException(status_code=404, detail="Задача Celery не найдена")
 
-    # Преобразуем результат в формат CeleryTaskStatus
+
     result = task_info.get("result")
     if not isinstance(result, dict) and isinstance(task_info.get("info"), dict):
         result = task_info.get("info")
@@ -283,12 +283,12 @@ async def stop_celery_queues(
         purged = await asyncio.to_thread(celery_app.control.purge)
 
         return {
-            "status": "stopped",
+            "status": "queues_purged",
             "revoked": len(task_ids),
             "task_ids": task_ids,
             "purged": int(purged or 0),
             "terminate": terminate,
-            "message": "Celery queues stopped: active tasks revoked and waiting messages purged",
+            "message": "Cancel requested for inspected tasks; waiting broker messages purged",
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка остановки очередей: {str(e)}")

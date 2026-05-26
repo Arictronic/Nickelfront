@@ -76,13 +76,19 @@ export type PublicDisplaySettings = {
 };
 
 export type QwenTokenStatus = {
-  status: "valid" | "expired" | "missing" | "invalid" | "service_unavailable" | "unknown" | string;
+  status: "valid" | "expired" | "missing" | "invalid" | "rate_limited" | "service_unavailable" | "unknown" | string;
   valid: boolean;
   expired: boolean;
+  rate_limited?: boolean;
   token_configured: boolean;
   message: string;
   model?: string | null;
   user?: Record<string, unknown> | null;
+  checked_by?: string | null;
+  service_available?: boolean | null;
+  active_sessions?: number | null;
+  max_active_sessions?: number | null;
+  provider_max_concurrent_requests?: number | null;
 };
 
 export type QwenHarUpdateResponse = {
@@ -97,4 +103,39 @@ export type QwenHarUpdateResponse = {
     candidates_count?: number;
     unique_tokens_count?: number;
   };
+};
+
+export type QwenTestChatResult = {
+  chat: number;
+  started_at_sec: number;
+  finished_at_sec: number;
+  duration_sec: number;
+  session_id: string;
+  error: string;
+  response_start: string;
+};
+
+export type QwenTestResult = {
+  ok: boolean;
+  status: "ok" | "partial" | "warning" | "error" | string;
+  message: string;
+  service_url: string;
+  message_used?: string;
+  chat_count: number;
+  successful_count: number;
+  failed_count: number;
+  looks_parallel: boolean;
+  start_spread_sec?: number | null;
+  finished_spread_sec?: number | null;
+  duration_spread_sec?: number | null;
+  rate_limited_count?: number;
+  provider_limited?: boolean;
+  service_health?: Record<string, unknown>;
+  token_status?: Record<string, unknown>;
+  results: QwenTestChatResult[];
+};
+
+export type QwenTestRunPayload = {
+  chat_count: number;
+  message: string;
 };

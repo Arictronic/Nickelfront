@@ -9,14 +9,14 @@ from pathlib import Path
 
 import httpx
 
-# Загрузка из .env
+
 from dotenv import load_dotenv
 
 env_path = Path(__file__).parent.parent / ".env"
 if env_path.exists():
     load_dotenv(env_path)
 
-# Конфигурация из переменных окружения
+
 SERVICE_URL = f"http://{os.getenv('QWEN_SERVICE_HOST', '127.0.0.1')}:{os.getenv('QWEN_SERVICE_PORT', '8767')}"
 API_KEY = os.getenv("QWEN_API_KEY", "")
 
@@ -173,7 +173,7 @@ def test_service():
 
     client = QwenServiceClient()
 
-    # 1. Проверка здоровья
+
     print("\n[1] Проверка здоровья сервиса...")
     try:
         health = client.health_check()
@@ -184,7 +184,7 @@ def test_service():
         print("\nСервис не запущен! Запустите: python service.py")
         return
 
-    # 2. Получение конфигурации
+
     print_separator("[2] Конфигурация сервиса")
     config = client.get_config()
     print(f"Модель: {config.get('model')}")
@@ -193,25 +193,25 @@ def test_service():
     print(f"Токен установлен: {config.get('has_token')}")
     print(f"API ключ установлен: {config.get('has_api_key')}")
 
-    # 3. Список моделей
+
     print_separator("[3] Доступные модели")
     try:
         models_response = client.list_models()
         models = models_response.get("models", [])
         print(f"Найдено моделей: {len(models)}")
-        for model in models[:5]:  # Показываем первые 5
+        for model in models[:5]:
             print(f"  - {model.get('name', model.get('id', 'N/A'))}")
     except Exception as e:
         print(f"Ошибка получения моделей: {e}")
 
-    # 4. Создание сессии
+
     print_separator("[4] Создание новой сессии")
     session = client.create_session()
     session_id = session.get("session_id")
     print(f"✓ Сессия создана: {session_id}")
     print(f"✓ Заголовок: {session.get('title')}")
 
-    # 5. Отправка сообщения
+
     print_separator("[5] Отправка сообщения")
     print("Вопрос: 'Привет! Напиши краткий пример функции на Python для вычисления Фибоначчи.'")
 
@@ -236,12 +236,12 @@ def test_service():
     print(answer[:500] if len(answer) > 500 else answer)
     print("-" * 60)
 
-    # 6. Переименование сессии
+
     print_separator("[6] Переименование сессии")
     rename_result = client.rename_session(session_id, "Пример Фибоначчи")
     print(f"✓ Сессия переименована: {rename_result.get('title')}")
 
-    # 7. Список сессий
+
     print_separator("[7] Список сессий")
     sessions_response = client.list_sessions()
     sessions = sessions_response.get("sessions", [])
@@ -249,7 +249,7 @@ def test_service():
     for s in sessions[:3]:
         print(f"  - {s.get('title', 'N/A')} ({s.get('id', 'N/A')[:8]}...)")
 
-    # 8. нформация о пользователе
+
     print_separator("[8] нформация о пользователе")
     user_info = client.get_user_info()
     info = user_info.get("user_info", {})
@@ -260,7 +260,7 @@ def test_service():
     else:
         print("нформация недоступна")
 
-    # 9. Тестирование режима с поиском
+
     print_separator("[9] Тест с поиском в интернете")
     print("Вопрос: 'Какие последние новости о Python 3.12?'")
 
@@ -277,7 +277,7 @@ def test_service():
     print(answer_search[:400] if len(answer_search) > 400 else answer_search)
     print("-" * 60)
 
-    # тоги
+
     print_separator("✅ ТЕСТРОВАНЕ ЗАВЕРШЕНО")
     print(f"Сессия: {session_id}")
     print("Всего сообщений отправлено: 2")
@@ -291,14 +291,14 @@ def interactive_mode():
 
     client = QwenServiceClient()
 
-    # Проверка подключения
+
     try:
         client.health_check()
     except httpx.HTTPError:
         print("Сервис не запущен! Запустите: python service.py")
         return
 
-    # Создание или выбор сессии
+
     print("\nСоздание новой сессии...")
     session = client.create_session()
     session_id = session.get("session_id")
@@ -326,7 +326,7 @@ def interactive_mode():
         if not user_input:
             continue
 
-        # Команды
+
         if user_input.startswith("/"):
             parts = user_input.split(maxsplit=1)
             cmd = parts[0].lower()
@@ -349,7 +349,7 @@ def interactive_mode():
                 print(f"Неизвестная команда: {cmd}")
             continue
 
-        # Отправка сообщения
+
         print("\nQwen печатает...")
         try:
             response = client.send_message(

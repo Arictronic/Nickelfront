@@ -107,16 +107,16 @@ class QwenService:
             else settings.QWEN_MAX_CONTINUES
         )
 
-        # Last created/used session is kept only for diagnostics/backward compatibility.
-        # It is NOT used as fallback for new messages: otherwise parallel chats can
-        # accidentally share one Qwen conversation.
+
+
+
         self._session_id: str | None = None
 
-        # Lock protects only local counters/history, never the whole Qwen request.
-        # Standalone qwen_service already serializes requests per session_id.
+
+
         self._stats_lock = threading.RLock()
 
-        # Статистика запросов
+
         self._request_history: deque = deque(maxlen=100)
         self._active_requests = 0
         self._is_busy = False
@@ -417,16 +417,16 @@ class QwenService:
                 retry_result["recreated_session"] = True
                 retry_result["previous_session_id"] = old_sid
                 retry_result["session_recreated_reason"] = "timeout"
-                # If retry also failed, return its explicit failure so frontend sees the
-                # new session_id and error instead of hanging on the old one.
+
+
                 result = retry_result
             else:
                 result["session_id"] = old_sid
                 result["recreated_session"] = False
                 result["session_recreated_reason"] = "timeout_new_session_failed"
 
-        # Do not keep a global chat fallback for future unrelated messages.
-        # Keep only diagnostics/backward-compatible session_id property.
+
+
         if result.get("session_id"):
             self._session_id = str(result["session_id"])
         elif created_for_request:
@@ -517,8 +517,8 @@ class QwenService:
             can_continue = result.get("can_continue", False)
             response_text = result.get("response", "")
 
-            # Локальное авто-продолжение оставлено как legacy fallback, если standalone
-            # qwen_service почему-то не сделал auto_continue сам.
+
+
             if do_auto_continue and continue_count == 0 and can_continue:
                 message_id = result.get("message_id", 0)
                 add_count, add_text = self._auto_continue(sid, message_id, bool(thinking))
@@ -567,7 +567,7 @@ class QwenService:
 
         text = response.strip()
 
-        # Проверка на незавершённость
+
         incomplete_endings = [
             "...",
             "—",
@@ -597,7 +597,7 @@ class QwenService:
             if text_lower.endswith(ending):
                 return True
 
-        # Проверка скобок
+
         if (
             text.count("(") > text.count(")")
             or text.count("[") > text.count("]")
@@ -605,15 +605,15 @@ class QwenService:
         ):
             return True
 
-        # Проверка кавычек
+
         if text.count("'") % 2 != 0 or text.count('"') % 2 != 0:
             return True
 
-        # Проверка блоков кода
+
         if text.count("```") % 2 != 0:
             return True
 
-        # Завершённый ответ
+
         if text.endswith(".") or text.endswith("!") or text.endswith("?"):
             return False
 
@@ -812,7 +812,7 @@ class QwenService:
             else:
                 logger.info("Standalone qwen_service config updated: %s", {k: v for k, v in payload.items() if k != "token"})
 
-        # Keep local mirror in sync for fast reads and legacy code paths.
+
         updated = self.get_config()
         self.model = str(updated.get("model") or self.model)
         self.thinking_enabled = bool(updated.get("thinking_enabled", self.thinking_enabled))
@@ -826,7 +826,7 @@ class QwenService:
         return updated
 
 
-# Глобальный экземпляр
+
 _qwen_service: QwenService | None = None
 
 

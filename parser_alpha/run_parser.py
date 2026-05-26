@@ -6,14 +6,17 @@ import importlib.util
 import json
 import logging
 import os
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from loguru import logger as loguru_logger
 from parsers_pkg.base import Deduplicator, derive_article_url, normalize_url
 from parsers_pkg.errors import MisconfigurationError, SourceError
 from parsers_pkg.source_config import SourceRuntimeConfig, load_source_runtime_config_with_metadata
@@ -32,10 +35,77 @@ logger = logging.getLogger(__name__)
 
 SOURCE_REGISTRY = build_default_source_registry()
 FALLBACK_ENABLED = False
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PARSER_LOG_DIR = PROJECT_ROOT / "logs" / "parser"
+
+
+def _resolve_parser_log_file() -> Path:
+    raw = (os.getenv("PARSER_LOG_FILE") or "").strip()
+    if raw:
+        configured = Path(raw)
+        return configured if configured.is_absolute() else PROJECT_ROOT / configured
+    return PARSER_LOG_DIR / "parser_alpha.log"
 
 
 def _contains_non_ascii(text: str) -> bool:
     return any(ord(ch) > 127 for ch in text)
+
+
+def _setup_parser_logging(level_name: str) -> Path:
+    log_file = _resolve_parser_log_file()
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    numeric_level = getattr(logging, level_name.upper(), logging.INFO)
+
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.setLevel(numeric_level)
+
+    stdlib_format = logging.Formatter(
+        "%(asctime)s | %(levelname)-8s | parser_alpha | pid=%(process)d | %(name)s:%(lineno)d - %(message)s"
+    )
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(numeric_level)
+    stream_handler.setFormatter(stdlib_format)
+
+    file_handler = RotatingFileHandler(
+        filename=str(log_file),
+        maxBytes=20 * 1024 * 1024,
+        backupCount=14,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(numeric_level)
+    file_handler.setFormatter(stdlib_format)
+
+    root_logger.addHandler(stream_handler)
+    root_logger.addHandler(file_handler)
+
+    loguru_logger.remove()
+    loguru_logger.add(
+        sys.stdout,
+        level=level_name.upper(),
+        format=(
+            "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+            "<level>{level: <8}</level> | parser_alpha | pid=<cyan>{process.id}</cyan> | "
+            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+            "<level>{message}</level>"
+        ),
+        colorize=True,
+        enqueue=True,
+    )
+    loguru_logger.add(
+        str(log_file),
+        level=level_name.upper(),
+        rotation=os.getenv("NICKELFRONT_LOG_ROTATION", "20 MB"),
+        retention=os.getenv("NICKELFRONT_LOG_RETENTION", "14 days"),
+        enqueue=True,
+        encoding="utf-8",
+        format=(
+            "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | parser_alpha | "
+            "pid={process.id} | {name}:{function}:{line} - {message}"
+        ),
+    )
+    return log_file
 
 
 def _translate_query_for_fallback(query: str) -> tuple[str | None, str]:
@@ -893,10 +963,8 @@ def main() -> None:
     if not FALLBACK_ENABLED:
         args.strict_source = True
         args.max_fallback_sources = 1
-    logging.basicConfig(
-        level=getattr(logging, args.log_level.upper()),
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
+    log_path = _setup_parser_logging(args.log_level)
+    logger.info("Parser logging initialized: %s", log_path)
     if args.dry_run:
         plan = _build_dry_run_plan(
             source=args.source,

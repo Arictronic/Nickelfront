@@ -22,7 +22,11 @@ from app.services.paper_content_service import (
     PDF_MARKDOWN_PROMPT_VERSION,
 )
 from app.services.paper_service import PaperService
-from app.services.paper_content_part_service import PaperContentPartService
+from app.services.paper_content_part_service import (
+    PaperContentPartService,
+    get_qwen_projection_text_for_part,
+    should_qwen_markdown_content_type,
+)
 from app.services.system_settings_service import (
     get_pdf_markdown_settings_safe,
     get_postprocess_settings_safe,
@@ -32,6 +36,33 @@ from app.services.qwen_client import QwenServiceClient
 from app.services.qwen_token_tools import is_qwen_auth_expired_message
 from app.tasks.async_runner import run_async
 from app.tasks.celery_app import celery_app
+
+
+def _page_markdown_heading(page_start: int | None, page_end: int | None) -> str:
+    if not page_start or not page_end:
+        return "### Страница"
+    if page_start == page_end:
+        return f"### Страница {page_start}"
+    return f"### Страницы {page_start}-{page_end}"
+
+
+def _qwen_input_text_for_part(part: Any) -> str:
+    """Return sanitized block-aware text for Qwen markdown normalization."""
+    return get_qwen_projection_text_for_part(part)
+
+
+def _fresh_markdown_input_available(previous: dict[str, Any]) -> bool:
+    """Return whether this chain produced fresh text safe for Qwen markdown.
+
+    Qwen must not read arbitrary existing ``paper_content_parts`` after a failed
+    PDF/extraction stage. Abstract-only content is enough for RU analysis, but it
+    is not a PDF markdown-normalization input.
+    """
+    if not isinstance(previous, dict):
+        return False
+    if previous.get("markdown_input_available") is True:
+        return True
+    return bool(previous.get("fresh_content_available")) and str(previous.get("text_source") or "") in {"pdf", "fallback_fulltext"}
 
 
 def _qwen_queue_rate_limit() -> str | None:
@@ -158,11 +189,11 @@ def qwen_send_message_task(
         timeout=timeout,
     )
 
-    # qwen_service returns the original prompt in the `message` field. For PDF/page
-    # processing this can be tens of thousands of characters and then Celery stores it
-    # in Redis result backend and prints part of it in `Task ... succeeded` logs. The
-    # caller only needs the generated response/thinking/session ids, so keep only a
-    # small diagnostic preview instead of the full prompt.
+
+
+
+
+
     if isinstance(result, dict):
         original_prompt = result.pop("message", None)
         if isinstance(original_prompt, str):
@@ -218,6 +249,7 @@ async def _qwen_markdown_async(
         if not paper:
             return _merge_previous(previous, status="error", error="paper_not_found")
 
+
         postprocess = await _get_postprocess_settings(db)
         qwen_settings = await _get_qwen_settings(db)
         pdf_markdown_settings = await _get_pdf_markdown_settings(db)
@@ -230,26 +262,58 @@ async def _qwen_markdown_async(
         normalize_math = bool(pdf_markdown_settings.get("normalize_math", True))
         qwen_timeout = float(qwen_settings.get("request_timeout_seconds") or settings.QWEN_QUEUE_TIMEOUT)
 
+        if not _fresh_markdown_input_available(previous):
+            text_source = str(previous.get("text_source") or "none") if isinstance(previous, dict) else "none"
+            await _set_stage(paper_service, paper_id, "markdown_skipped", task_id=task_id, error=f"no_fresh_markdown_input:{text_source}")
+            return _merge_previous(
+                previous,
+                paper_id=paper_id,
+                root_task_id=root_task_id,
+                markdown_ready=False,
+                markdown_skipped=True,
+                markdown_skip_reason=f"no_fresh_markdown_input:{text_source}",
+            )
+
         content_text = (paper.full_text or "").strip()
         parts = await part_service.list_parts(paper_id)
-        if not parts and content_text:
-            parts = await part_service.ensure_parts_from_text(paper_id, content_text, source="legacy_full_text")
+        if not previous.get("fresh_parts_created") and content_text:
+
+
+
+            if parts:
+                await part_service.clear_parts(paper_id)
+            parts = await part_service.ensure_parts_from_text(paper_id, content_text, source=str(previous.get("text_source") or "legacy_full_text"))
 
         if not parts:
-            await _set_stage(paper_service, paper_id, "markdown_skipped", task_id=task_id, error=None)
-            return _merge_previous(previous, paper_id=paper_id, root_task_id=root_task_id, markdown_ready=False)
+            await _set_stage(paper_service, paper_id, "markdown_skipped", task_id=task_id, error="no_content_parts")
+            return _merge_previous(previous, paper_id=paper_id, root_task_id=root_task_id, markdown_ready=False, markdown_skipped=True, markdown_skip_reason="no_content_parts")
 
         await _set_stage(paper_service, paper_id, "digitizing_file", task_id=task_id, error=None)
         session_id = await asyncio.to_thread(create_qwen_session_for_paper, paper_id, paper.title)
         total_parts = len(parts)
         markdown_ready_count = 0
+        markdown_failed_count = 0
+        markdown_skipped_count = 0
+        qwen_eligible_count = 0
         generated_blocks: list[str] = []
 
         for index, part in enumerate(parts, start=1):
-            raw_text = (part.raw_text or part.markdown_text or "").strip()
-            if not raw_text:
-                await part_service.set_part_failed(part, "empty_raw_text")
+
+
+
+
+            if not should_qwen_markdown_content_type(getattr(part, "content_type", "body")):
+                markdown_skipped_count += 1
+                await part_service.set_part_ready_without_markdown(part)
                 continue
+
+            raw_text = _qwen_input_text_for_part(part)
+            if not raw_text:
+                markdown_skipped_count += 1
+                await part_service.set_part_ready_without_markdown(part)
+                continue
+
+            qwen_eligible_count += 1
 
             await part_service.set_part_processing(part)
             status = f"digitizing_file:{index - 1}/{total_parts}"
@@ -314,11 +378,12 @@ async def _qwen_markdown_async(
                         markdown_ready=False,
                         markdown_error="qwen_token_expired",
                     )
+                markdown_failed_count += 1
                 await part_service.set_part_failed(part, error_text)
                 continue
 
             if markdown_text:
-                generated_blocks.append(f"### Pages {part.page_start}-{part.page_end}\n\n{markdown_text}".strip())
+                generated_blocks.append(f"{_page_markdown_heading(part.page_start, part.page_end)}\n\n{markdown_text}".strip())
                 if save_markdown_parts:
                     await part_service.set_part_markdown(
                         part,
@@ -331,6 +396,7 @@ async def _qwen_markdown_async(
                     await part_service.set_part_ready_without_markdown(part)
                 markdown_ready_count += 1
             else:
+                markdown_failed_count += 1
                 await part_service.set_part_failed(part, "qwen_markdown_empty")
 
             current_markdown = await part_service.assemble_markdown(paper_id) if save_markdown_parts else "\n\n".join(generated_blocks).strip()
@@ -360,26 +426,56 @@ async def _qwen_markdown_async(
         final_markdown = await part_service.assemble_markdown(paper_id) if save_markdown_parts else "\n\n".join(generated_blocks).strip()
         if final_markdown and markdown_ready_count > 0:
             await paper_service.update_paper(paper_id, full_text=final_markdown)
-            await _set_stage(paper_service, paper_id, "markdown_ready", task_id=task_id, error=None)
+            stage = "markdown_partial" if markdown_failed_count else "markdown_ready"
+            error = f"qwen_markdown_partial_failed_parts:{markdown_failed_count}" if markdown_failed_count else None
+            await _set_stage(paper_service, paper_id, stage, task_id=task_id, error=error)
             return _merge_previous(
                 previous,
                 paper_id=paper_id,
                 root_task_id=root_task_id,
                 session_id=session_id,
                 markdown_ready=True,
+                markdown_partial=bool(markdown_failed_count),
                 markdown_parts_ready=markdown_ready_count,
+                markdown_parts_failed=markdown_failed_count,
+                markdown_parts_skipped=markdown_skipped_count,
+                markdown_parts_eligible=qwen_eligible_count,
                 markdown_parts_total=total_parts,
             )
 
-        await _set_stage(paper_service, paper_id, "markdown_failed", task_id=task_id, error="qwen_markdown_empty")
+        if final_markdown and qwen_eligible_count == 0:
+
+
+            await paper_service.update_paper(paper_id, full_text=final_markdown)
+            await _set_stage(paper_service, paper_id, "markdown_ready_without_qwen", task_id=task_id, error=None)
+            return _merge_previous(
+                previous,
+                paper_id=paper_id,
+                root_task_id=root_task_id,
+                session_id=session_id,
+                markdown_ready=True,
+                markdown_without_qwen=True,
+                markdown_parts_ready=markdown_ready_count,
+                markdown_parts_failed=markdown_failed_count,
+                markdown_parts_skipped=markdown_skipped_count,
+                markdown_parts_eligible=qwen_eligible_count,
+                markdown_parts_total=total_parts,
+            )
+
+        error = "qwen_markdown_empty" if qwen_eligible_count else "no_qwen_eligible_parts"
+        stage = "markdown_failed" if qwen_eligible_count else "markdown_skipped"
+        await _set_stage(paper_service, paper_id, stage, task_id=task_id, error=error)
         return _merge_previous(
             previous,
             paper_id=paper_id,
             root_task_id=root_task_id,
             session_id=session_id,
             markdown_ready=False,
-            markdown_error="qwen_markdown_empty",
+            markdown_error=error,
             markdown_parts_ready=markdown_ready_count,
+            markdown_parts_failed=markdown_failed_count,
+            markdown_parts_skipped=markdown_skipped_count,
+            markdown_parts_eligible=qwen_eligible_count,
             markdown_parts_total=total_parts,
         )
 
@@ -421,6 +517,7 @@ async def _qwen_ru_analysis_async(
         paper = await paper_service.get_by_id(paper_id)
         if not paper:
             return _merge_previous(previous, status="error", error="paper_not_found")
+
 
         postprocess = await _get_postprocess_settings(db)
         qwen_settings = await _get_qwen_settings(db)
@@ -506,6 +603,7 @@ async def _qwen_keywords_async(
         paper = await paper_service.get_by_id(paper_id)
         if not paper:
             return _merge_previous(previous, status="error", error="paper_not_found")
+
 
         postprocess = await _get_postprocess_settings(db)
         qwen_settings = await _get_qwen_settings(db)
@@ -614,10 +712,40 @@ async def _regenerate_markdown_part_async(
         normalize_math = bool(pdf_markdown_settings.get("normalize_math", True))
         qwen_timeout = float(qwen_settings.get("request_timeout_seconds") or settings.QWEN_QUEUE_TIMEOUT)
 
-        raw_text = (part.raw_text or "").strip()
+        if not should_qwen_markdown_content_type(getattr(part, "content_type", "body")):
+            await part_service.set_part_ready_without_markdown(part)
+            full_text = await part_service.assemble_markdown(paper_id)
+            await paper_service.update_paper(
+                paper_id,
+                full_text=full_text,
+                processing_status="markdown_ready",
+                content_task_id=task_id,
+                processing_error=None,
+            )
+            return {
+                "status": "ok",
+                "paper_id": paper_id,
+                "part_id": part_id,
+                "page_start": part.page_start,
+                "page_end": part.page_end,
+                "markdown_text_chars": 0,
+                "regeneration_count": int(part.regeneration_count or 0),
+                "markdown_skipped": True,
+                "content_type": getattr(part, "content_type", "body"),
+            }
+
+        raw_text = _qwen_input_text_for_part(part)
         if not raw_text:
-            await part_service.set_part_failed(part, "empty_raw_text")
-            return {"status": "error", "paper_id": paper_id, "part_id": part_id, "error": "empty_raw_text"}
+            await part_service.set_part_ready_without_markdown(part)
+            full_text = await part_service.assemble_markdown(paper_id)
+            await paper_service.update_paper(
+                paper_id,
+                full_text=full_text,
+                processing_status="markdown_ready",
+                content_task_id=task_id,
+                processing_error=None,
+            )
+            return {"status": "ok", "paper_id": paper_id, "part_id": part_id, "markdown_skipped": True, "error": "empty_qwen_projection"}
 
         await part_service.set_part_processing(part)
         total_parts = len(await part_service.list_parts(paper_id)) or max(1, part.part_index)

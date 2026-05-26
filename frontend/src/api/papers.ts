@@ -57,6 +57,11 @@ type PaperContentPartApiModel = {
   status: string;
   error: string | null;
   source: string;
+  content_type?: string | null;
+  section_title?: string | null;
+  section_index?: number | null;
+  page_profile?: string | null;
+  include_in_embedding?: boolean | null;
   qwen_model: string | null;
   qwen_prompt_version: string | null;
   regeneration_count: number;
@@ -82,6 +87,11 @@ function mapPaperContentPart(apiPart: PaperContentPartApiModel): PaperContentPar
     status: apiPart.status ?? "raw_extracted",
     error: apiPart.error ?? null,
     source: apiPart.source ?? "pdf",
+    contentType: apiPart.content_type ?? null,
+    sectionTitle: apiPart.section_title ?? null,
+    sectionIndex: apiPart.section_index ?? null,
+    pageProfile: apiPart.page_profile ?? null,
+    includeInEmbedding: apiPart.include_in_embedding ?? true,
     qwenModel: apiPart.qwen_model ?? null,
     qwenPromptVersion: apiPart.qwen_prompt_version ?? null,
     regenerationCount: apiPart.regeneration_count ?? 0,
@@ -609,6 +619,15 @@ export async function getPaperContentParts(paperId: number) {
 export async function regeneratePaperContentPart(paperId: number, partId: number) {
   const { data } = await apiClient.post<PaperContentPartRegenerateResponse>(
     `/papers/id/${paperId}/content-parts/${partId}/regenerate`,
+  );
+  return data;
+}
+
+export async function regeneratePaperMarkdownPages(paperId: number, pageStart: number, pageEnd: number) {
+  const { data } = await apiClient.post<PaperContentPartRegenerateResponse>(
+    `/papers/id/${paperId}/markdown-pages/regenerate`,
+    undefined,
+    { params: { page_start: pageStart, page_end: pageEnd } },
   );
   return data;
 }

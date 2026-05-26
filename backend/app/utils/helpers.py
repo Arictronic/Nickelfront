@@ -150,7 +150,7 @@ def retry_with_delay(
                         current_delay *= backoff
 
             logger.error(f"Все {max_attempts} попыток не удались")
-            raise last_exception  # type: ignore
+            raise last_exception
 
         return wrapper
     return decorator
@@ -265,14 +265,14 @@ def sanitize_filename(filename: str) -> str:
         >>> sanitize_filename("file/name?.txt")
         'file_name_.txt'
     """
-    # Недопустимые символы в именах файлов Windows/Linux
+
     invalid_chars = '<>:"/\\|？*'
 
     sanitized = filename
     for char in invalid_chars:
         sanitized = sanitized.replace(char, "_")
 
-    # Удаляем ведущие/замыкающие точки и пробелы
+
     sanitized = sanitized.strip(". ")
 
     return sanitized or "unnamed_file"

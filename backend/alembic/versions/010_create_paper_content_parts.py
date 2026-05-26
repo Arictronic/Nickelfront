@@ -44,7 +44,7 @@ def upgrade() -> None:
     op.create_index(op.f("ix_paper_content_parts_status"), "paper_content_parts", ["status"], unique=False)
     op.create_index("ix_paper_content_parts_paper_pages", "paper_content_parts", ["paper_id", "page_start", "page_end"], unique=False)
 
-    # PostgreSQL server defaults are useful for initial migration but the app owns defaults afterwards.
+
     op.alter_column("paper_content_parts", "status", server_default=None)
     op.alter_column("paper_content_parts", "source", server_default=None)
     op.alter_column("paper_content_parts", "regeneration_count", server_default=None)
