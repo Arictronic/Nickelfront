@@ -21,6 +21,7 @@ from app.db.session import async_session_maker
 from app.services.celery_cancel import clear_cancel_flag, is_cancelled
 from app.services.paper_content_service import resolve_pdf_url
 from app.services.paper_service import PaperService
+from app.services.parse_job_history import update_parse_job
 from app.services.system_settings_service import get_parser_settings_safe, get_postprocess_settings_safe
 from app.tasks.content_tasks import process_paper_content_task
 from shared.schemas.paper import PaperCreate
@@ -71,6 +72,7 @@ EXTERNAL_SEARCH_QUERIES = {
     "eLibrary": RUSSIAN_SEARCH_QUERIES,
     "Rospatent": RUSSIAN_PATENT_SEARCH_QUERIES,
     "FreePatent": RUSSIAN_PATENT_SEARCH_QUERIES,
+    "GooglePatents": [],
     "PATENTSCOPE": DEFAULT_SEARCH_QUERIES,
 }
 
@@ -241,12 +243,82 @@ def _is_cancelled(task, task_id: str | None = None) -> bool:
     return bool(resolved_task_id and is_cancelled(resolved_task_id))
 
 
+def _parse_job_status_from_task_state(state: str) -> str:
+    if state == "SUCCESS":
+        return "completed"
+    if state == "FAILURE":
+        return "failed"
+    if state == "REVOKED":
+        return "cancelled"
+    return "in_progress"
+
+
+def _counter_from_meta(meta: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = meta.get(key)
+        if value is None:
+            continue
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _sync_parse_job_history(task_id: str, state: str, meta: dict[str, Any]) -> None:
+    now_ms = int(time.time() * 1000)
+    patch: dict[str, Any] = {
+        "status": _parse_job_status_from_task_state(state),
+        "lastPolledAt": now_ms,
+        "celeryStatus": {
+            "task_id": task_id,
+            "status": state,
+            "state": state,
+            "result": meta,
+            "progress": meta.get("progress") if isinstance(meta.get("progress"), dict) else None,
+            "query": meta.get("query"),
+            "source": meta.get("source"),
+            "current": meta.get("current"),
+            "total": meta.get("total"),
+            "saved_count": _counter_from_meta(meta, "saved_count", "total_saved"),
+            "updated_count": _counter_from_meta(meta, "updated_count", "total_updated"),
+            "duplicate_count": _counter_from_meta(meta, "duplicate_count", "total_duplicates"),
+            "embedded_count": _counter_from_meta(meta, "embedded_count"),
+            "content_queued_count": _counter_from_meta(meta, "content_queued_count", "total_content_queued"),
+            "content_skipped_count": _counter_from_meta(meta, "content_skipped_count", "total_content_skipped"),
+            "total_saved": _counter_from_meta(meta, "total_saved", "saved_count"),
+            "total_updated": _counter_from_meta(meta, "total_updated", "updated_count"),
+            "total_duplicates": _counter_from_meta(meta, "total_duplicates", "duplicate_count"),
+            "total_content_queued": _counter_from_meta(meta, "total_content_queued", "content_queued_count"),
+            "total_content_skipped": _counter_from_meta(meta, "total_content_skipped", "content_skipped_count"),
+            "errors": meta.get("errors") if isinstance(meta.get("errors"), list) else None,
+        },
+    }
+
+    counters = {
+        "savedCount": _counter_from_meta(meta, "saved_count", "total_saved"),
+        "updatedCount": _counter_from_meta(meta, "updated_count", "total_updated"),
+        "duplicateCount": _counter_from_meta(meta, "duplicate_count", "total_duplicates"),
+        "contentQueuedCount": _counter_from_meta(meta, "content_queued_count", "total_content_queued"),
+        "contentSkippedCount": _counter_from_meta(meta, "content_skipped_count", "total_content_skipped"),
+    }
+    patch.update({key: value for key, value in counters.items() if value is not None})
+    if patch["status"] != "in_progress" or any(value is not None for value in counters.values()):
+        patch["lastCountChangeAt"] = now_ms
+
+    try:
+        update_parse_job(task_id, patch)
+    except Exception as exc:
+        logger.debug("Failed to sync parse job history for task_id={}: {}", task_id, exc)
+
+
 def _safe_update_state(task, state: str, meta: dict[str, Any], task_id: str | None = None) -> None:
     resolved_task_id = _resolve_task_id(task, task_id)
     if not resolved_task_id:
         return
     try:
         task.update_state(task_id=resolved_task_id, state=state, meta=meta)
+        _sync_parse_job_history(resolved_task_id, state, meta)
     except Exception as exc:
         logger.warning(
             "Failed to update parser task state: task_id={}, state={}, error={}",
@@ -432,6 +504,13 @@ def _run_parser_alpha_sync(
         int(timeout_seconds),
         python_exec,
     )
+    child_env = os.environ.copy()
+    for key, value in {
+        "CORE_API_KEY": settings.CORE_API_KEY,
+        "OPENALEX_API_KEY": settings.OPENALEX_API_KEY,
+    }.items():
+        if value and not child_env.get(key):
+            child_env[key] = value
     if task is not None:
         _safe_update_state(
             task,
@@ -452,6 +531,7 @@ def _run_parser_alpha_sync(
         process = subprocess.Popen(
             cmd,
             cwd=str(PARSER_ALPHA_ROOT.parent),
+            env=child_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -769,6 +849,7 @@ def _run_parse_query_for_task(
     limit: int,
     source: str,
     task_id: str | None = None,
+    pdf_mode: str | None = None,
 ) -> dict:
     """Run one parser query using the current Celery task context.
 
@@ -788,13 +869,14 @@ def _run_parse_query_for_task(
             "query": query,
             "source": source,
             "limit": limit,
+            "pdf_mode": pdf_mode,
             "current": 0,
             "total": limit,
             "status": "Инициализация...",
         },
         task_id=task_id,
     )
-    return run_async(_parse_async(task, query, limit, source, task_id=task_id))
+    return run_async(_parse_async(task, query, limit, source, task_id=task_id, pdf_mode=pdf_mode))
 
 
 def _parse_queries_for_task(
@@ -804,6 +886,7 @@ def _parse_queries_for_task(
     limit_per_query: int,
     source: str,
     task_id: str | None = None,
+    pdf_mode: str | None = None,
 ) -> dict:
     """Run several queries sequentially inside one visible Celery task."""
     task_id = _resolve_task_id(task, task_id)
@@ -825,6 +908,7 @@ def _parse_queries_for_task(
                 meta={
                     "type": "multiple_queries",
                     "source": source,
+                    "pdf_mode": pdf_mode,
                     "current_query": idx + 1,
                     "total_queries": total_queries,
                     "current_query_text": query,
@@ -844,6 +928,7 @@ def _parse_queries_for_task(
                 limit=limit_per_query,
                 source=source,
                 task_id=task_id,
+                pdf_mode=pdf_mode,
             )
             results.append(result)
             total_saved += int(result.get("saved_count", 0) or 0)
@@ -865,6 +950,7 @@ def _parse_queries_for_task(
         meta={
             "type": "multiple_queries",
             "source": source,
+            "pdf_mode": pdf_mode,
             "current_query": total_queries,
             "total_queries": total_queries,
             "total_saved": total_saved,
@@ -885,6 +971,7 @@ def _parse_queries_for_task(
     return {
         "total_queries": total_queries,
         "source": source,
+        "pdf_mode": pdf_mode,
         "results": results,
         "total_saved": total_saved,
         "saved_count": total_saved,
@@ -905,9 +992,10 @@ def parse_papers_task(
     query: str,
     limit: int = 50,
     source: str = "CORE",
+    pdf_mode: str | None = None,
 ):
     try:
-        return _run_parse_query_for_task(self, query=query, limit=limit, source=source)
+        return _run_parse_query_for_task(self, query=query, limit=limit, source=source, pdf_mode=pdf_mode)
     except Exception:
         logger.exception("Ошибка парсинга task_id={} source={} query='{}'", _get_task_id(self), source, query)
         raise
@@ -923,6 +1011,7 @@ async def _parse_async(
     limit: int = 50,
     source: str = "CORE",
     task_id: str | None = None,
+    pdf_mode: str | None = None,
 ) -> dict:
     task_id = _resolve_task_id(self, task_id)
     if _is_cancelled(self, task_id):
@@ -938,6 +1027,7 @@ async def _parse_async(
     stats = {
         "query": query,
         "source": source,
+        "pdf_mode": pdf_mode,
         "found_count": 0,
         "parsed_count": 0,
         "saved_count": 0,
@@ -955,6 +1045,7 @@ async def _parse_async(
         meta={
             "query": query,
             "source": source,
+            "pdf_mode": pdf_mode,
             "current": 0,
             "total": limit,
             "status": f"Поиск статей по запросу '{query}'...",
@@ -976,6 +1067,7 @@ async def _parse_async(
         meta={
             "query": query,
             "source": source,
+            "pdf_mode": pdf_mode,
             "current": len(papers),
             "total": limit,
             "status": f"Парсинг результатов ({len(papers)} найдено)...",
@@ -1076,6 +1168,7 @@ async def _parse_async(
 
                             content_task = process_paper_content_task.apply_async(
                                 args=[saved_paper.id],
+                                kwargs={"pdf_mode": pdf_mode} if pdf_mode else {},
                                 queue=settings.CONTENT_QUEUE_NAME,
                             )
                             await paper_service.update_paper(
@@ -1110,6 +1203,7 @@ async def _parse_async(
         meta={
             "query": query,
             "source": source,
+            "pdf_mode": pdf_mode,
             "current": len(papers),
             "total": len(papers),
             "saved_count": stats["saved_count"],
@@ -1140,6 +1234,7 @@ def parse_multiple_queries_task(
     queries: list[str] = None,
     limit_per_query: int = 50,
     source: str = "CORE",
+    pdf_mode: str | None = None,
 ):
     try:
         if queries is None:
@@ -1156,6 +1251,7 @@ def parse_multiple_queries_task(
             queries=normalized_queries,
             limit_per_query=limit_per_query,
             source=source,
+            pdf_mode=pdf_mode,
         )
     finally:
         task_id = _get_task_id(self)
@@ -1170,6 +1266,7 @@ def parse_all_sources_task(
     query: str | None = None,
     queries: list[str] | None = None,
     sources: list[str] | None = None,
+    pdf_mode: str | None = None,
 ):
     try:
         task_id = _get_task_id(self)
@@ -1182,12 +1279,24 @@ def parse_all_sources_task(
         if not selected_sources:
             selected_sources = [s for s in AVAILABLE_SOURCES if _is_source_enabled_by_settings(parser_settings, s)]
         if not selected_sources:
-            raise RuntimeError("Все источники отключены в технических настройках")
+            raise RuntimeError("Нет включённых источников в технических настройках")
 
-        logger.info("Запуск парсинга по источникам: {}", selected_sources)
+        logger.info("Запущен парсинг по источникам: {}", selected_sources)
 
         total_sources = len(selected_sources)
         results_by_source: dict[str, dict] = {}
+        source_statuses: dict[str, dict[str, Any]] = {
+            src: {
+                "status": "pending",
+                "saved_count": 0,
+                "updated_count": 0,
+                "duplicate_count": 0,
+                "content_queued_count": 0,
+                "content_skipped_count": 0,
+                "error": None,
+            }
+            for src in selected_sources
+        }
         total_saved = 0
         total_content_queued = 0
         total_content_skipped = 0
@@ -1202,6 +1311,7 @@ def parse_all_sources_task(
             user_queries = [str(query).strip()]
 
         for idx, source in enumerate(selected_sources, start=1):
+            source_statuses[source]["status"] = "in_progress"
             _safe_update_state(
                 self,
                 state="STARTED",
@@ -1215,12 +1325,14 @@ def parse_all_sources_task(
                     "total_content_skipped": total_content_skipped,
                     "total_updated": total_updated,
                     "total_duplicates": total_duplicates,
+                    "sources": source_statuses,
                     "status": f"Парсинг источника {source}...",
                 },
                 task_id=task_id,
             )
 
             if _is_cancelled(self, task_id):
+                source_statuses[source]["status"] = "revoked"
                 return _mark_revoked(self, query="all_sources", source=source, current=idx - 1, total=total_sources, task_id=task_id)
 
             if user_queries:
@@ -1232,21 +1344,52 @@ def parse_all_sources_task(
             else:
                 source_queries = EXTERNAL_SEARCH_QUERIES.get(source, DEFAULT_SEARCH_QUERIES)
 
-            source_result = _parse_queries_for_task(
-                self,
-                queries=source_queries,
-                limit_per_query=limit_per_query,
-                source=source,
-                task_id=task_id,
-            )
+            try:
+                source_result = _parse_queries_for_task(
+                    self,
+                    queries=source_queries,
+                    limit_per_query=limit_per_query,
+                    source=source,
+                    task_id=task_id,
+                    pdf_mode=pdf_mode,
+                )
+            except Exception as exc:
+                logger.exception("Ошибка парсинга источника {} в parse-all", source)
+                source_result = {
+                    "status": "failed",
+                    "error": str(exc),
+                    "total_saved": 0,
+                    "total_updated": 0,
+                    "total_duplicates": 0,
+                    "total_content_queued": 0,
+                    "total_content_skipped": 0,
+                }
+
             results_by_source[source] = source_result
-            total_saved += int(source_result.get("total_saved", 0) or 0)
-            total_content_queued += int(source_result.get("total_content_queued", 0) or 0)
-            total_content_skipped += int(source_result.get("total_content_skipped", 0) or 0)
-            total_updated += int(source_result.get("total_updated", 0) or source_result.get("updated_count", 0) or 0)
-            total_duplicates += int(source_result.get("total_duplicates", 0) or source_result.get("duplicate_count", 0) or 0)
+            source_saved = int(source_result.get("total_saved", 0) or source_result.get("saved_count", 0) or 0)
+            source_updated = int(source_result.get("total_updated", 0) or source_result.get("updated_count", 0) or 0)
+            source_duplicates = int(source_result.get("total_duplicates", 0) or source_result.get("duplicate_count", 0) or 0)
+            source_queued = int(source_result.get("total_content_queued", 0) or source_result.get("content_queued_count", 0) or 0)
+            source_skipped = int(source_result.get("total_content_skipped", 0) or source_result.get("content_skipped_count", 0) or 0)
+
+            source_statuses[source] = {
+                "status": str(source_result.get("status") or "completed"),
+                "saved_count": source_saved,
+                "updated_count": source_updated,
+                "duplicate_count": source_duplicates,
+                "content_queued_count": source_queued,
+                "content_skipped_count": source_skipped,
+                "error": source_result.get("error"),
+            }
+
+            total_saved += source_saved
+            total_content_queued += source_queued
+            total_content_skipped += source_skipped
+            total_updated += source_updated
+            total_duplicates += source_duplicates
 
             if source_result.get("status") == "revoked":
+                source_statuses[source]["status"] = "revoked"
                 break
 
         _safe_update_state(
@@ -1266,6 +1409,7 @@ def parse_all_sources_task(
                 "updated_count": total_updated,
                 "total_duplicates": total_duplicates,
                 "duplicate_count": total_duplicates,
+                "sources": source_statuses,
                 "status": "Все источники обработаны",
             },
             task_id=task_id,
@@ -1277,6 +1421,7 @@ def parse_all_sources_task(
             "core": legacy_core,
             "arxiv": legacy_arxiv,
             "sources": results_by_source,
+            "sources_status": source_statuses,
             "total_saved": total_saved,
             "saved_count": total_saved,
             "total_content_queued": total_content_queued,
@@ -1292,3 +1437,4 @@ def parse_all_sources_task(
         task_id = _get_task_id(self)
         if task_id:
             clear_cancel_flag(task_id)
+

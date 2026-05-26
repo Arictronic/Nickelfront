@@ -1,393 +1,630 @@
-import { useEffect, useState, useMemo } from "react";
-import { Link } from "react-router-dom";
-import { fullTextSearch, getSearchSuggestions, getSearchStats } from "../api/papers";
-import { PAPER_SOURCES } from "../types/paper";
-import type { Paper, PaperSource } from "../types/paper";
+import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { fullTextSearch, getSearchSuggestions } from "../api/papers";
+import {
+  getProcessingProgress,
+  getProcessingStatusKey,
+  getProcessingStatusLabel,
+  PAPER_SOURCES,
+} from "../types/paper";
+import type {
+  FullTextSearchResult,
+  FullTextSearchStats,
+  PaperSource,
+} from "../types/paper";
 
 type SearchMode = "plain" | "phrase" | "websearch";
 
+const SEARCH_MODES: Array<{ value: SearchMode; label: string; description: string }> = [
+  {
+    value: "websearch",
+    label: "Расширенный",
+    description: "операторы AND / OR / NOT и фразы в кавычках",
+  },
+  {
+    value: "plain",
+    label: "Обычный",
+    description: "все слова запроса должны встречаться в индексе",
+  },
+  {
+    value: "phrase",
+    label: "Точная фраза",
+    description: "поиск выражения как цельного фрагмента через phraseto_tsquery",
+  },
+];
+
+const MODE_EXAMPLES: Record<SearchMode, string> = {
+  plain: "nickel superalloy creep",
+  phrase: "high temperature oxidation",
+  websearch: 'nickel AND superalloy "high temperature" NOT iron',
+};
+
+const MATCH_FIELD_LABELS: Record<string, string> = {
+  title: "заголовок",
+  abstract: "аннотация",
+  full_text: "полный текст",
+};
+
+function normalizeLimit(value: unknown) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 20;
+  return Math.max(1, Math.min(100, Math.floor(parsed)));
+}
+
+function normalizePage(value: unknown) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 1;
+  return Math.max(1, Math.floor(parsed));
+}
+
+function normalizeMode(value: string | null): SearchMode {
+  return value === "plain" || value === "phrase" || value === "websearch"
+    ? value
+    : "websearch";
+}
+
+function normalizeSource(value: string | null): PaperSource | "all" {
+  if (!value || value === "all") return "all";
+  return PAPER_SOURCES.includes(value as PaperSource) ? (value as PaperSource) : "all";
+}
+
+function getErrorMessage(error: unknown) {
+  const responseDetail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (typeof responseDetail === "string") return responseDetail;
+  if (error instanceof Error && error.message) return error.message;
+  return "Не удалось выполнить полнотекстовый поиск";
+}
+
+function formatDate(value: string | null | undefined) {
+  return value ? value.slice(0, 10) : "—";
+}
+
+function hasPdf(paper: FullTextSearchResult) {
+  return paper.hasPdf || Boolean(paper.pdfUrl || paper.pdfLocalPath);
+}
+
+function hasExtractedText(paper: FullTextSearchResult) {
+  return paper.hasFullText || Boolean(paper.fullText?.trim());
+}
+
+function isFullTextIndexed(paper: FullTextSearchResult) {
+  return paper.fullTextIndexed || hasExtractedText(paper);
+}
+
+function getStatusTone(status: string | null | undefined) {
+  const key = getProcessingStatusKey(status);
+  if (!key) return "unknown";
+  if (["ready", "ready_with_fallback", "completed", "embedding_ready"].includes(key)) {
+    return "success";
+  }
+  if (["failed", "markdown_failed", "pdf_download_failed", "keywords_failed", "qwen_auth_failed"].includes(key)) {
+    return "error";
+  }
+  if (["pending", "queued_for_content_processing", "pdf_pending"].includes(key)) {
+    return "pending";
+  }
+  return "processing";
+}
+
+function stripMarkTags(value: string) {
+  return value.replace(/<\/?mark>/gi, "");
+}
+
+function renderHighlightedText(value: string | null | undefined): ReactNode {
+  if (!value) return null;
+  const parts = value.split(/(<mark>.*?<\/mark>)/gis).filter(Boolean);
+  if (!parts.length) return value;
+
+  return parts.map((part, index) => {
+    const isMarked = /^<mark>.*<\/mark>$/is.test(part);
+    const text = stripMarkTags(part);
+    return isMarked ? <mark key={`${text}-${index}`}>{text}</mark> : text;
+  });
+}
+
+function getSnippetKind(paper: FullTextSearchResult) {
+  if (paper.fullTextHighlight) return "Фрагмент полного текста";
+  if (paper.abstractHighlight || paper.abstract) return "Аннотация";
+  return "Фрагмент";
+}
+
 export default function FullTextSearch() {
-  // Search state
-  const [query, setQuery] = useState("");
-  const [searchMode, setSearchMode] = useState<SearchMode>("websearch");
-  const [source, setSource] = useState<"all" | PaperSource>("all");
-  const [limit, setLimit] = useState(20);
-  
-  // Results state
-  const [results, setResults] = useState<Paper[]>([]);
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const [query, setQuery] = useState(searchParams.get("q") ?? "");
+  const [searchMode, setSearchMode] = useState<SearchMode>(normalizeMode(searchParams.get("mode")));
+  const [source, setSource] = useState<PaperSource | "all">(normalizeSource(searchParams.get("source")));
+  const [limit, setLimit] = useState(normalizeLimit(searchParams.get("limit") ?? 20));
+  const [page, setPage] = useState(normalizePage(searchParams.get("page") ?? 1));
+
+  const [results, setResults] = useState<FullTextSearchResult[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
-  
-  // Suggestions state
-  const [suggestions, setSuggestions] = useState<string[]>([]);
-  const [showSuggestions, setShowSuggestions] = useState(false);
-  
-  // Stats state
-  const [stats, setStats] = useState<{ total_matches: number; avg_relevance: number; max_relevance: number } | null>(null);
-  
-  // Error state
   const [error, setError] = useState<string | null>(null);
 
-  // Load suggestions on query change
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [stats, setStats] = useState<FullTextSearchStats | null>(null);
+
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const activeMode = SEARCH_MODES.find((mode) => mode.value === searchMode) ?? SEARCH_MODES[0];
+
   useEffect(() => {
-    if (query.length >= 2) {
-      getSearchSuggestions(query, 5)
-        .then(setSuggestions)
-        .catch(console.error);
-      setShowSuggestions(true);
-    } else {
+    const trimmed = query.trim();
+    if (trimmed.length < 2) {
       setSuggestions([]);
       setShowSuggestions(false);
+      return;
     }
+
+    let active = true;
+    const timer = window.setTimeout(() => {
+      getSearchSuggestions(trimmed, 7)
+        .then((items) => {
+          if (!active) return;
+          setSuggestions(items);
+          setShowSuggestions(items.length > 0);
+        })
+        .catch(() => {
+          if (!active) return;
+          setSuggestions([]);
+        });
+    }, 250);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
   }, [query]);
 
-  // Search function
-  const handleSearch = async (overrideQuery?: string) => {
-    const effectiveQuery = (overrideQuery ?? query).trim();
-    if (!effectiveQuery) return;
-    
+  useEffect(() => {
+    const initialQuery = searchParams.get("q")?.trim();
+    if (!initialQuery) return;
+    void runSearch({
+      nextQuery: initialQuery,
+      nextMode: normalizeMode(searchParams.get("mode")),
+      nextSource: normalizeSource(searchParams.get("source")),
+      nextLimit: normalizeLimit(searchParams.get("limit") ?? 20),
+      nextPage: normalizePage(searchParams.get("page") ?? 1),
+      syncUrl: false,
+    });
+    // Нужно выполнить автозапуск только при первом открытии страницы с URL-параметрами.
+  }, []);
+
+  const resultInsights = useMemo(() => {
+    const sources = new Set<string>();
+    let withPdf = 0;
+    let withExtractedText = 0;
+    let indexed = 0;
+    let ready = 0;
+
+    for (const paper of results) {
+      sources.add(paper.source);
+      if (hasPdf(paper)) withPdf += 1;
+      if (hasExtractedText(paper)) withExtractedText += 1;
+      if (isFullTextIndexed(paper)) indexed += 1;
+      if (["ready", "ready_with_fallback", "completed", "embedding_ready"].includes(getProcessingStatusKey(paper.processingStatus))) {
+        ready += 1;
+      }
+    }
+
+    return {
+      sources: sources.size,
+      withPdf,
+      withExtractedText,
+      indexed,
+      ready,
+    };
+  }, [results]);
+
+  async function runSearch(args?: {
+    nextQuery?: string;
+    nextMode?: SearchMode;
+    nextSource?: PaperSource | "all";
+    nextLimit?: number;
+    nextPage?: number;
+    syncUrl?: boolean;
+  }) {
+    const effectiveQuery = (args?.nextQuery ?? query).trim();
+    const effectiveMode = args?.nextMode ?? searchMode;
+    const effectiveSource = args?.nextSource ?? source;
+    const effectiveLimit = normalizeLimit(args?.nextLimit ?? limit);
+    const effectivePage = normalizePage(args?.nextPage ?? 1);
+    const offset = (effectivePage - 1) * effectiveLimit;
+
+    if (!effectiveQuery) {
+      setError("Введите поисковый запрос");
+      return;
+    }
+
     setLoading(true);
     setError(null);
     setSearched(true);
-    
-    try {
-      const { papers, total: totalCount } = await fullTextSearch({
-        query: effectiveQuery,
-        limit,
-        source: source === "all" ? undefined : source,
-        searchMode,
+    setQuery(effectiveQuery);
+    setSearchMode(effectiveMode);
+    setSource(effectiveSource);
+    setLimit(effectiveLimit);
+    setPage(effectivePage);
+    setShowSuggestions(false);
+
+    if (args?.syncUrl !== false) {
+      setSearchParams({
+        q: effectiveQuery,
+        mode: effectiveMode,
+        source: effectiveSource,
+        limit: String(effectiveLimit),
+        page: String(effectivePage),
       });
-      
-      setResults(papers);
-      setTotal(totalCount);
-      
-      // Load stats
-      const statsData = await getSearchStats(effectiveQuery);
-      setStats(statsData);
-    } catch (e: any) {
-      setError(e.message || "Ошибка поиска");
+    }
+
+    try {
+      const response = await fullTextSearch({
+        query: effectiveQuery,
+        limit: effectiveLimit,
+        offset,
+        source: effectiveSource === "all" ? undefined : effectiveSource,
+        searchMode: effectiveMode,
+      });
+      setResults(response.papers);
+      setTotal(response.total);
+      setStats(response.stats);
+    } catch (searchError) {
+      setError(getErrorMessage(searchError));
       setResults([]);
       setTotal(0);
+      setStats(null);
     } finally {
       setLoading(false);
     }
-  };
+  }
 
-  // Handle key press
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
-      handleSearch();
+  function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void runSearch({ nextPage: 1 });
     }
-  };
+  }
 
-  // Select suggestion
-  const selectSuggestion = (suggestion: string) => {
-    setQuery(suggestion);
-    setShowSuggestions(false);
-    setTimeout(() => void handleSearch(suggestion), 0);
-  };
+  function selectSuggestion(suggestion: string) {
+    void runSearch({ nextQuery: suggestion, nextPage: 1 });
+  }
 
-  // Search mode examples
-  const modeExamples = useMemo(() => ({
-    plain: "nickel superalloy (AND между словами)",
-    phrase: "high temperature (точная фраза)",
-    websearch: 'nickel AND superalloy, "high temperature", nickel NOT iron',
-  }), []);
+  function goToPage(nextPage: number) {
+    void runSearch({ nextPage: Math.max(1, Math.min(totalPages, nextPage)) });
+  }
 
   return (
     <div className="page">
       <div className="page-head">
-        <h2>Полнотекстовый поиск</h2>
+        <div>
+          <h2>Полнотекстовый поиск</h2>
+          <p className="page-subtitle">
+            Поиск по заголовкам, аннотациям, ключевым словам и извлечённому полному тексту через PostgreSQL FTS.
+          </p>
+        </div>
+        <div className="actions">
+          <Link className="btn" to="/search">
+            Векторный / гибридный поиск
+          </Link>
+          <button
+            className="btn btn-primary"
+            onClick={() => void runSearch({ nextPage: 1 })}
+            disabled={loading || !query.trim()}
+          >
+            {loading ? "Поиск..." : "Искать"}
+          </button>
+        </div>
       </div>
 
-      {/* Search Panel */}
       <div className="panel">
-        <h3 style={{ marginTop: 0 }}>Поисковый запрос</h3>
-        
-        <div style={{ position: "relative", marginBottom: 16 }}>
+        <h3>Запрос и режим</h3>
+        <div style={{ position: "relative" }}>
           <input
             className="input"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={handleKeyPress}
-            onFocus={() => query.length >= 2 && setShowSuggestions(true)}
-            onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
-            placeholder="Введите поисковый запрос..."
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={handleKeyDown}
+            onFocus={() => query.trim().length >= 2 && suggestions.length > 0 && setShowSuggestions(true)}
+            onBlur={() => window.setTimeout(() => setShowSuggestions(false), 180)}
+            placeholder="Например: nickel superalloy creep resistance"
             style={{ width: "100%", fontSize: 16, padding: "12px 16px" }}
           />
-          
-          {/* Suggestions dropdown */}
+
           {showSuggestions && suggestions.length > 0 && (
-            <div style={{
-              position: "absolute",
-              top: "100%",
-              left: 0,
-              right: 0,
-              background: "white",
-              border: "1px solid #e5e7eb",
-              borderRadius: 8,
-              boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
-              zIndex: 10,
-              marginTop: 4,
-            }}>
-              {suggestions.map((s, idx) => (
-                <div
-                  key={idx}
-                  onClick={() => selectSuggestion(s)}
+            <div
+              style={{
+                position: "absolute",
+                top: "calc(100% + 6px)",
+                left: 0,
+                right: 0,
+                zIndex: 20,
+                overflow: "hidden",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius)",
+                background: "var(--surface)",
+                boxShadow: "var(--shadow-md)",
+              }}
+            >
+              {suggestions.map((suggestion) => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => selectSuggestion(suggestion)}
                   style={{
-                    padding: "10px 16px",
+                    display: "block",
+                    width: "100%",
+                    padding: "10px 14px",
+                    border: 0,
+                    borderBottom: "1px solid var(--border)",
+                    background: "transparent",
+                    color: "var(--text)",
                     cursor: "pointer",
-                    borderBottom: idx < suggestions.length - 1 ? "1px solid #f3f4f6" : "none",
+                    textAlign: "left",
+                    fontFamily: "var(--font-body)",
                   }}
-                  onMouseEnter={(e) => e.currentTarget.style.background = "#f9fafb"}
-                  onMouseLeave={(e) => e.currentTarget.style.background = "white"}
                 >
-                  {s}
-                </div>
+                  {suggestion}
+                </button>
               ))}
             </div>
           )}
         </div>
 
-        {/* Search options */}
-        <div className="filters" style={{ marginBottom: 16 }}>
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span className="muted">Режим:</span>
-              <select 
-                value={searchMode} 
-                onChange={(e) => setSearchMode(e.target.value as SearchMode)}
-                style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #d1d5db" }}
-              >
-                <option value="websearch">Расширенный (websearch)</option>
-                <option value="plain">Обычный (plain)</option>
-                <option value="phrase">Точная фраза (phrase)</option>
-              </select>
-            </label>
-
-            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span className="muted">Источник:</span>
-              <select 
-                value={source} 
-                onChange={(e) => setSource(e.target.value as "all" | PaperSource)}
-                style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #d1d5db" }}
-              >
-                <option value="all">Все</option>
-                {PAPER_SOURCES.map((src) => (
-                  <option key={src} value={src}>
-                    {src}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span className="muted">Лимит:</span>
-              <input
-                type="number"
-                min={1}
-                max={100}
-                value={limit}
-                onChange={(e) => setLimit(Number(e.target.value))}
-                style={{ width: 70, padding: "8px 12px", borderRadius: 6, border: "1px solid #d1d5db" }}
-              />
-            </label>
-
-            <button 
-              className="btn btn-primary" 
-              onClick={() => void handleSearch()}
-              disabled={loading || !query.trim()}
+        <div className="filters" style={{ marginTop: 16 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <span className="muted">Режим</span>
+            <select
+              value={searchMode}
+              onChange={(event) => setSearchMode(event.target.value as SearchMode)}
             >
-              {loading ? "Поиск..." : "🔍 Найти"}
-            </button>
-          </div>
+              {SEARCH_MODES.map((mode) => (
+                <option key={mode.value} value={mode.value}>
+                  {mode.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <span className="muted">Источник</span>
+            <select
+              value={source}
+              onChange={(event) => setSource(event.target.value as PaperSource | "all")}
+            >
+              <option value="all">Все источники</option>
+              {PAPER_SOURCES.map((paperSource) => (
+                <option key={paperSource} value={paperSource}>
+                  {paperSource}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <span className="muted">Результатов на странице</span>
+            <input
+              className="input"
+              type="number"
+              min={1}
+              max={100}
+              value={limit}
+              onChange={(event) => setLimit(normalizeLimit(event.target.value))}
+              style={{ width: 120 }}
+            />
+          </label>
         </div>
 
-        {/* Mode examples */}
-        <div style={{ 
-          padding: 12, 
-          background: "var(--surface-2)", 
-          borderRadius: 8, 
-          fontSize: 13,
-          border: "1px solid var(--border)",
-          color: "var(--muted)",
-        }}>
-          <strong>Пример запроса ({searchMode}):</strong>{" "}
-          <code
-            style={{
-              background: "var(--bg)",
-              color: "var(--text)",
-              padding: "2px 6px",
-              borderRadius: 4,
-              border: "1px solid var(--border)",
-            }}
-          >
-            {modeExamples[searchMode]}
-          </code>
+        <div
+          style={{
+            marginTop: 16,
+            padding: 12,
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius)",
+            background: "var(--surface-2)",
+            color: "var(--muted)",
+            fontSize: 13,
+          }}
+        >
+          <strong style={{ color: "var(--text)" }}>{activeMode.label}:</strong> {activeMode.description}. Пример:{" "}
+          <code>{MODE_EXAMPLES[searchMode]}</code>
         </div>
       </div>
 
-      {/* Stats */}
-      {stats && (
-        <div className="kpi-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
+      {(searched || stats) && (
+        <div className="kpi-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))" }}>
           <article className="panel kpi-card">
-            <h3>Совпадений</h3>
-            <p className="kpi">{stats.total_matches}</p>
+            <h3>Найдено</h3>
+            <p className="kpi">{total}</p>
+          </article>
+          <article className="panel kpi-card">
+            <h3>На странице</h3>
+            <p className="kpi">{results.length}</p>
+          </article>
+          <article className="panel kpi-card">
+            <h3>PDF есть</h3>
+            <p className="kpi">{resultInsights.withPdf}</p>
+          </article>
+          <article className="panel kpi-card">
+            <h3>Текст извлечён</h3>
+            <p className="kpi">{resultInsights.withExtractedText}</p>
+          </article>
+          <article className="panel kpi-card">
+            <h3>Проиндексировано</h3>
+            <p className="kpi">{resultInsights.indexed}</p>
           </article>
           <article className="panel kpi-card">
             <h3>Средняя релевантность</h3>
-            <p className="kpi">{(stats.avg_relevance * 100).toFixed(2)}%</p>
-          </article>
-          <article className="panel kpi-card">
-            <h3>Макс. релевантность</h3>
-            <p className="kpi">{(stats.max_relevance * 100).toFixed(2)}%</p>
+            <p className="kpi">
+              {stats ? `${(stats.avg_relevance * 100).toFixed(1)}%` : "—"}
+            </p>
           </article>
         </div>
       )}
 
-      {/* Error */}
       {error && (
         <div className="panel">
-          <p className="error">{error}</p>
+          <p className="error" style={{ margin: 0 }}>{error}</p>
         </div>
       )}
 
-      {/* Results */}
-      {loading && (
-        <div className="panel">
-          <p>Поиск...</p>
+      <div className="panel">
+        <div className="page-head" style={{ alignItems: "flex-start" }}>
+          <div>
+            <h3>Результаты</h3>
+            <p className="muted" style={{ margin: 0 }}>
+              {searched
+                ? `Страница ${page} из ${totalPages}. Источников в выдаче: ${resultInsights.sources}, готовых к анализу: ${resultInsights.ready}.`
+                : "Введите запрос и нажмите «Искать»."}
+            </p>
+          </div>
+          {searched && total > limit && (
+            <div className="actions-inline">
+              <button onClick={() => goToPage(page - 1)} disabled={loading || page <= 1}>
+                Назад
+              </button>
+              <button onClick={() => goToPage(page + 1)} disabled={loading || page >= totalPages}>
+                Вперёд
+              </button>
+            </div>
+          )}
         </div>
-      )}
 
-      {!loading && searched && results.length === 0 && (
-        <div className="panel">
-          <p className="muted">Ничего не найдено по запросу «{query}»</p>
-        </div>
-      )}
+        {loading && results.length === 0 && <p className="muted">Идёт поиск...</p>}
 
-      {!loading && results.length > 0 && (
-        <div className="panel">
-          <h3 style={{ marginTop: 0 }}>
-            Результаты ({total} найдено)
-          </h3>
-          
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {results.map((paper) => (
-              <article 
-                key={paper.id}
-                style={{
-                  padding: 16,
-                  border: "1px solid #e5e7eb",
-                  borderRadius: 8,
-                  background: "white",
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                  <div style={{ flex: 1 }}>
-                    <h4 style={{ margin: "0 0 8px", color: "#1e293b" }}>
-                      <Link 
-                        to={`/papers/${paper.id}`}
-                        style={{ color: "#4a6cf7", textDecoration: "none" }}
-                      >
-                        {paper.title}
+        {!loading && searched && results.length === 0 && (
+          <p className="muted">По запросу «{query}» ничего не найдено.</p>
+        )}
+
+        {results.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 16 }}>
+            {results.map((paper) => {
+              const statusTone = getStatusTone(paper.processingStatus);
+              const progress = getProcessingProgress(paper.processingStatus);
+              const snippet = paper.fullTextHighlight || paper.abstractHighlight || paper.snippet || paper.abstract;
+              const matchedLabels = paper.matchedFields
+                .map((field) => MATCH_FIELD_LABELS[field] ?? field)
+                .join(", ");
+
+              return (
+                <article
+                  key={paper.id}
+                  className="section-card"
+                  style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 16 }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <h4 style={{ margin: "0 0 8px", fontSize: 17 }}>
+                      <Link to={`/papers/${paper.id}`} style={{ color: "var(--primary)", textDecoration: "none" }}>
+                        {renderHighlightedText(paper.titleHighlight) || paper.title || `Статья #${paper.id}`}
                       </Link>
                     </h4>
-                    
-                    {paper.authors && paper.authors.length > 0 && (
-                      <p style={{ margin: "0 0 8px", fontSize: 13, color: "#64748b" }}>
+
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                      <span className="status-pill neutral">{paper.source}</span>
+                      <span className="status-pill neutral">{formatDate(paper.publicationDate)}</span>
+                      <span className={`status-pill ${hasPdf(paper) ? "success" : "warning"}`}>
+                        {hasPdf(paper) ? "PDF есть" : "PDF нет"}
+                      </span>
+                      <span className={`status-pill ${hasExtractedText(paper) ? "success" : "warning"}`}>
+                        {hasExtractedText(paper) ? "Текст извлечён" : "Текст не извлечён"}
+                      </span>
+                      <span className={`status-pill ${isFullTextIndexed(paper) ? "success" : "warning"}`}>
+                        {isFullTextIndexed(paper) ? "Проиндексировано" : "Не проиндексировано"}
+                      </span>
+                      <span className={`status-pill ${statusTone}`}>
+                        {getProcessingStatusLabel(paper.processingStatus)}
+                      </span>
+                    </div>
+
+                    {paper.authors.length > 0 && (
+                      <p className="muted" style={{ margin: "0 0 8px" }}>
                         <strong>Авторы:</strong> {paper.authors.slice(0, 5).join(", ")}
-                        {paper.authors.length > 5 && ` и ещё ${paper.authors.length - 5}`}
+                        {paper.authors.length > 5 ? ` и ещё ${paper.authors.length - 5}` : ""}
                       </p>
                     )}
-                    
-                    <p style={{ margin: "0 0 8px", fontSize: 14, color: "#475569" }}>
-                      <strong>Журнал:</strong> {paper.journal || "—"} | 
-                      <strong> Дата:</strong> {paper.publicationDate ? paper.publicationDate.slice(0, 10) : "—"}
+
+                    <p className="muted" style={{ margin: "0 0 8px" }}>
+                      <strong>Журнал:</strong> {paper.journal || "—"} {paper.doi ? ` · DOI: ${paper.doi}` : ""}
                     </p>
-                    
-                    {paper.abstract && (
-                      <p style={{ 
-                        margin: "8px 0", 
-                        fontSize: 14, 
-                        color: "#334155",
-                        lineHeight: 1.5,
-                        display: "-webkit-box",
-                        WebkitLineClamp: 3,
-                        WebkitBoxOrient: "vertical",
-                        overflow: "hidden",
-                      }}>
-                        {paper.abstract}
+
+                    {matchedLabels && (
+                      <p className="muted" style={{ margin: "0 0 8px" }}>
+                        <strong>Совпадение:</strong> {matchedLabels}. Ранг: {(paper.rank * 100).toFixed(2)}%
                       </p>
                     )}
-                    
-                    {paper.keywords && paper.keywords.length > 0 && (
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-                        {paper.keywords.slice(0, 8).map((kw, idx) => (
-                          <span
-                            key={idx}
-                            style={{
-                              padding: "4px 8px",
-                              background: "#e0e7ff",
-                              borderRadius: 12,
-                              fontSize: 12,
-                              color: "#1e293b",
+
+                    {snippet && (
+                      <div
+                        style={{
+                          margin: "8px 0",
+                          color: "var(--text-2)",
+                          lineHeight: 1.55,
+                        }}
+                      >
+                        <div className="muted" style={{ marginBottom: 4, fontSize: 12 }}>
+                          {getSnippetKind(paper)}
+                        </div>
+                        <p style={{ margin: 0 }}>{renderHighlightedText(snippet)}</p>
+                      </div>
+                    )}
+
+                    {paper.keywords.length > 0 && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+                        {paper.keywords.slice(0, 10).map((keyword) => (
+                          <button
+                            key={keyword}
+                            type="button"
+                            className="status-pill neutral"
+                            onClick={() => {
+                              setQuery((current) => `${current.trim()} ${keyword}`.trim());
                             }}
+                            title="Добавить термин в запрос"
+                            style={{ cursor: "pointer" }}
                           >
-                            {kw}
-                          </span>
+                            {keyword}
+                          </button>
                         ))}
                       </div>
                     )}
                   </div>
-                  
-                  <div style={{ marginLeft: 16, textAlign: "right" }}>
-                    <span style={{
-                      padding: "4px 8px",
-                      background: "#e8eefc",
-                      color: "#1e3a8a",
-                      borderRadius: 4,
-                      fontSize: 12,
-                      fontWeight: 500,
-                    }}>
-                      {paper.source}
-                    </span>
-                  </div>
-                </div>
-              </article>
-            ))}
-          </div>
-        </div>
-      )}
 
-      {/* Help */}
-      <div className="panel" style={{ marginTop: 16 }}>
-        <h3 style={{ marginTop: 0 }}>📖 Справка по поиску</h3>
-        
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))", gap: 16 }}>
-          <div>
-            <h4 style={{ margin: "0 0 8px" }}>Обычный поиск (plain)</h4>
-            <p style={{ fontSize: 14, color: "#64748b", margin: 0 }}>
-              Слова соединяются оператором AND. Пример: <code>nickel superalloy</code>
-            </p>
+                  <div style={{ minWidth: 190 }}>
+                    <div className="paper-progress">
+                      <div className="paper-progress-head">
+                        <span>Обработка</span>
+                        <span>{progress}%</span>
+                      </div>
+                      <div className="paper-progress-track">
+                        <div
+                          className={`paper-progress-fill ${statusTone === "success" ? "done" : statusTone === "error" ? "failed" : ""}`}
+                          style={{ width: `${Math.max(3, progress)}%` }}
+                        />
+                      </div>
+                    </div>
+                    <Link className="action-link" to={`/papers/${paper.id}`} style={{ marginTop: 12 }}>
+                      Открыть карточку
+                    </Link>
+                  </div>
+                </article>
+              );
+            })}
           </div>
-          
-          <div>
-            <h4 style={{ margin: "0 0 8px" }}>Точная фраза (phrase)</h4>
-            <p style={{ fontSize: 14, color: "#64748b", margin: 0 }}>
-              Поиск точной фразы. Пример: <code>&quot;high temperature&quot;</code>
-            </p>
-          </div>
-          
-          <div>
-            <h4 style={{ margin: "0 0 8px" }}>Расширенный (websearch)</h4>
-            <p style={{ fontSize: 14, color: "#64748b", margin: 0 }}>
-              Поддержка операторов: <code>AND</code>, <code>OR</code>, <code>NOT</code>, кавычки для фраз
-            </p>
-            <p style={{ fontSize: 13, color: "#94a3b8", marginTop: 4 }}>
-              Пример: <code>nickel AND superalloy, &quot;high temperature&quot;, nickel NOT iron</code>
-            </p>
-          </div>
+        )}
+      </div>
+
+      <div className="panel">
+        <h3>Справка</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16 }}>
+          {SEARCH_MODES.map((mode) => (
+            <div key={mode.value}>
+              <h4 style={{ margin: "0 0 8px" }}>{mode.label}</h4>
+              <p className="muted" style={{ margin: 0 }}>{mode.description}.</p>
+              <p className="muted" style={{ margin: "6px 0 0" }}>
+                Пример: <code>{MODE_EXAMPLES[mode.value]}</code>
+              </p>
+            </div>
+          ))}
         </div>
       </div>
     </div>

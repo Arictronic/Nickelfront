@@ -10,6 +10,7 @@
 - eLibrary
 - Rospatent
 - FreePatent
+- GooglePatents
 - PATENTSCOPE
 
 Доступные модули:

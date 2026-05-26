@@ -121,6 +121,34 @@ class TestSourceRouting(unittest.TestCase):
     def test_rospatent_metadata_matches_pdf_extraction_capability(self):
         registry = build_default_source_registry()
         self.assertTrue(registry.get("Rospatent").capabilities.pdf_url)
+        self.assertTrue(registry.get("GooglePatents").capabilities.full_text)
+        self.assertEqual(registry.get("GooglePatents").source_type, "scraper")
+
+    def test_google_patents_is_only_used_as_fallback_for_publication_lookup(self):
+        registry = build_default_source_registry()
+        with tempfile.TemporaryDirectory() as td:
+            store = SourceHealthStore(Path(td) / "source_health.json")
+            keyword_route = resolve_route(
+                requested_source="PATENTSCOPE",
+                registry=registry,
+                query="nickel alloy",
+                health_store=store,
+                disable_fragile_sources=False,
+                api_only=False,
+                max_sources=4,
+            )
+            id_route = resolve_route(
+                requested_source="PATENTSCOPE",
+                registry=registry,
+                query="US10597755B2",
+                health_store=store,
+                disable_fragile_sources=False,
+                api_only=False,
+                max_sources=4,
+            )
+
+        self.assertNotIn("GooglePatents", [item.source for item in keyword_route])
+        self.assertEqual([item.source for item in id_route][:2], ["PATENTSCOPE", "GooglePatents"])
 
     def test_source_health_save_merges_sequential_writers(self):
         with tempfile.TemporaryDirectory() as td:

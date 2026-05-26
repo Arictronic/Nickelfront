@@ -92,7 +92,7 @@ export default function Analytics() {
           searchMode: "websearch",
         });
         const papers = fullTextOnly
-          ? res.papers.filter((paper) => Boolean(paper.fullText?.trim() || paper.pdfUrl || paper.pdfLocalPath))
+          ? res.papers.filter((paper) => paper.hasFullText || Boolean(paper.fullText?.trim()))
           : res.papers;
         setResults(papers.map((paper) => ({ paper, similarity: -1 })));
         setTotal(fullTextOnly ? papers.length : res.total);
@@ -177,6 +177,9 @@ export default function Analytics() {
       <div className="page-head">
         <h2>Поиск</h2>
         <div className="actions">
+          <Link className="btn" to="/fulltext-search">
+            Полнотекстовый поиск
+          </Link>
           {isAdmin && (
             <button className="btn" onClick={onRebuildIndex} disabled={loading}>
               Перестроить индекс
@@ -283,7 +286,7 @@ export default function Analytics() {
             <option value="vector">Векторный</option>
             <option value="semantic">Семантический</option>
             <option value="hybrid">Гибридный</option>
-            <option value="text">Текстовый</option>
+            <option value="text">Полнотекстовый</option>
           </select>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
@@ -291,7 +294,7 @@ export default function Analytics() {
               checked={fullTextOnly}
               onChange={(e) => setFullTextOnly(e.target.checked)}
             />
-            Статьи только с полным текстом
+            Только с полным текстом
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span>с:</span>
@@ -304,7 +307,7 @@ export default function Analytics() {
               title={
                 dateFiltersAvailable
                   ? undefined
-                  : "Для полнотекстового поиска фильтр дат пока не поддерживается backend endpoint-ом"
+                  : "Фильтр дат для полнотекстового режима доступен на отдельной странице через уточнение источника и запроса"
               }
             />
           </label>
@@ -319,7 +322,7 @@ export default function Analytics() {
               title={
                 dateFiltersAvailable
                   ? undefined
-                  : "Для полнотекстового поиска фильтр дат пока не поддерживается backend endpoint-ом"
+                  : "Фильтр дат для полнотекстового режима доступен на отдельной странице через уточнение источника и запроса"
               }
             />
           </label>
@@ -338,8 +341,10 @@ export default function Analytics() {
         </div>
         {!dateFiltersAvailable && (
           <p className="muted" style={{ marginTop: 10 }}>
-            Фильтр дат отключён для полнотекстового поиска: endpoint
-            /search/fulltext пока не принимает date_from/date_to.
+            Фильтр дат отключён для встроенного полнотекстового режима. Для расширенного поиска используйте отдельную страницу. {" "}
+            <Link className="action-link" to={`/fulltext-search?q=${encodeURIComponent(query)}`}>
+              Открыть полнотекстовый поиск
+            </Link>
           </p>
         )}
       </div>
@@ -380,7 +385,7 @@ export default function Analytics() {
               <p className="muted">Среднее сходство</p>
               <p className="kpi-status">
                 {searchType === "text"
-                  ? "нет"
+                  ? "полнотекстовый"
                   : `${(resultInsights.avgSimilarity * 100).toFixed(0)}%`}
               </p>
             </div>
@@ -421,7 +426,7 @@ export default function Analytics() {
                       }}
                     >
                       {searchType === "text"
-                        ? "FTS"
+                        ? "Полнотекстовый"
                         : `${(res.similarity * 100).toFixed(0)}%`}
                     </span>
                   </td>

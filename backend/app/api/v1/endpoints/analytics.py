@@ -2,10 +2,10 @@
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import String, and_, case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.paper import Paper as PaperModel
@@ -82,6 +82,33 @@ def _has_embedding(value: object) -> bool:
     return bool(value)
 
 
+def _text_present_expr(column):
+    return and_(column.isnot(None), func.length(func.trim(cast(column, String))) > 0)
+
+
+def _json_list_present_expr(column):
+    text_value = func.trim(cast(column, String))
+    return and_(
+        column.isnot(None),
+        func.length(text_value) > 2,
+        text_value.notin_(["[]", "{}", "null", "NULL", ""])
+    )
+
+
+def _count_if(expr):
+    return func.coalesce(func.sum(case((expr, 1), else_=0)), 0)
+
+
+def _quality_score_expr():
+    return (
+        case((_text_present_expr(PaperModel.abstract), 20), else_=0)
+        + case((_text_present_expr(PaperModel.full_text), 30), else_=0)
+        + case((_json_list_present_expr(PaperModel.keywords), 20), else_=0)
+        + case((_text_present_expr(PaperModel.doi), 15), else_=0)
+        + case((_json_list_present_expr(PaperModel.authors), 15), else_=0)
+    )
+
+
 def _normalize_metric_item(value: object) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n,;:.")
     return text[:160]
@@ -111,67 +138,33 @@ async def get_analytics_summary(
     source: str | None = Query(None, description="Фильтр по источнику"),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Получить сводную статистику.
-
-    Returns:
-        Dict с основными метриками
-    """
+    """Получить сводную статистику без вытягивания full_text в Python."""
     try:
-
-        base_query = select(PaperModel)
-        if source and source != "all":
-            base_query = base_query.where(PaperModel.source == source)
-
-
         count_query = select(func.count()).select_from(PaperModel)
         if source and source != "all":
             count_query = count_query.where(PaperModel.source == source)
 
         total_count_result = await db.execute(count_query)
-        total_count = total_count_result.scalar() or 0
+        total_count = int(total_count_result.scalar() or 0)
 
-
-        source_query = select(
-            PaperModel.source,
-            func.count().label("count")
-        ).group_by(PaperModel.source)
-
+        source_query = select(PaperModel.source, func.count().label("count")).group_by(PaperModel.source)
+        if source and source != "all":
+            source_query = source_query.where(PaperModel.source == source)
         source_result = await db.execute(source_query)
-        sources = {row.source: row.count for row in source_result}
+        sources = {row.source: int(row.count or 0) for row in source_result}
 
-
-        embedding_query = select(func.count()).where(
-            PaperModel.embedding.isnot(None)
+        score_expr = _quality_score_expr()
+        metrics_query = select(
+            _count_if(_json_list_present_expr(PaperModel.embedding)).label("with_embedding"),
+            func.coalesce(func.avg(score_expr), 0).label("avg_quality"),
         )
         if source and source != "all":
-            embedding_query = embedding_query.where(PaperModel.source == source)
+            metrics_query = metrics_query.where(PaperModel.source == source)
 
-        embedding_result = await db.execute(embedding_query)
-        with_embedding = embedding_result.scalar() or 0
-
-
-        papers_query = base_query.limit(1000)
-        papers_result = await db.execute(papers_query)
-        papers = papers_result.scalars().all()
-
-
-        quality_scores = []
-        for paper in papers:
-            score = 0
-            if _has_text(paper.abstract):
-                score += 20
-            if _has_text(paper.full_text):
-                score += 30
-            if _as_list(paper.keywords):
-                score += 20
-            if _has_text(paper.doi):
-                score += 15
-            if _as_list(paper.authors):
-                score += 15
-            quality_scores.append(min(100, score))
-
-        avg_quality = sum(quality_scores) / len(quality_scores) if quality_scores else 0
+        metrics_result = await db.execute(metrics_query)
+        metrics = metrics_result.one()
+        with_embedding = int(metrics.with_embedding or 0)
+        avg_quality = float(metrics.avg_quality or 0)
 
         return {
             "total_papers": total_count,
@@ -179,11 +172,44 @@ async def get_analytics_summary(
             "papers_with_embedding": with_embedding,
             "embedding_coverage": round((with_embedding / total_count * 100) if total_count > 0 else 0, 2),
             "avg_quality_score": round(avg_quality, 2),
-            "generated_at": datetime.now().isoformat(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
     except HTTPException:
         raise
+    except Exception as e:
+        _raise_analytics_500(e)
+
+
+@router.get("/metrics/daily-count")
+async def get_daily_papers_count(
+    source: str | None = Query(None, description="Фильтр по источнику"),
+    timezone_offset_minutes: int = Query(
+        default=0,
+        ge=-720,
+        le=840,
+        description="Смещение локального времени клиента от UTC в минутах",
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Количество статей, добавленных за текущий день в локальной таймзоне клиента."""
+    try:
+        now_utc = datetime.now(timezone.utc)
+        offset = timedelta(minutes=timezone_offset_minutes)
+        local_now = now_utc + offset
+        local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start_utc = local_start - offset
+
+        query = select(func.count()).select_from(PaperModel).where(PaperModel.created_at >= today_start_utc)
+        if source and source != "all":
+            query = query.where(PaperModel.source == source)
+        result = await db.execute(query)
+        return {
+            "total": int(result.scalar() or 0),
+            "date": local_start.date().isoformat(),
+            "timezone_offset_minutes": timezone_offset_minutes,
+            "generated_at": now_utc.isoformat(),
+        }
     except Exception as e:
         _raise_analytics_500(e)
 
@@ -265,54 +291,42 @@ async def get_publications_trend(
 @router.get("/metrics/top")
 async def get_top_items(
     item_type: str = Query(..., description="Тип: journals, authors, keywords"),
-    limit: int = Query(default=10, description="Максимум элементов"),
+    limit: int = Query(default=10, ge=1, le=100, description="Максимум элементов"),
     source: str | None = Query(None, description="Фильтр по источнику"),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Получить топ элементов.
-
-    Args:
-        item_type: journals, authors, keywords
-
-    Returns:
-        Список элементов с количеством
-    """
+    """Получить топ элементов, выбирая только нужные колонки."""
     try:
-        query = select(PaperModel)
+        if item_type == "journals":
+            query = select(PaperModel.journal)
+        elif item_type == "authors":
+            query = select(PaperModel.authors)
+        elif item_type == "keywords":
+            query = select(PaperModel.keywords)
+        else:
+            raise HTTPException(status_code=400, detail=f"Неизвестный тип: {item_type}")
 
         if source and source != "all":
             query = query.where(PaperModel.source == source)
 
-        query = query.limit(2000)
-
+        query = query.limit(5000 if item_type in {"authors", "keywords"} else 2000)
         result = await db.execute(query)
-        papers = result.scalars().all()
-
+        values = [row[0] for row in result.all()]
 
         if item_type == "journals":
-            items = [p.journal for p in papers if p.journal]
-        elif item_type == "authors":
-            items = []
-            for p in papers:
-                items.extend(_as_list(p.authors))
-        elif item_type == "keywords":
-            items = []
-            for p in papers:
-                items.extend(_as_list(p.keywords))
+            items = [value for value in values if value]
         else:
-            raise HTTPException(status_code=400, detail=f"Неизвестный тип: {item_type}")
+            items = []
+            for value in values:
+                items.extend(_as_list(value))
 
         counter, labels = _count_normalized_items(items)
-        top_items = [
-            {"name": labels[key], "count": count}
-            for key, count in counter.most_common(limit)
-        ]
+        top_items = [{"name": labels[key], "count": count} for key, count in counter.most_common(limit)]
 
         return {
             "item_type": item_type,
             "items": top_items,
-            "generated_at": datetime.now().isoformat(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
     except HTTPException:
@@ -327,19 +341,19 @@ async def get_keyword_stats(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        query = select(PaperModel)
+        query = select(PaperModel.keywords)
         if source and source != "all":
             query = query.where(PaperModel.source == source)
         query = query.limit(5000)
 
         result = await db.execute(query)
-        papers = result.scalars().all()
-        total = len(papers)
+        keyword_rows = [row[0] for row in result.all()]
+        total = len(keyword_rows)
 
         keyword_values: list[object] = []
         per_paper_counts: list[int] = []
-        for paper in papers:
-            keywords = _as_list(paper.keywords)
+        for raw_keywords in keyword_rows:
+            keywords = _as_list(raw_keywords)
             normalized = [_normalize_metric_item(item) for item in keywords]
             normalized = [item for item in normalized if item]
             keyword_values.extend(normalized)
@@ -352,10 +366,7 @@ async def get_keyword_stats(
         keywordless = total - with_keywords
 
         rare_keywords = sum(1 for count in counter.values() if count == 1)
-        top_preview = [
-            {"name": labels[key], "count": count}
-            for key, count in counter.most_common(10)
-        ]
+        top_preview = [{"name": labels[key], "count": count} for key, count in counter.most_common(10)]
 
         return {
             "total_papers": total,
@@ -369,7 +380,7 @@ async def get_keyword_stats(
             "avg_keywords_per_paper": round(sum(per_paper_counts) / total, 2) if total else 0,
             "max_keywords_per_paper": max(per_paper_counts) if per_paper_counts else 0,
             "top_preview": top_preview,
-            "generated_at": datetime.now().isoformat(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as e:
         _raise_analytics_500(e)
@@ -424,24 +435,41 @@ async def get_quality_report(
     source: str | None = Query(None, description="Фильтр по источнику"),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Получить отчёт о качестве данных.
-
-    Returns:
-        Dict с метриками качества
-    """
+    """Получить отчёт о качестве данных через SQL-агрегации без загрузки full_text."""
     try:
-        query = select(PaperModel)
+        score_expr = _quality_score_expr()
+        abstract_len_expr = case(
+            (_text_present_expr(PaperModel.abstract), func.length(cast(PaperModel.abstract, String))),
+            else_=None,
+        )
+        keyword_count_expr = case(
+            (_json_list_present_expr(PaperModel.keywords), 1),
+            else_=0,
+        )
+
+        query = select(
+            func.count().label("total"),
+            _count_if(_text_present_expr(PaperModel.abstract)).label("with_abstract"),
+            _count_if(_text_present_expr(PaperModel.full_text)).label("with_full_text"),
+            _count_if(_json_list_present_expr(PaperModel.keywords)).label("with_keywords"),
+            _count_if(_text_present_expr(PaperModel.doi)).label("with_doi"),
+            _count_if(_json_list_present_expr(PaperModel.authors)).label("with_authors"),
+            _count_if(_json_list_present_expr(PaperModel.embedding)).label("with_embedding"),
+            func.coalesce(func.avg(abstract_len_expr), 0).label("avg_abstract_length"),
+            func.coalesce(func.avg(keyword_count_expr), 0).label("avg_keywords_count"),
+            func.coalesce(func.avg(score_expr), 0).label("avg_quality"),
+            func.coalesce(func.min(score_expr), 0).label("min_quality"),
+            func.coalesce(func.max(score_expr), 0).label("max_quality"),
+        )
 
         if source and source != "all":
             query = query.where(PaperModel.source == source)
 
-        query = query.limit(2000)
-
         result = await db.execute(query)
-        papers = result.scalars().all()
+        row = result.one()
+        total = int(row.total or 0)
 
-        if not papers:
+        if not total:
             empty_completeness = {
                 "with_abstract": {"count": 0, "percent": 0},
                 "with_full_text": {"count": 0, "percent": 0},
@@ -453,70 +481,35 @@ async def get_quality_report(
             return {
                 "total": 0,
                 "completeness": empty_completeness,
-                "averages": {
-                    "avg_abstract_length": 0,
-                    "avg_keywords_count": 0,
-                },
-                "quality_score": {
-                    "avg": 0,
-                    "min": 0,
-                    "max": 0,
-                },
-                "generated_at": datetime.now().isoformat(),
+                "averages": {"avg_abstract_length": 0, "avg_keywords_count": 0},
+                "quality_score": {"avg": 0, "min": 0, "max": 0},
+                "generated_at": datetime.now(timezone.utc).isoformat(),
             }
 
-
-        total = len(papers)
-
-        with_abstract = sum(1 for p in papers if _has_text(p.abstract))
-        with_full_text = sum(1 for p in papers if _has_text(p.full_text))
-        with_keywords = sum(1 for p in papers if _as_list(p.keywords))
-        with_doi = sum(1 for p in papers if _has_text(p.doi))
-        with_authors = sum(1 for p in papers if _as_list(p.authors))
-        with_embedding = sum(1 for p in papers if _has_embedding(p.embedding))
-
-
-        avg_abstract_len = sum(_text_len(p.abstract) for p in papers if _has_text(p.abstract)) / max(1, with_abstract)
-        avg_keywords = sum(len(_as_list(p.keywords)) for p in papers if _as_list(p.keywords)) / max(1, with_keywords)
-
-
-        quality_scores = []
-        for paper in papers:
-            score = 0
-            if _has_text(paper.abstract):
-                score += 20
-            if _has_text(paper.full_text):
-                score += 30
-            if _as_list(paper.keywords):
-                score += 20
-            if _has_text(paper.doi):
-                score += 15
-            if _as_list(paper.authors):
-                score += 15
-            quality_scores.append(min(100, score))
-
-        avg_quality = sum(quality_scores) / len(quality_scores) if quality_scores else 0
+        def metric(count: object) -> dict[str, float | int]:
+            value = int(count or 0)
+            return {"count": value, "percent": round(value / total * 100, 2)}
 
         return {
             "total": total,
             "completeness": {
-                "with_abstract": {"count": with_abstract, "percent": round(with_abstract / total * 100, 2)},
-                "with_full_text": {"count": with_full_text, "percent": round(with_full_text / total * 100, 2)},
-                "with_keywords": {"count": with_keywords, "percent": round(with_keywords / total * 100, 2)},
-                "with_doi": {"count": with_doi, "percent": round(with_doi / total * 100, 2)},
-                "with_authors": {"count": with_authors, "percent": round(with_authors / total * 100, 2)},
-                "with_embedding": {"count": with_embedding, "percent": round(with_embedding / total * 100, 2)},
+                "with_abstract": metric(row.with_abstract),
+                "with_full_text": metric(row.with_full_text),
+                "with_keywords": metric(row.with_keywords),
+                "with_doi": metric(row.with_doi),
+                "with_authors": metric(row.with_authors),
+                "with_embedding": metric(row.with_embedding),
             },
             "averages": {
-                "avg_abstract_length": round(avg_abstract_len, 2),
-                "avg_keywords_count": round(avg_keywords, 2),
+                "avg_abstract_length": round(float(row.avg_abstract_length or 0), 2),
+                "avg_keywords_count": round(float(row.avg_keywords_count or 0), 2),
             },
             "quality_score": {
-                "avg": round(avg_quality, 2),
-                "min": min(quality_scores) if quality_scores else 0,
-                "max": max(quality_scores) if quality_scores else 100,
+                "avg": round(float(row.avg_quality or 0), 2),
+                "min": int(row.min_quality or 0),
+                "max": int(row.max_quality or 0),
             },
-            "generated_at": datetime.now().isoformat(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
     except Exception as e:

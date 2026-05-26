@@ -24,6 +24,7 @@ PARSER_SOURCES = [
     "eLibrary",
     "Rospatent",
     "FreePatent",
+    "GooglePatents",
     "PATENTSCOPE",
 ]
 

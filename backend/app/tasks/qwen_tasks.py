@@ -8,6 +8,7 @@ or use the article-stage tasks below: markdown, RU analysis, keywords.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -203,6 +204,210 @@ def qwen_send_message_task(
     result.setdefault("task_id", task_id)
     result.setdefault("purpose", purpose)
     return result
+
+
+
+def _count_pdf_pages_for_ai_ocr(pdf_bytes: bytes) -> int:
+    try:
+        import fitz
+    except Exception:
+        return 0
+    doc = None
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        return int(len(doc))
+    except Exception:
+        return 0
+    finally:
+        try:
+            if doc is not None:
+                doc.close()
+        except Exception:
+            pass
+
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.qwen.ai_ocr_document",
+    rate_limit=_qwen_queue_rate_limit(),
+    acks_late=True,
+    soft_time_limit=3300,
+    time_limit=3600,
+)
+def qwen_ai_ocr_document_task(
+    self,
+    pdf_path: str,
+    options: dict[str, Any] | None = None,
+    timeout: float = 3600.0,
+    purpose: str = "ai-page-ocr-document",
+) -> dict[str, Any]:
+    """Run AI page OCR for one PDF in the Qwen worker queue.
+
+    One task processes the whole document so a single Qwen chat session can be
+    reused: first the instruction prompt, then page image + short OCR command for
+    every page. The returned payload is plain page text wrapped by backend code.
+    """
+    task_id = _task_id(self)
+    path = Path(str(pdf_path or ""))
+    opts = dict(options or {})
+    logger.info(
+        "Qwen AI OCR document task started: task_id={}, pdf_path={}, purpose={}",
+        task_id,
+        path,
+        purpose,
+    )
+
+    if not path.exists() or not path.is_file():
+        return {
+            "status": "error",
+            "error": "pdf_file_not_found",
+            "pdf_path": str(path),
+            "pages": [],
+            "task_id": task_id,
+            "purpose": purpose,
+        }
+
+    try:
+        pdf_bytes = path.read_bytes()
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": f"pdf_read_failed:{type(exc).__name__}:{exc}",
+            "pdf_path": str(path),
+            "pages": [],
+            "task_id": task_id,
+            "purpose": purpose,
+        }
+
+    try:
+        from app.services.pdf_parser.ai import AIPageRecognitionService
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": f"ai_service_import_failed:{type(exc).__name__}:{exc}",
+            "pdf_path": str(path),
+            "pages": [],
+            "task_id": task_id,
+            "purpose": purpose,
+        }
+
+    page_count = _count_pdf_pages_for_ai_ocr(pdf_bytes)
+    if page_count <= 0:
+        return {
+            "status": "error",
+            "error": "pdf_page_count_unavailable",
+            "pdf_path": str(path),
+            "pages": [],
+            "task_id": task_id,
+            "purpose": purpose,
+        }
+
+    opts.update(
+        {
+            "parser_mode": "ai",
+            "force_strategy": "ai",
+            "extraction_strategy": "ai",
+            "selected_strategy": "ai",
+            "ai_mode": "force",
+            "ai_enabled": True,
+            "ai_provider": str(opts.get("ai_provider") or "qwen"),
+            "ai_timeout_sec": int(float(timeout or opts.get("ai_timeout_sec") or 120)),
+        }
+    )
+
+    service = AIPageRecognitionService()
+    service.reset_document_session()
+    pages: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    used_count = 0
+    failed_count = 0
+
+    for page_number in range(1, page_count + 1):
+        try:
+            result = service.recognize_page(
+                file_bytes=pdf_bytes,
+                page_number=page_number,
+                opts=opts,
+            )
+        except Exception as exc:
+            logger.exception("Qwen AI OCR page failed: task_id={}, page={}", task_id, page_number)
+            text = ""
+            metadata = {
+                "parser_mode": "ai",
+                "selected_strategy": "ai",
+                "force_strategy": "ai",
+                "ai_mode": "force",
+                "ai_enabled": True,
+                "ai_used": False,
+                "ai_status": "provider_error",
+                "ai_reason": f"ai_page_exception:{type(exc).__name__}",
+                "ai_error": str(exc),
+                "ai_external_call_performed": False,
+            }
+            failed_count += 1
+        else:
+            text = str(result.text or "")
+            metadata = dict(result.metadata or {})
+            metadata.update(
+                {
+                    "parser_mode": "ai",
+                    "selected_strategy": "ai",
+                    "force_strategy": "ai",
+                    "extraction_strategy": "ai",
+                    "ai_mode": "force",
+                    "ai_enabled": True,
+                    "ai_used": bool(text.strip()),
+                    "ai_status": result.status,
+                    "ai_reason": result.reason,
+                    "ai_confidence": float(result.confidence or 0.0),
+                    "ai_warnings": list(result.warnings or []),
+                }
+            )
+            if text.strip():
+                used_count += 1
+            else:
+                failed_count += 1
+            warnings.extend(str(item) for item in (result.warnings or []) if item)
+
+        pages.append(
+            {
+                "page_number": page_number,
+                "text": text,
+                "source": "ai",
+                "method": "ai_page_image",
+                "content_type": "body",
+                "metadata": metadata,
+            }
+        )
+        try:
+            self.update_state(
+                task_id=task_id,
+                state="PROGRESS",
+                meta={
+                    "stage": "ai_ocr_document",
+                    "page": page_number,
+                    "page_count": page_count,
+                    "ai_used_page_count": used_count,
+                    "ai_failed_page_count": failed_count,
+                },
+            )
+        except Exception:
+            pass
+
+    full_text = "\n\n".join(str(page.get("text") or "") for page in pages if str(page.get("text") or "").strip()).strip()
+    return {
+        "status": "ok" if full_text else "empty",
+        "pdf_path": str(path),
+        "page_count": page_count,
+        "pages": pages,
+        "text_chars": len(full_text),
+        "ai_used_page_count": used_count,
+        "ai_failed_page_count": failed_count,
+        "ai_session_id": service.session_id or "",
+        "warnings": sorted(set(warnings)),
+        "task_id": task_id,
+        "purpose": purpose,
+    }
 
 
 @celery_app.task(

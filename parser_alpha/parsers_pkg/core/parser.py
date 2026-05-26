@@ -51,6 +51,10 @@ def _is_probable_pdf_url(value: str | None) -> bool:
     return lowered.endswith(".pdf") or "/download/" in lowered or "download=pdf" in lowered or "format=pdf" in lowered
 
 
+def _is_http_url(value: str | None) -> bool:
+    return bool(value and value.lower().startswith(("http://", "https://")))
+
+
 class COREParser(BaseParser):
     """Parser for CORE papers."""
 
@@ -108,14 +112,17 @@ class COREParser(BaseParser):
                 journal = _first_text(data.get("publisher"))
 
             pdf_url = _first_text(data.get("downloadUrl"))
+            full_text_value = _first_text(data.get("fullText"))
+            full_text = None if _is_http_url(full_text_value) else full_text_value
 
             url = _first_text(data.get("source_fulltext_url"))
             source_urls = _coerce_text_list(data.get("sourceFulltextUrls"))
             if source_urls:
-
-
-                pdf_url = pdf_url or source_urls[0]
-                url = url or source_urls[0]
+                for source_url in source_urls:
+                    if _is_probable_pdf_url(source_url):
+                        pdf_url = pdf_url or source_url
+                    else:
+                        url = url or source_url
 
             links = _coerce_dict_list(data.get("links"))
             for link in links:
@@ -137,7 +144,7 @@ class COREParser(BaseParser):
                 journal=journal,
                 doi=_first_text(data.get("doi")),
                 abstract=_first_text(data.get("abstract")),
-                full_text=None,
+                full_text=full_text,
                 keywords=keywords,
                 source=self.source,
                 source_id=_first_text(data.get("id")),

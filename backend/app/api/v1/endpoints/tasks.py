@@ -1,4 +1,5 @@
 import asyncio
+import time
 from celery.result import AsyncResult
 from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel, Field
@@ -7,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, require_admin_user
 from app.db.session import get_db
 from app.services.celery_cancel import clear_cancel_flag, set_cancel_flag
-from app.services.parse_job_history import list_parse_jobs, remove_parse_job
+from app.services.parse_job_history import list_parse_jobs, remove_parse_job, update_parse_job
 from app.services.alloy_analysis_service import (
     build_alloy_analysis_prompt,
     get_alloy_analysis_prompt,
@@ -95,6 +96,90 @@ def _inspect_revoke_candidates() -> list[str]:
     return sorted(task_ids)
 
 
+def _result_payload_from_task_info(task_info: dict | None) -> dict | None:
+    if not isinstance(task_info, dict):
+        return None
+    result = task_info.get("result")
+    if not isinstance(result, dict) and isinstance(task_info.get("info"), dict):
+        result = task_info.get("info")
+    return result if isinstance(result, dict) else None
+
+
+def _parse_job_status_from_celery(celery_status: str | None) -> str:
+    if celery_status == "SUCCESS":
+        return "completed"
+    if celery_status == "FAILURE":
+        return "failed"
+    if celery_status == "REVOKED":
+        return "cancelled"
+    return "in_progress"
+
+
+def _build_parse_job_patch(task_id: str, task_info: dict | None) -> dict:
+    result = _result_payload_from_task_info(task_info)
+    celery_status = str((task_info or {}).get("status") or "UNKNOWN")
+    now_ms = int(time.time() * 1000)
+
+    patch = {
+        "status": _parse_job_status_from_celery(celery_status),
+        "lastPolledAt": now_ms,
+        "celeryStatus": {
+            "task_id": task_id,
+            "status": celery_status,
+            "state": (task_info or {}).get("state"),
+            "result": result,
+            "progress": result.get("progress") if isinstance(result, dict) else None,
+            "query": result.get("query") if isinstance(result, dict) else None,
+            "source": result.get("source") if isinstance(result, dict) else None,
+            "current": result.get("current") if isinstance(result, dict) else None,
+            "total": result.get("total") if isinstance(result, dict) else None,
+            "saved_count": _get_result_value(result, "saved_count", "total_saved"),
+            "updated_count": _get_result_value(result, "updated_count", "total_updated"),
+            "duplicate_count": _get_result_value(result, "duplicate_count", "total_duplicates"),
+            "embedded_count": _get_result_value(result, "embedded_count"),
+            "content_queued_count": _get_result_value(result, "content_queued_count", "total_content_queued"),
+            "content_skipped_count": _get_result_value(result, "content_skipped_count", "total_content_skipped"),
+            "total_saved": _get_result_value(result, "total_saved", "saved_count"),
+            "total_updated": _get_result_value(result, "total_updated", "updated_count"),
+            "total_duplicates": _get_result_value(result, "total_duplicates", "duplicate_count"),
+            "total_content_queued": _get_result_value(result, "total_content_queued", "content_queued_count"),
+            "total_content_skipped": _get_result_value(result, "total_content_skipped", "content_skipped_count"),
+            "errors": result.get("errors") if isinstance(result, dict) else None,
+            "name": (task_info or {}).get("name"),
+            "args": (task_info or {}).get("args"),
+            "kwargs": (task_info or {}).get("kwargs"),
+        },
+    }
+
+    saved_count = _get_result_value(result, "saved_count", "total_saved")
+    updated_count = _get_result_value(result, "updated_count", "total_updated")
+    duplicate_count = _get_result_value(result, "duplicate_count", "total_duplicates")
+    content_queued_count = _get_result_value(result, "content_queued_count", "total_content_queued")
+    content_skipped_count = _get_result_value(result, "content_skipped_count", "total_content_skipped")
+
+    if saved_count is not None:
+        patch["savedCount"] = saved_count
+    if updated_count is not None:
+        patch["updatedCount"] = updated_count
+    if duplicate_count is not None:
+        patch["duplicateCount"] = duplicate_count
+    if content_queued_count is not None:
+        patch["contentQueuedCount"] = content_queued_count
+    if content_skipped_count is not None:
+        patch["contentSkippedCount"] = content_skipped_count
+    if patch["status"] != "in_progress" or any(key in patch for key in ("savedCount", "updatedCount", "duplicateCount", "contentQueuedCount")):
+        patch["lastCountChangeAt"] = now_ms
+
+    return patch
+
+
+async def _sync_parse_job_from_celery(task_id: str, task_info: dict | None) -> dict | None:
+    if task_info is None:
+        return None
+    patch = _build_parse_job_patch(task_id, task_info)
+    return await asyncio.to_thread(update_parse_job, task_id, patch)
+
+
 
 @router.post("/", response_model=TaskOut)
 async def create_patent_task(
@@ -115,7 +200,21 @@ async def get_shared_parse_jobs(
     limit: int = 50,
     _current_user: UserResponse = Depends(get_current_user),
 ):
-    return {"jobs": await asyncio.to_thread(list_parse_jobs, limit)}
+    jobs = await asyncio.to_thread(list_parse_jobs, limit)
+    get_celery_task_status = _get_celery_task_status_func()
+
+    synced_jobs = []
+    for job in jobs:
+        task_id = str(job.get("jobId") or "")
+        if not task_id or job.get("status") != "in_progress":
+            synced_jobs.append(job)
+            continue
+
+        task_info = await asyncio.to_thread(get_celery_task_status, task_id)
+        synced = await _sync_parse_job_from_celery(task_id, task_info)
+        synced_jobs.append(synced or job)
+
+    return {"jobs": synced_jobs[:limit]}
 
 
 @router.delete("/parse-jobs/{job_id}")
@@ -158,9 +257,8 @@ async def get_celery_task_status_endpoint(
         raise HTTPException(status_code=404, detail="Задача Celery не найдена")
 
 
-    result = task_info.get("result")
-    if not isinstance(result, dict) and isinstance(task_info.get("info"), dict):
-        result = task_info.get("info")
+    result = _result_payload_from_task_info(task_info)
+    await _sync_parse_job_from_celery(task_id, task_info)
 
     response = CeleryTaskStatus(
         task_id=task_id,
@@ -276,6 +374,11 @@ async def stop_celery_queues(
 
         for task_id in task_ids:
             await asyncio.to_thread(set_cancel_flag, task_id)
+            await asyncio.to_thread(
+                update_parse_job,
+                task_id,
+                {"status": "cancelled", "lastPolledAt": int(time.time() * 1000), "lastCountChangeAt": int(time.time() * 1000)},
+            )
             celery_app = _get_celery_app()
             await asyncio.to_thread(celery_app.control.revoke, task_id, terminate=terminate)
 
@@ -317,6 +420,17 @@ async def revoke_celery_task(
         }
 
     await asyncio.to_thread(set_cancel_flag, task_id)
+    now_ms = int(time.time() * 1000)
+    await asyncio.to_thread(
+        update_parse_job,
+        task_id,
+        {
+            "status": "cancelled",
+            "lastPolledAt": now_ms,
+            "lastCountChangeAt": now_ms,
+            "celeryStatus": {"task_id": task_id, "status": "REVOKED", "state": "REVOKED"},
+        },
+    )
     await asyncio.to_thread(celery_app.control.revoke, task_id, terminate=terminate)
 
     return {

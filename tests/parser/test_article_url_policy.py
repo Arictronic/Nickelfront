@@ -21,6 +21,10 @@ class TestArticleUrlPolicy(unittest.TestCase):
             derive_article_url(source="CORE", url=None, doi=None, source_id="123456"),
             "https://core.ac.uk/works/123456",
         )
+        self.assertEqual(
+            derive_article_url(source="GooglePatents", url=None, doi=None, source_id="US10597755B2"),
+            "https://patents.google.com/patent/US10597755B2/en",
+        )
 
     def test_unknown_source_without_url_or_doi(self):
         self.assertIsNone(

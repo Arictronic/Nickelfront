@@ -44,6 +44,7 @@ class ArxivClient(BaseAPIClient):
     """Client for arXiv API."""
 
     BASE_URL = "https://export.arxiv.org/api/query"
+    USER_AGENT = "Nickelfront-parser/1.0 (arXiv metadata and document discovery)"
     RATE_LIMIT_DELAY = 3.0
     MAX_RETRIES = 4
     RETRY_BACKOFF_BASE = 2.0
@@ -97,7 +98,11 @@ class ArxivClient(BaseAPIClient):
 
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
-                response = await client.get(self.BASE_URL, params=params)
+                response = await client.get(
+                    self.BASE_URL,
+                    params=params,
+                    headers={"User-Agent": self.USER_AGENT},
+                )
                 status_code = _response_status_code(response)
                 if status_code is not None and status_code >= 400:
                     decision = decide_for_status(

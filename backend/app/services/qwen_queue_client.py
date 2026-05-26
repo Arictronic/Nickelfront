@@ -101,3 +101,76 @@ def send_qwen_message_via_queue(
     result.setdefault("purpose", purpose)
     result.setdefault("queued", True)
     return result
+
+
+def run_ai_ocr_document_via_queue(
+    *,
+    pdf_path: str,
+    options: dict[str, Any] | None = None,
+    timeout: float = 3600.0,
+    purpose: str = "ai-page-ocr-document",
+) -> dict[str, Any]:
+    """Run document-level AI OCR in the controlled Qwen queue and wait for result.
+
+    One Celery task processes the whole PDF so the Qwen worker can keep one
+    provider chat session for the document. The caller passes a file path, not
+    PDF bytes, to avoid storing large payloads in Redis.
+    """
+    client = _make_celery_client()
+    wait_timeout = max(float(timeout), float(settings.QWEN_QUEUE_TIMEOUT))
+    task: AsyncResult = client.send_task(
+        "app.tasks.qwen.ai_ocr_document",
+        kwargs={
+            "pdf_path": pdf_path,
+            "options": options or {},
+            "timeout": timeout,
+            "purpose": purpose,
+        },
+        queue=settings.QWEN_QUEUE_NAME,
+    )
+    logger.info(
+        "AI OCR document queued: task_id={}, queue={}, pdf_path={}",
+        task.id,
+        settings.QWEN_QUEUE_NAME,
+        pdf_path,
+    )
+
+    try:
+        result = task.get(timeout=wait_timeout, propagate=True, disable_sync_subtasks=False)
+    except CeleryTimeoutError as exc:
+        try:
+            task.revoke(terminate=False)
+        except Exception:
+            logger.debug("Failed to revoke timed-out AI OCR task {}", task.id, exc_info=True)
+        logger.exception("AI OCR queued task timed out: task_id={}, wait_timeout={}", task.id, wait_timeout)
+        return {
+            "status": "error",
+            "error": f"AI OCR queued task timed out after {wait_timeout}s",
+            "pages": [],
+            "task_id": task.id,
+            "purpose": purpose,
+            "timeout": wait_timeout,
+        }
+    except Exception as exc:
+        logger.exception("AI OCR queued task failed: task_id={}", task.id)
+        return {
+            "status": "error",
+            "error": f"AI OCR queued task failed: {exc}",
+            "pages": [],
+            "task_id": task.id,
+            "purpose": purpose,
+        }
+
+    if not isinstance(result, dict):
+        return {
+            "status": "error",
+            "error": "AI OCR queued task returned invalid payload",
+            "pages": [],
+            "task_id": task.id,
+            "purpose": purpose,
+        }
+    result.setdefault("task_id", task.id)
+    result.setdefault("purpose", purpose)
+    result.setdefault("queued", True)
+    return result
+

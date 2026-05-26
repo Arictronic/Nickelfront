@@ -93,6 +93,8 @@ DEFAULT_PARSER_OPTIONS: dict[str, Any] = {
     "ai_page_image_format": "png",
     "ai_timeout_sec": 120,
     "ai_preserve_original_text": True,
+    "ai_fallback_to_auto": True,
+    "ai_delete_temp_images": True,
     "min_text_chars": 300,
     "max_page_chars": 60000,
     "table_settings": {},
@@ -177,6 +179,8 @@ ENV_OPTION_NAMES: dict[str, str] = {
     "AI_PAGE_IMAGE_FORMAT": "ai_page_image_format",
     "AI_TIMEOUT_SEC": "ai_timeout_sec",
     "AI_PRESERVE_ORIGINAL_TEXT": "ai_preserve_original_text",
+    "AI_FALLBACK_TO_AUTO": "ai_fallback_to_auto",
+    "AI_DELETE_TEMP_IMAGES": "ai_delete_temp_images",
     "MIN_TEXT_CHARS": "min_text_chars",
     "MAX_PAGE_CHARS": "max_page_chars",
 }
@@ -214,6 +218,8 @@ BOOL_OPTIONS = {
     "ocr_preserve_original_text",
     "ai_enabled",
     "ai_preserve_original_text",
+    "ai_fallback_to_auto",
+    "ai_delete_temp_images",
 }
 
 INT_OPTIONS = {

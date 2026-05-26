@@ -3,6 +3,7 @@
 import asyncio
 import time
 from pathlib import Path
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -24,6 +25,7 @@ from app.services.paper_content_part_service import PaperContentPartService
 from shared.schemas.auth import UserResponse
 from shared.schemas.paper import (
     Paper,
+    PaperListItem,
     PaperContentPart,
     PaperContentPartRegenerateResponse,
     PaperSearchRequest,
@@ -227,6 +229,21 @@ async def get_papers(
         raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
 
 
+@router.get("/recent", response_model=list[PaperListItem])
+async def get_recent_papers(
+    limit: int = Query(default=20, ge=1, le=100),
+    source: str | None = Query(None, description="Фильтр по источнику"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Лёгкий список последних статей для dashboard без full_text."""
+    paper_service = PaperService(db)
+    try:
+        return await paper_service.get_recent_lightweight(limit=limit, source=source)
+    except Exception as exc:
+        logger.exception("Failed to load recent papers")
+        raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
+
+
 @router.get("/count")
 async def get_papers_count(
     source: str | None = Query(None),
@@ -265,6 +282,7 @@ async def start_parsing(
     query: str = Query(..., description="Поисковый запрос"),
     limit: int | None = Query(default=None, ge=1, le=5000, description="Макс. количество результатов"),
     source: str = Query(default="CORE", description="Источник"),
+    pdf_mode: Literal["auto", "ai"] = Query(default="auto", description="Режим обработки PDF: auto или ai"),
     _current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -294,6 +312,7 @@ async def start_parsing(
         query=normalized_query,
         limit=effective_limit,
         source=source,
+        pdf_mode=pdf_mode,
     )
     initial_count = await _count_papers_for_source(db, source)
     _record_parse_job(
@@ -310,6 +329,7 @@ async def start_parsing(
         "source": source,
         "query": normalized_query,
         "limit": effective_limit,
+        "pdf_mode": pdf_mode,
     }
 
 
@@ -318,6 +338,7 @@ async def start_parsing_all(
     limit_per_query: int | None = Query(default=None, ge=1, le=5000),
     source: str = Query(default="all", description="Источник (или all)"),
     query: str = Query(..., description="Пользовательский запрос для всех источников"),
+    pdf_mode: Literal["auto", "ai"] = Query(default="auto", description="Режим обработки PDF: auto или ai"),
     _current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -354,6 +375,7 @@ async def start_parsing_all(
             queries=user_queries,
             query=normalized_query or None,
             sources=enabled_sources,
+            pdf_mode=pdf_mode,
         )
         source_list = enabled_sources
     elif source == "arXiv":
@@ -361,6 +383,7 @@ async def start_parsing_all(
             queries=user_queries or parse_tasks.ARXIV_SEARCH_QUERIES,
             limit_per_query=_effective_parse_limit(limit_per_query, parser_settings, "arXiv"),
             source="arXiv",
+            pdf_mode=pdf_mode,
         )
         source_list = ["arXiv"]
     elif source == "CORE":
@@ -368,6 +391,7 @@ async def start_parsing_all(
             queries=user_queries or parse_tasks.DEFAULT_SEARCH_QUERIES,
             limit_per_query=_effective_parse_limit(limit_per_query, parser_settings, "CORE"),
             source="CORE",
+            pdf_mode=pdf_mode,
         )
         source_list = ["CORE"]
     else:
@@ -375,6 +399,7 @@ async def start_parsing_all(
             queries=user_queries or parse_tasks.DEFAULT_SEARCH_QUERIES,
             limit_per_query=_effective_parse_limit(limit_per_query, parser_settings, source),
             source=source,
+            pdf_mode=pdf_mode,
         )
         source_list = [source]
 
@@ -399,6 +424,7 @@ async def start_parsing_all(
         "sources": source_list,
         "limit_per_query": effective_limit if source == "all" else _effective_parse_limit(limit_per_query, parser_settings, source),
         "query": normalized_query,
+        "pdf_mode": pdf_mode,
     }
 
 
@@ -540,10 +566,13 @@ async def get_paper_pdf(paper_id: int, db: AsyncSession = Depends(get_db)):
 
     if paper.pdf_url:
         try:
+            from app.services.paper_content_service import prepare_pdf_request
+
+            request_url, request_headers = prepare_pdf_request(paper.pdf_url)
             async with httpx.AsyncClient(timeout=_PDF_PROXY_TIMEOUT, follow_redirects=True) as client:
                 remote = await client.get(
-                    paper.pdf_url,
-                    headers={"Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.1"},
+                    request_url,
+                    headers=request_headers,
                 )
                 remote.raise_for_status()
                 pdf_bytes = remote.content or b""
@@ -570,7 +599,7 @@ async def get_paper_pdf(paper_id: int, db: AsyncSession = Depends(get_db)):
         except HTTPException:
             raise
         except Exception as exc:
-            logger.warning("Failed to proxy PDF for paper {}: {}", paper_id, exc)
+            logger.warning("Failed to proxy PDF for paper {}: {}", paper_id, type(exc).__name__)
             raise HTTPException(status_code=502, detail="Не удалось получить PDF")
 
     raise HTTPException(status_code=404, detail="PDF не найден")

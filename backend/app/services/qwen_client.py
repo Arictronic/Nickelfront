@@ -639,6 +639,60 @@ class QwenServiceClient:
             "can_continue": False,
         }
 
+    def upload_file(self, file_path: str, timeout: float = 180.0) -> dict[str, Any]:
+        """Upload one file through standalone qwen_service.
+
+        qwen_service performs provider upload retries internally.
+        """
+        result = self._request(
+            "POST",
+            "/files/upload",
+            json_data={"file_path": file_path},
+            timeout=timeout,
+        )
+        return result or {"error": "Ошибка загрузки файла в Qwen Service", "file_id": None}
+
+    def upload_file_and_send_message(
+        self,
+        *,
+        file_path: str,
+        message: str = "",
+        session_id: str | None = None,
+        thinking_enabled: bool = True,
+        search_enabled: bool = False,
+        auto_continue: bool | None = None,
+        timeout: float = 240.0,
+        session_prompt: str | None = None,
+    ) -> dict[str, Any]:
+        """Upload file and send it with optional message.
+
+        Standalone qwen_service retries file upload 3 times and creates a new
+        chat session if upload/send fails in the current session.
+        """
+        result = self._request(
+            "POST",
+            "/files/upload-and-send",
+            json_data={
+                "file_path": file_path,
+                "message": message or "",
+                "session_id": session_id,
+                "thinking_enabled": thinking_enabled,
+                "search_enabled": search_enabled,
+                "auto_continue": auto_continue,
+                "session_prompt": session_prompt or "",
+            },
+            timeout=timeout,
+        )
+        if result and result.get("session_id"):
+            self._session_id = str(result["session_id"])
+        return result or {
+            "error": "Ошибка отправки файла в Qwen Service",
+            "response": "",
+            "thinking": "",
+            "file_id": None,
+            "session_id": session_id,
+        }
+
     def is_available(self) -> bool:
         """
         Проверить доступность сервиса.

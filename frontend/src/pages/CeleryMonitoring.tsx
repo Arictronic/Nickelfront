@@ -107,8 +107,21 @@ const TASK_STATE_LABELS: Record<string, string> = {
   unknown: "Неизвестно",
 };
 
+const CLUSTER_STATUS_LABELS: Record<string, string> = {
+  online: "Онлайн",
+  offline: "Офлайн",
+  unknown: "Неизвестно",
+  degraded: "Неполный набор очередей",
+};
+
 function normalizeKey(value: unknown): string {
   return String(value || "").trim().toLowerCase();
+}
+
+
+function formatClusterStatus(status: string | undefined | null): string {
+  const key = normalizeKey(status);
+  return CLUSTER_STATUS_LABELS[key] || String(status || "Неизвестно");
 }
 
 function formatQueueName(name: string | undefined | null): string {
@@ -418,14 +431,7 @@ export default function CeleryMonitoring() {
 
   const rawClusterStatus = status?.status ?? (mergedWorkers.total > 0 ? "online" : "unknown");
   const clusterStatus = hasMissingCoreQueues && mergedWorkers.total > 0 ? "degraded" : rawClusterStatus;
-  const clusterStatusLabel =
-    clusterStatus === "degraded"
-      ? "НЕПОЛНЫЙ"
-      : clusterStatus === "online"
-        ? "ONLINE"
-        : clusterStatus === "offline"
-          ? "OFFLINE"
-          : "UNKNOWN";
+  const clusterStatusLabel = formatClusterStatus(clusterStatus);
   const flowerAvailable =
     status?.flower_available ?? (mergedWorkers.total > 0 || workers.length > 0 ? true : false);
   const flowerApiAvailable = status?.flower_api_available ?? false;
@@ -749,7 +755,7 @@ export default function CeleryMonitoring() {
       )}
 
       <p className="muted" style={{ marginTop: 16, fontSize: 12 }}>
-        Компоненты загружаются независимо. Обновляется: status 15s, workers 20s, tasks/queues 30s.
+        Компоненты загружаются независимо. Обновляется: статус кластера — 15 сек., воркеры — 20 сек., задачи и очереди — 30 сек.
         {anyLoading ? " Сейчас идет обновление..." : ""}
       </p>
     </div>

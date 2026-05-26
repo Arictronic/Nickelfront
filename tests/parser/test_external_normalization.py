@@ -4,6 +4,7 @@ import unittest
 
 from parsers_pkg.external.client import CrossrefClient, ELibraryClient, PatentScopeClient, RosPatentClient
 from parsers_pkg.external.parser import ExternalParser
+from parsers_pkg.errors import SourceUnavailableError
 from parsers_pkg.russian.cyberleninka_client import CyberLeninkaClient
 from parsers_pkg.russian.cyberleninka_parser import CyberLeninkaParser
 
@@ -137,6 +138,60 @@ class TestELibrarySessionCookieNormalization(unittest.TestCase):
             "SID=abc; session=xyz",
         )
 
+    def test_item_detail_html_exposes_metadata_without_pdf_requirement(self):
+        html = """
+        <html><head>
+          <meta name="citation_title" content="Nickel alloy article">
+          <meta name="citation_author" content="Ivanov I.I.">
+          <meta name="citation_author" content="Petrov P.P.">
+          <meta name="citation_publication_date" content="2024-05-02">
+          <meta name="citation_journal_title" content="Metallurgy Journal">
+          <meta name="citation_doi" content="10.1000/ELIB.1">
+          <meta name="citation_keywords" content="nickel; oxidation">
+        </head><body><div id="abstract">Article abstract.</div></body></html>
+        """
+
+        details = ELibraryClient._parse_item_detail_metadata(
+            html,
+            "https://www.elibrary.ru/item.asp?id=1",
+        )
+
+        self.assertEqual(details["title"], "Nickel alloy article")
+        self.assertEqual(details["authors"], ["Ivanov I.I.", "Petrov P.P."])
+        self.assertEqual(details["doi"], "10.1000/elib.1")
+        self.assertEqual(details["abstract"], "Article abstract.")
+        self.assertEqual(details["keywords"], ["nickel", "oxidation"])
+
+
+class TestELibrarySessionFailures(unittest.IsolatedAsyncioTestCase):
+    async def test_page_error_redirect_is_reported_as_unavailable_session(self):
+        client = ELibraryClient()
+
+        async def fake_submit(query: str):
+            return "<html><body>error</body></html>", "https://www.elibrary.ru/page_error.asp"
+
+        client._submit_quick_search_form = fake_submit
+
+        with self.assertRaises(SourceUnavailableError):
+            await client.search("nickel", limit=1)
+
+    async def test_search_timeout_is_reported_with_source_context(self):
+        import httpx
+
+        client = ELibraryClient()
+
+        class FakeHTTPClient:
+            async def get(self, *args, **kwargs):
+                raise httpx.ReadTimeout("timed out")
+
+        async def fake_get_client():
+            return FakeHTTPClient()
+
+        client._get_client = fake_get_client
+
+        with self.assertRaisesRegex(SourceUnavailableError, "did not respond before timeout"):
+            await client.search("nickel", limit=1)
+
 
 class TestPatentScopePdfUrlNormalization(unittest.IsolatedAsyncioTestCase):
     async def test_documents_tab_url_is_not_returned_as_pdf_url(self):
@@ -162,7 +217,6 @@ class TestPatentScopePdfUrlNormalization(unittest.IsolatedAsyncioTestCase):
             "https://patentscope.wipo.int/search/download/PCT/WO123.pdf",
         )
 
-
 class TestRospatentPdfUrlNormalization(unittest.IsolatedAsyncioTestCase):
     async def test_full_media_path_is_not_prefixed_with_base_url(self):
         client = RosPatentClient()
@@ -178,6 +232,18 @@ class TestRospatentPdfUrlNormalization(unittest.IsolatedAsyncioTestCase):
             "https://media.example/documents/RU123/main.pdf",
         )
 
+    async def test_xml_description_and_claims_are_extracted_as_full_text(self):
+        payload = {
+            "description": {"ru": "<pat:Description><p>" + ("Nickel alloy description. " * 12) + "</p></pat:Description>"},
+            "claims": {"ru": "<pat:Claims><p>" + ("Nickel alloy claim. " * 8) + "</p></pat:Claims>"},
+        }
+
+        text = RosPatentClient._extract_full_text(payload)
+
+        self.assertIsNotNone(text)
+        self.assertIn("Nickel alloy description", text)
+        self.assertIn("Nickel alloy claim", text)
+
 
 class TestArxivFullTextUrl(unittest.IsolatedAsyncioTestCase):
     async def test_legacy_category_id_is_preserved(self):
@@ -187,6 +253,30 @@ class TestArxivFullTextUrl(unittest.IsolatedAsyncioTestCase):
             await ArxivClient().get_full_text("http://arxiv.org/abs/cond-mat/0601001v2"),
             "https://arxiv.org/pdf/cond-mat/0601001.pdf",
         )
+
+    async def test_search_identifies_application_to_api(self):
+        from parsers_pkg.arxiv.client import ArxivClient
+
+        client = ArxivClient(rate_limit=False)
+        captured_headers: dict[str, str] = {}
+
+        class FakeResponse:
+            status_code = 200
+            headers: dict[str, str] = {}
+            text = "<feed xmlns='http://www.w3.org/2005/Atom'></feed>"
+
+        class FakeClient:
+            async def get(self, url, params=None, headers=None):
+                captured_headers.update(headers or {})
+                return FakeResponse()
+
+        async def fake_get_client():
+            return FakeClient()
+
+        client._get_client = fake_get_client
+        await client.search("nickel", limit=1)
+
+        self.assertEqual(captured_headers["User-Agent"], client.USER_AGENT)
 
 
 if __name__ == "__main__":

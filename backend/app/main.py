@@ -143,7 +143,7 @@ app = FastAPI(
 
 ### Основные функции
 
-* **Парсинг статей** - автоматический парсинг из arXiv, CORE, OpenAlex, Crossref, EuropePMC, CyberLeninka, eLibrary, Rospatent, FreePatent, PATENTSCOPE
+* **Парсинг статей** - автоматический парсинг из arXiv, CORE, OpenAlex, Crossref, EuropePMC, CyberLeninka, eLibrary, Rospatent, FreePatent, GooglePatents, PATENTSCOPE
 * **Векторный поиск** - семантический поиск по базе статей
 * **Полнотекстовый поиск** - поиск по ключевым словам
 * **Аналитика** - метрики и отчёты по статьям

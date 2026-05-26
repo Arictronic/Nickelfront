@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 from loguru import logger
@@ -130,6 +130,19 @@ def resolve_pdf_url(source: str, source_id: str | None, url: str | None) -> str 
     return None
 
 
+def prepare_pdf_request(pdf_url: str) -> tuple[str, dict[str, str]]:
+    """Attach server-side PDF credentials without persisting them in paper URLs."""
+    headers = {"Accept": "application/pdf,application/octet-stream;q=0.9,text/html;q=0.2,*/*;q=0.1"}
+    parsed = urlparse(pdf_url)
+    if parsed.netloc.lower() != "content.openalex.org" or not settings.OPENALEX_API_KEY:
+        return pdf_url, headers
+
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["api_key"] = settings.OPENALEX_API_KEY
+    request_url = urlunparse(parsed._replace(query=urlencode(query)))
+    return request_url, headers
+
+
 def _extract_pdf_link_from_html(base_url: str, html_text: str) -> str | None:
     if not html_text:
         return None
@@ -141,8 +154,9 @@ def _extract_pdf_link_from_html(base_url: str, html_text: str) -> str | None:
 
 def download_pdf_bytes(pdf_url: str, timeout_sec: float = 45.0) -> bytes | None:
     try:
+        request_url, request_headers = prepare_pdf_request(pdf_url)
         with httpx.Client(timeout=timeout_sec, follow_redirects=True) as client:
-            response = client.get(pdf_url, headers={"Accept": "application/pdf,application/octet-stream;q=0.9,text/html;q=0.2,*/*;q=0.1"})
+            response = client.get(request_url, headers=request_headers)
             response.raise_for_status()
             content = response.content or b""
             if not content:
@@ -167,7 +181,7 @@ def download_pdf_bytes(pdf_url: str, timeout_sec: float = 45.0) -> bytes | None:
             logger.warning("URL is not a direct PDF and no PDF link detected: {} ({})", pdf_url, content_type)
             return None
     except Exception as exc:
-        logger.warning("Failed to download PDF {}: {}", pdf_url, exc)
+        logger.warning("Failed to download PDF {}: {}", pdf_url, type(exc).__name__)
         return None
 
 

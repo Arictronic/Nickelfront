@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 from parsers_pkg.base import RetryConfig
 from parsers_pkg.arxiv.client import ArxivClient
@@ -86,6 +87,121 @@ def _coerce_raw_records(raw: Any) -> list[dict[str, Any]]:
 async def _parse_with_parser(parser: Any, raw: Any) -> list[Any]:
     return await parser.parse_search_results(_coerce_raw_records(raw))
 
+
+def _looks_like_http_url(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    parsed = urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _looks_like_pdf_url(value: Any) -> bool:
+    if not _looks_like_http_url(value):
+        return False
+    parsed = urlparse(str(value))
+    path = parsed.path.lower()
+    query = parsed.query.lower()
+    return (
+        path.endswith(".pdf")
+        or path.endswith("/pdf")
+        or "/pdf/" in path
+        or "pdf=render" in query
+        or "format=pdf" in query
+        or "download=pdf" in query
+    )
+
+
+def _add_quality_flag(paper: Any, flag: str) -> None:
+    flags = getattr(paper, "quality_flags", None)
+    if not isinstance(flags, list):
+        flags = []
+        setattr(paper, "quality_flags", flags)
+    if flag not in flags:
+        flags.append(flag)
+
+
+async def _enrich_content_access(
+    client: Any,
+    papers: list[Any],
+    max_results: int | None = None,
+    diagnostics: Any = None,
+) -> list[Any]:
+    """Add same-source content when available while preserving searchable metadata."""
+    enriched: list[Any] = []
+    enrich_text_with_pdf = bool(getattr(client, "ENRICH_FULL_TEXT_WITH_PDF", False))
+    for paper in papers:
+        pdf_url = getattr(paper, "pdf_url", None)
+        full_text = str(getattr(paper, "full_text", None) or "").strip()
+        content_available = False
+
+        if _looks_like_http_url(pdf_url):
+            if _looks_like_pdf_url(pdf_url):
+                _add_quality_flag(paper, "pdf_url_available")
+                content_available = True
+            else:
+                verifier = getattr(client, "verify_pdf_url", None)
+                verified_url = None
+                if callable(verifier):
+                    try:
+                        verified_url = await verifier(pdf_url)
+                    except Exception:
+                        verified_url = None
+                if _looks_like_http_url(verified_url):
+                    paper.pdf_url = verified_url
+                    _add_quality_flag(paper, "pdf_url_verified")
+                    content_available = True
+                else:
+                    paper.pdf_url = None
+                    _add_quality_flag(paper, "pdf_url_unverified")
+                    if diagnostics is not None and hasattr(diagnostics, "add"):
+                        diagnostics.add(
+                            stage="content_access",
+                            reason="pdf_url_unverified",
+                            severity="info",
+                            record_id=getattr(paper, "source_id", None),
+                            details={"url": str(pdf_url)},
+                        )
+        if full_text:
+            _add_quality_flag(paper, "full_text_available")
+            content_available = True
+
+        resolver = getattr(client, "get_full_text", None)
+        source_id = getattr(paper, "source_id", None)
+        article_url = getattr(paper, "url", None)
+        locator = source_id or article_url
+        candidate = None
+        should_resolve = not full_text and (not content_available or enrich_text_with_pdf)
+        if locator and callable(resolver) and should_resolve:
+            try:
+                candidate = await resolver(locator)
+            except Exception:
+                candidate = None
+
+        if _looks_like_pdf_url(candidate):
+            if not content_available:
+                paper.pdf_url = candidate
+                _add_quality_flag(paper, "pdf_url_resolved_from_detail")
+            content_available = True
+        elif isinstance(candidate, str) and not _looks_like_http_url(candidate) and len(candidate.strip()) >= 200:
+            paper.full_text = candidate.strip()
+            _add_quality_flag(paper, "full_text_extracted_from_detail")
+            content_available = True
+        if not content_available:
+            _add_quality_flag(paper, "content_access_unresolved")
+            if diagnostics is not None and hasattr(diagnostics, "add"):
+                diagnostics.add(
+                    stage="content_access",
+                    reason="content_access_unresolved",
+                    severity="info",
+                    record_id=getattr(paper, "source_id", None),
+                )
+        enriched.append(paper)
+        if max_results and len(enriched) >= max_results:
+            break
+
+    return enriched
+
+
 def _apply_retry_config(client: Any, retry_config: RetryConfig) -> None:
     """Apply runtime retry settings to both old and new client implementations."""
     setattr(client, "_retry_config", retry_config)
@@ -95,6 +211,11 @@ def _apply_retry_config(client: Any, retry_config: RetryConfig) -> None:
         setattr(client, "RETRY_BACKOFF_BASE", retry_config.backoff_base)
     if hasattr(client, "RETRY_BASE_DELAY"):
         setattr(client, "RETRY_BASE_DELAY", retry_config.base_delay)
+
+
+def _quality_candidate_limit(source: str, requested_limit: int) -> int:
+    """Metadata-first parsing does not need an oversized PDF candidate pool."""
+    return requested_limit
 
 
 async def _execute_source(
@@ -117,6 +238,9 @@ async def _execute_source(
         artifacts.parser = ArxivParser()
         raw = await artifacts.client.search(query=query, limit=limit)
         papers = await _parse_with_parser(artifacts.parser, raw)
+        papers = await _enrich_content_access(
+            artifacts.client, papers, max_results=limit, diagnostics=artifacts.parser.diagnostics
+        )
         return raw, papers
 
     if source == "CORE":
@@ -125,6 +249,9 @@ async def _execute_source(
         artifacts.parser = COREParser()
         raw = await artifacts.client.search(query=query, limit=limit, full_text_only=False)
         papers = await _parse_with_parser(artifacts.parser, raw)
+        papers = await _enrich_content_access(
+            artifacts.client, papers, max_results=limit, diagnostics=artifacts.parser.diagnostics
+        )
         return raw, papers
 
     if source == "CyberLeninka":
@@ -133,6 +260,9 @@ async def _execute_source(
         artifacts.parser = CyberLeninkaParser()
         raw = await artifacts.client.search(query=query, limit=limit)
         papers = await _parse_with_parser(artifacts.parser, raw)
+        papers = await _enrich_content_access(
+            artifacts.client, papers, max_results=limit, diagnostics=artifacts.parser.diagnostics
+        )
         return raw, papers
 
     if source in AVAILABLE_EXTERNAL_SOURCES:
@@ -140,9 +270,12 @@ async def _execute_source(
         artifacts.client = client_cls(timeout=runtime_config.timeout)
         _apply_retry_config(artifacts.client, retry_config)
         artifacts.parser = ExternalParser(source=source)
-        raw = await artifacts.client.search(query=query, limit=limit)
+        raw = await artifacts.client.search(query=query, limit=_quality_candidate_limit(source, limit))
         papers = await _parse_with_parser(artifacts.parser, raw)
-        return raw, papers
+        papers = await _enrich_content_access(
+            artifacts.client, papers, max_results=limit, diagnostics=artifacts.parser.diagnostics
+        )
+        return raw, papers[:limit]
 
     raise MisconfigurationError(
         source=source,
@@ -173,13 +306,23 @@ async def execute_source_search(
             raise
         except Exception as exc:
             raise SourceUnavailableError(source=source, message=str(exc)) from exc
+        raw_items = _coerce_raw_list(raw)
+        if raw_items and not papers and artifacts.parser is not None and hasattr(artifacts.parser, "diagnostics"):
+            parser_diagnostics = getattr(artifacts.parser, "diagnostics")
+            if hasattr(parser_diagnostics, "add"):
+                parser_diagnostics.add(
+                    stage="parse",
+                    reason="no_normalized_records",
+                    severity="warning",
+                    details={"raw_count": len(raw_items)},
+                )
+
         diagnostics: dict[str, Any] = {}
         if artifacts.parser is not None and hasattr(artifacts.parser, "diagnostics"):
             parser_diagnostics = getattr(artifacts.parser, "diagnostics")
             if hasattr(parser_diagnostics, "as_dict"):
                 diagnostics = parser_diagnostics.as_dict()
 
-        raw_items = _coerce_raw_list(raw)
         diagnostic_events = _safe_event_dicts(diagnostics)
         raw_count = len(raw_items)
         parsed_count = len(papers)

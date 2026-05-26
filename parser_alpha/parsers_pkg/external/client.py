@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +53,21 @@ def _strip_jats(text: Any) -> str | None:
         return None
     cleaned = re.sub(r"<[^>]+>", " ", raw)
     return " ".join(cleaned.split()).strip() or None
+
+
+def _markup_section_text(value: Any) -> str | None:
+    """Extract readable text from language-keyed HTML/XML document sections."""
+    if isinstance(value, dict):
+        for key in ("ru", "en", "value", "text", "content"):
+            if key in value:
+                cleaned = _markup_section_text(value.get(key))
+                if cleaned:
+                    return cleaned
+        return None
+    raw = _first_text(value)
+    if not raw:
+        return None
+    return _collapse_whitespace(BeautifulSoup(raw, "html.parser").get_text(" ", strip=True))
 
 
 def _date_parts_to_iso(parts: list[int] | None) -> str | None:
@@ -457,6 +473,14 @@ def _openalex_work_id(value: Any) -> str | None:
     return text or None
 
 
+def _openalex_has_pdf_content(item: dict[str, Any]) -> bool:
+    content = item.get("has_content")
+    if not isinstance(content, dict):
+        return False
+    value = content.get("pdf")
+    return value is True or str(value).strip().lower() in {"true", "1", "yes"}
+
+
 def _coerce_int_positions(value: Any) -> list[int]:
     if value is None:
         return []
@@ -545,6 +569,29 @@ class _RetryingClient(BaseAPIClient):
             backoff_base=2.0,
             jitter_max=0.0,
         )
+
+    async def verify_pdf_url(self, url: str) -> str | None:
+        """Confirm ambiguous source-provided PDF links without downloading the file."""
+        client = await self._get_client()
+        headers = {
+            "User-Agent": "Nickelfront-parser/1.0 (PDF availability check)",
+            "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.1",
+            "Range": "bytes=0-4",
+        }
+        try:
+            async with client.stream("GET", url, headers=headers, follow_redirects=True, timeout=8.0) as response:
+                if response.status_code >= 400:
+                    return None
+                content_type = (response.headers.get("content-type") or "").lower()
+                first_chunk = b""
+                async for chunk in response.aiter_bytes():
+                    first_chunk = chunk[:5]
+                    break
+                if "pdf" in content_type or first_chunk == b"%PDF-":
+                    return str(response.url)
+        except Exception:
+            return None
+        return None
 
     async def _request_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         client = await self._get_client()
@@ -704,16 +751,27 @@ class _RetryingClient(BaseAPIClient):
 
 class OpenAlexClient(_RetryingClient):
     BASE_URL = "https://api.openalex.org"
+    CONTENT_BASE_URL = "https://content.openalex.org/works"
     SOURCE_NAME = "OpenAlex"
 
     def __init__(self, timeout: float = 30.0):
         super().__init__(base_url=self.BASE_URL, timeout=timeout)
+        self._content_api_key = (os.getenv("OPENALEX_API_KEY") or "").strip() or None
+
+    def _official_content_pdf_url(self, work_id: str | None, item: dict[str, Any]) -> str | None:
+        if not self._content_api_key or not work_id or not _openalex_has_pdf_content(item):
+            return None
+        return f"{self.CONTENT_BASE_URL}/{work_id}.pdf"
 
     async def search(self, query: str, limit: int = 25, offset: int = 0, **kwargs: Any) -> list[dict[str, Any]]:
         page = max(1, (offset // max(1, limit)) + 1)
         data = await self._request_json(
             "/works",
-            {"search": query, "per-page": min(limit, 50), "page": page},
+            {
+                "search": query,
+                "per-page": min(limit, 50),
+                "page": page,
+            },
         )
 
         raw_results = data.get("results", [])
@@ -746,9 +804,10 @@ class OpenAlexClient(_RetryingClient):
             concepts = list(dict.fromkeys(concepts))
 
             doi = normalize_doi(item.get("doi") or item.get("DOI"))
-            pdf_url = _first_openalex_pdf_url(item)
             landing = _first_openalex_landing_url(item)
             work_id = _openalex_work_id(item.get("id"))
+            official_pdf_url = self._official_content_pdf_url(work_id, item)
+            pdf_url = official_pdf_url or _first_openalex_pdf_url(item)
             source_name = _first_openalex_source_name(item)
             fallback_work_url = f"https://openalex.org/{work_id}" if work_id else None
             article_url = landing or (f"https://doi.org/{doi}" if doi else None) or fallback_work_url
@@ -772,6 +831,7 @@ class OpenAlexClient(_RetryingClient):
                     "source_id": work_id,
                     "url": article_url,
                     "pdf_url": pdf_url,
+                    "quality_flags": ["pdf_url_via_openalex_content_api"] if official_pdf_url else [],
                 }
             )
 
@@ -811,7 +871,7 @@ class OpenAlexClient(_RetryingClient):
         data = await self._request_json(f"/works/{work_id}", {})
         if not isinstance(data, dict):
             return None
-        return _first_openalex_pdf_url(data) or _first_openalex_landing_url(data)
+        return self._official_content_pdf_url(work_id, data) or _first_openalex_pdf_url(data) or _first_openalex_landing_url(data)
 
 
 class CrossrefClient(_RetryingClient):
@@ -824,7 +884,11 @@ class CrossrefClient(_RetryingClient):
     async def search(self, query: str, limit: int = 25, offset: int = 0, **kwargs: Any) -> list[dict[str, Any]]:
         data = await self._request_json(
             "/works",
-            {"query": query, "rows": min(limit, 50), "offset": max(offset, 0)},
+            {
+                "query": query,
+                "rows": min(limit, 50),
+                "offset": max(offset, 0),
+            },
         )
 
         message = data.get("message") if isinstance(data.get("message"), dict) else {}
@@ -1093,6 +1157,110 @@ class ELibraryClient(_RetryingClient):
                 return urljoin("https://www.elibrary.ru", href)
         return None
 
+    @staticmethod
+    def _is_session_error_page(html: str, final_url: str | None = None) -> bool:
+        url_lower = (final_url or "").lower()
+        html_lower = html.lower()
+        return "page_error.asp" in url_lower or "page_error.asp" in html_lower
+
+    @staticmethod
+    def _parse_item_detail_metadata(html: str, item_url: str) -> dict[str, Any]:
+        """Read standard citation metadata and visible fallbacks from an item page."""
+        soup = BeautifulSoup(html or "", "html.parser")
+
+        def meta_values(name: str) -> list[str]:
+            values: list[str] = []
+            for node in soup.select(f"meta[name='{name}'], meta[property='{name}']"):
+                text = _collapse_whitespace(node.get("content"))
+                if text:
+                    values.append(text)
+            return values
+
+        def first_selector(selectors: tuple[str, ...]) -> str | None:
+            for selector in selectors:
+                node = soup.select_one(selector)
+                if node is not None:
+                    text = _collapse_whitespace(node.get_text(" ", strip=True))
+                    if text:
+                        return text
+            return None
+
+        title = _first_text(meta_values("citation_title")) or first_selector(("h1", "h2", ".title"))
+        authors = meta_values("citation_author")
+        if not authors:
+            author_nodes = soup.select("#authors a, .authors a, [itemprop='author']")
+            authors = [
+                text
+                for text in (_collapse_whitespace(node.get_text(" ", strip=True)) for node in author_nodes)
+                if text
+            ]
+
+        abstract = (
+            _first_text(meta_values("citation_abstract"))
+            or first_selector(("#abstract", ".abstract", "[itemprop='description']"))
+        )
+        keyword_text = _first_text(meta_values("citation_keywords") or meta_values("keywords"))
+        keywords = [
+            item.strip()
+            for item in re.split(r"[;,\n]+", keyword_text or "")
+            if item.strip()
+        ]
+        if not keywords:
+            visible_keywords = first_selector(("#keywords", ".keywords"))
+            keywords = [
+                item.strip()
+                for item in re.split(r"[;,\n]+", visible_keywords or "")
+                if item.strip()
+            ]
+
+        doi = _first_text(meta_values("citation_doi"))
+        if not doi:
+            doi_link = soup.select_one("a[href*='doi.org/']")
+            if doi_link is not None:
+                doi = _first_text(doi_link.get("href"))
+
+        pdf_url = _first_text(meta_values("citation_pdf_url"))
+        if not pdf_url:
+            pdf_url = ELibraryClient._extract_pdf_url_from_result_row(soup)
+
+        return {
+            "title": _repair_mojibake_ru(title) if title else None,
+            "authors": [_repair_mojibake_ru(item) or item for item in authors],
+            "published_date": _parse_loose_date(_first_text(meta_values("citation_publication_date"))),
+            "journal": _first_text(meta_values("citation_journal_title")),
+            "doi": normalize_doi(doi),
+            "abstract": _repair_mojibake_ru(abstract) if abstract else None,
+            "keywords": [_repair_mojibake_ru(item) or item for item in keywords],
+            "pdf_url": urljoin(item_url, pdf_url) if pdf_url else None,
+        }
+
+    async def _enrich_item_metadata(self, record: dict[str, Any]) -> dict[str, Any]:
+        item_url = _first_text(record.get("url"))
+        if not item_url:
+            return record
+        client = await self._get_client()
+        try:
+            response = await client.get(
+                item_url,
+                headers=self._request_headers(referer=f"{self.BASE_URL}/query_results.asp"),
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+        except Exception:
+            return record
+
+        html = response.text or ""
+        final_url = str(response.url)
+        if self._is_captcha_page(html, final_url) or self._is_session_error_page(html, final_url):
+            return record
+
+        details = self._parse_item_detail_metadata(html, item_url)
+        enriched = dict(record)
+        for field, value in details.items():
+            if value not in (None, "", [], {}) and enriched.get(field) in (None, "", [], {}):
+                enriched[field] = value
+        return enriched
+
     async def _resolve_pdf_url_from_item(self, item_id: str) -> str | None:
         if not item_id:
             return None
@@ -1208,6 +1376,11 @@ class ELibraryClient(_RetryingClient):
                 headers=request_headers,
                 follow_redirects=True,
             )
+        except httpx.TimeoutException as exc:
+            raise SourceUnavailableError(
+                source=self.SOURCE_NAME,
+                message="eLibrary search page did not respond before timeout.",
+            ) from exc
         except httpx.TooManyRedirects as exc:
             raise SourceUnavailableError(
                 source=self.SOURCE_NAME,
@@ -1232,6 +1405,14 @@ class ELibraryClient(_RetryingClient):
                     "need authenticated browser session/cookies or manual CAPTCHA solve."
                 ),
             )
+        if self._is_session_error_page(html, final_url):
+            raise SourceUnavailableError(
+                source=self.SOURCE_NAME,
+                message=(
+                    "eLibrary redirected search to page_error.asp. "
+                    "The stored browser session is missing, expired, or rejected."
+                ),
+            )
 
         soup = BeautifulSoup(html, "html.parser")
         links = soup.select("a[href*='item.asp?id=']")
@@ -1253,25 +1434,23 @@ class ELibraryClient(_RetryingClient):
             year_match = re.search(r"\b(19|20)\d{2}\b", row_text or "")
             publication_date = f"{year_match.group(0)}-01-01T00:00:00" if year_match else None
             row = link.find_parent("tr")
-            pdf_url = self._extract_pdf_url_from_result_row(row)
-            if not pdf_url and source_id.isdigit():
-                pdf_url = await self._resolve_pdf_url_from_item(source_id)
-
-            results.append(
-                {
-                    "title": title,
-                    "authors": [],
-                    "published_date": publication_date,
-                    "journal": "eLibrary",
-                    "doi": None,
-                    "abstract": None,
-                    "keywords": [],
-                    "source": "eLibrary",
-                    "source_id": source_id,
-                    "url": urljoin(self.BASE_URL, href),
-                    "pdf_url": pdf_url,
-                }
-            )
+            record = {
+                "title": title,
+                "authors": [],
+                "published_date": publication_date,
+                "journal": "eLibrary",
+                "doi": None,
+                "abstract": None,
+                "keywords": [],
+                "source": "eLibrary",
+                "source_id": source_id,
+                "url": urljoin(self.BASE_URL, href),
+                "pdf_url": self._extract_pdf_url_from_result_row(row),
+            }
+            record = await self._enrich_item_metadata(record)
+            if not record.get("pdf_url") and source_id.isdigit():
+                record["pdf_url"] = await self._resolve_pdf_url_from_item(source_id)
+            results.append(record)
 
             if len(results) >= limit:
                 break
@@ -1315,6 +1494,90 @@ class FreePatentClient(_RetryingClient):
     @staticmethod
     def _build_patent_url(patent_id: str) -> str:
         return f"https://www.freepatent.ru/patents/{patent_id}"
+
+    @staticmethod
+    def _extract_detail_text(soup: BeautifulSoup, selectors: tuple[str, ...]) -> str | None:
+        for selector in selectors:
+            node = soup.select_one(selector)
+            if node is None:
+                continue
+            text = _collapse_whitespace(node.get_text(" ", strip=True))
+            if text:
+                return _repair_mojibake_ru(text) or text
+        return None
+
+    @staticmethod
+    def _extract_detail_pdf_url(soup: BeautifulSoup, page_url: str) -> str | None:
+        for anchor in soup.select("a[href]"):
+            href = _collapse_whitespace(anchor.get("href"))
+            text = _collapse_whitespace(anchor.get_text(" ", strip=True)) or ""
+            if not href:
+                continue
+            lowered = f"{href} {text}".lower()
+            if ".pdf" in lowered or "pdf" in lowered or "\u0441\u043a\u0430\u0447\u0430\u0442\u044c" in lowered:
+                return urljoin(page_url, href)
+        return None
+
+    async def _enrich_patent_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        page_url = _first_text(record.get("url"))
+        if not page_url:
+            return record
+        try:
+            html = await self._request_text(page_url)
+        except Exception:
+            return record
+
+        soup = BeautifulSoup(html, "html.parser")
+        for node in soup(["script", "style", "noscript"]):
+            node.decompose()
+
+        enriched = dict(record)
+        page_text = _collapse_whitespace(soup.get_text(" ", strip=True)) or ""
+        page_text = _repair_mojibake_ru(page_text) or page_text
+        title = self._extract_detail_text(soup, ("h1", ".patent-title", ".title"))
+        abstract = self._extract_detail_text(soup, (".abstract", ".referat", "#abstract", ".description"))
+        full_text = self._extract_detail_text(
+            soup,
+            ("article", ".patent-text", ".description", "#description", ".full-text"),
+        )
+        if not full_text and "Описание изобретения" in page_text and len(page_text) >= 500:
+            full_text = page_text
+        if not abstract:
+            abstract_match = re.search(
+                r"(Изобретение относится[\s\S]{80,}?)(?=Формула изобретения|Описание изобретения к патенту)",
+                page_text,
+                flags=re.IGNORECASE,
+            )
+            if abstract_match:
+                abstract = _collapse_whitespace(abstract_match.group(1))
+
+        if title and (not enriched.get("title") or str(enriched.get("title")).lower() == "untitled"):
+            enriched["title"] = title
+        if abstract:
+            enriched["abstract"] = abstract
+        if full_text and len(full_text) >= 200:
+            enriched["full_text"] = full_text
+
+        authors_match = re.search(r"Автор\(ы\):\s*(.+?)\s*Патентообладатель", page_text, flags=re.IGNORECASE)
+        if authors_match:
+            authors = [item.strip() for item in authors_match.group(1).split(",") if item.strip()]
+            if authors:
+                enriched["authors"] = authors
+        publication_match = re.search(r"публикация патента:\s*(\d{1,2})\.(\d{1,2})\.(\d{4})", page_text, flags=re.IGNORECASE)
+        if publication_match:
+            day, month, year = publication_match.groups()
+            enriched["published_date"] = f"{year}-{int(month):02d}-{int(day):02d}"
+
+        pdf_url = self._extract_detail_pdf_url(soup, page_url)
+        if pdf_url:
+            enriched["pdf_url"] = pdf_url
+        return enriched
+
+    async def _enrich_patent_records(self, records: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+        enriched: list[dict[str, Any]] = []
+        for record in records[:limit]:
+            enriched.append(await self._enrich_patent_record(record))
+        return enriched
 
     @staticmethod
     def _unwrap_yandex_result_url(url: str | None) -> str | None:
@@ -1463,7 +1726,7 @@ class FreePatentClient(_RetryingClient):
                 if len(results) >= limit:
                     break
 
-        return results
+        return await self._enrich_patent_records(results, limit)
 
     async def get_full_text(self, item_id: str) -> str | None:
         raw = _collapse_whitespace(item_id)
@@ -1472,6 +1735,169 @@ class FreePatentClient(_RetryingClient):
         if raw.startswith("http://") or raw.startswith("https://"):
             return raw
         return f"https://www.freepatent.ru/{raw.lstrip('/')}"
+
+
+class GooglePatentsClient(_RetryingClient):
+    """Google Patents detail-page reader for publication IDs or patent URLs.
+
+    Google Patents allows patent detail pages in robots.txt, while automated
+    query/result routes are disallowed. This source therefore resolves known
+    publication identifiers rather than crawling keyword-search results.
+    """
+
+    BASE_URL = "https://patents.google.com"
+    SOURCE_NAME = "GooglePatents"
+    SEARCH_PAGE_SIZE = 100
+    MAX_SEARCH_START = 1000
+    _DETAIL_URL_RE = re.compile(r"/patent/([^/?#]+)", re.IGNORECASE)
+    _PUBLICATION_ID_RE = re.compile(r"^[A-Z]{0,3}\d{4,}[A-Z]?\d?$", re.IGNORECASE)
+
+    def __init__(self, timeout: float = 30.0):
+        super().__init__(base_url=self.BASE_URL, timeout=timeout)
+
+    @classmethod
+    def _publication_id_from_query(cls, query: str | None) -> str | None:
+        raw = _collapse_whitespace(query)
+        if not raw:
+            return None
+        parsed = urlparse(raw)
+        if parsed.scheme in {"http", "https"} and "patents.google.com" in parsed.netloc.lower():
+            match = cls._DETAIL_URL_RE.search(parsed.path or "")
+            return unquote(match.group(1)).upper() if match else None
+        normalized = re.sub(r"[\s,.:/\-]+", "", raw).upper()
+        return normalized if cls._PUBLICATION_ID_RE.fullmatch(normalized) else None
+
+    @staticmethod
+    def _meta_values(soup: BeautifulSoup, name: str, *, scheme: str | None = None) -> list[str]:
+        values: list[str] = []
+        for node in soup.select(f"meta[name='{name}']"):
+            if scheme and str(node.get("scheme") or "").casefold() != scheme.casefold():
+                continue
+            value = _collapse_whitespace(node.get("content"))
+            if value:
+                values.append(value)
+        return values
+
+    @classmethod
+    def _extract_publication_ids_from_search_html(cls, html: str) -> list[str]:
+        soup = BeautifulSoup(html or "", "html.parser")
+        publication_ids: list[str] = []
+        seen: set[str] = set()
+
+        for anchor in soup.select("a[href]"):
+            href = _collapse_whitespace(anchor.get("href"))
+            if not href:
+                continue
+            parsed = urlparse(href)
+            path = parsed.path if parsed.scheme else href
+            match = cls._DETAIL_URL_RE.search(path or "")
+            if not match:
+                continue
+            publication_id = unquote(match.group(1)).upper()
+            if not publication_id or publication_id in seen:
+                continue
+            seen.add(publication_id)
+            publication_ids.append(publication_id)
+
+        return publication_ids
+
+    @classmethod
+    def _parse_detail_html(cls, html: str, publication_id: str) -> dict[str, Any]:
+        soup = BeautifulSoup(html or "", "html.parser")
+        title = _first_text(cls._meta_values(soup, "DC.title"), default=publication_id) or publication_id
+        abstract = _first_text(cls._meta_values(soup, "DC.description"))
+        authors = cls._meta_values(soup, "DC.contributor", scheme="inventor")
+        issue_date = _first_text(cls._meta_values(soup, "DC.date", scheme="issue"))
+        submitted_date = _first_text(cls._meta_values(soup, "DC.date", scheme="dateSubmitted"))
+        pdf_url = _first_text(cls._meta_values(soup, "citation_pdf_url"))
+
+        full_text_sections: list[str] = []
+        for selector in ("section[itemprop='description']", "section[itemprop='claims']"):
+            node = soup.select_one(selector)
+            if node is None:
+                continue
+            text = _collapse_whitespace(node.get_text(" ", strip=True))
+            if text and text not in full_text_sections:
+                full_text_sections.append(text)
+        full_text = "\n\n".join(full_text_sections)
+        if len(full_text) < 200:
+            full_text = None
+
+        return {
+            "title": title,
+            "authors": authors,
+            "published_date": issue_date or submitted_date,
+            "journal": "Google Patents",
+            "doi": None,
+            "abstract": abstract,
+            "full_text": full_text,
+            "keywords": [],
+            "source": cls.SOURCE_NAME,
+            "source_id": publication_id,
+            "url": f"{cls.BASE_URL}/patent/{quote_plus(publication_id)}/en",
+            "pdf_url": pdf_url,
+        }
+
+    async def search(self, query: str, limit: int = 25, offset: int = 0, **kwargs: Any) -> list[dict[str, Any]]:
+        if limit < 1:
+            return []
+        publication_id = self._publication_id_from_query(query)
+        if publication_id:
+            if offset > 0:
+                return []
+            html = await self._request_text(f"/patent/{quote_plus(publication_id)}/en")
+            record = self._parse_detail_html(html, publication_id)
+            return [record] if record.get("title") else []
+
+        normalized_query = _collapse_whitespace(query)
+        if not normalized_query:
+            return []
+
+        results: list[dict[str, Any]] = []
+        seen_publications: set[str] = set()
+        start = max(0, int(offset or 0))
+        page_size = self.SEARCH_PAGE_SIZE
+
+        while len(results) < limit and start <= self.MAX_SEARCH_START:
+            search_html = await self._request_text(
+                "/",
+                params={
+                    "q": normalized_query,
+                    "num": page_size,
+                    "start": start,
+                    "hl": "en",
+                },
+            )
+            publication_ids = self._extract_publication_ids_from_search_html(search_html)
+            if not publication_ids:
+                break
+
+            new_ids = [pid for pid in publication_ids if pid not in seen_publications]
+            if not new_ids:
+                break
+
+            for pid in new_ids:
+                seen_publications.add(pid)
+                detail_html = await self._request_text(f"/patent/{quote_plus(pid)}/en")
+                record = self._parse_detail_html(detail_html, pid)
+                if record.get("title"):
+                    results.append(record)
+                if len(results) >= limit:
+                    break
+
+            if len(publication_ids) < page_size:
+                break
+            start += page_size
+
+        return results[:limit]
+
+    async def get_full_text(self, item_id: str) -> str | None:
+        publication_id = self._publication_id_from_query(item_id)
+        if not publication_id:
+            return None
+        html = await self._request_text(f"/patent/{quote_plus(publication_id)}/en")
+        record = self._parse_detail_html(html, publication_id)
+        return record.get("full_text") or record.get("pdf_url")
 
 
 class PatentScopeClient(_RetryingClient):
@@ -1589,7 +2015,6 @@ class PatentScopeClient(_RetryingClient):
             source_ref = _collapse_whitespace(source_id or app_no or number)
             detail_url = f"{self.BASE_URL}/search/en/detail.jsf?docId={quote_plus(source_ref)}" if source_ref else None
             pdf_url = await self._resolve_documents_pdf_url(source_ref) if source_ref else None
-
             results.append(
                 {
                     "title": title,
@@ -1818,6 +2243,18 @@ class RosPatentClient(_RetryingClient):
             return list(dict.fromkeys(output))
         return [_collapse_whitespace(str(values))] if _collapse_whitespace(str(values)) else []
 
+    @staticmethod
+    def _extract_full_text(doc_payload: dict[str, Any] | None) -> str | None:
+        if not doc_payload:
+            return None
+        sections: list[str] = []
+        for key in ("description", "claims"):
+            text = _markup_section_text(doc_payload.get(key))
+            if text and text not in sections:
+                sections.append(text)
+        full_text = "\n\n".join(sections)
+        return full_text if len(full_text) >= 200 else None
+
     async def search(self, query: str, limit: int = 25, offset: int = 0, **kwargs: Any) -> list[dict[str, Any]]:
         page = max(1, (offset // max(1, limit)) + 1)
         per_page = min(max(limit, 1), 100)
@@ -1856,11 +2293,9 @@ class RosPatentClient(_RetryingClient):
             authors = inventors if inventors else patentee_names
 
             doc_payload = await self._fetch_doc_payload(source_id) if source_id else None
+            full_text = self._extract_full_text(doc_payload)
             if doc_payload:
-                doc_abstract = _first_text(
-                    _as_dict(doc_payload.get("abstract")).get("ru")
-                    or _as_dict(doc_payload.get("abstract")).get("en")
-                )
+                doc_abstract = _markup_section_text(doc_payload.get("abstract"))
                 if doc_abstract:
                     abstract = doc_abstract
                 doc_biblio_ru = _as_dict(_as_dict(doc_payload.get("biblio")).get("ru"))
@@ -1896,6 +2331,7 @@ class RosPatentClient(_RetryingClient):
                     "source_id": source_id,
                     "url": doc_url or f"https://searchplatform.rospatent.gov.ru/patents?q={quote_plus(query)}",
                     "pdf_url": pdf_url,
+                    "full_text": full_text,
                 }
             )
 
@@ -1919,5 +2355,6 @@ AVAILABLE_EXTERNAL_SOURCES = {
     "eLibrary": ELibraryClient,
     "Rospatent": RosPatentClient,
     "FreePatent": FreePatentClient,
+    "GooglePatents": GooglePatentsClient,
     "PATENTSCOPE": PatentScopeClient,
 }

@@ -21,11 +21,13 @@ SOURCE_TRUST = {
     "EuropePMC": 0.9,
     "Rospatent": 0.85,
     "PATENTSCOPE": 0.85,
+    "GooglePatents": 0.8,
     "FreePatent": 0.65,
 }
 
 PATENT_SOURCES = {
     "freepatent",
+    "googlepatents",
     "patentscope",
     "rospatent",
 }
@@ -46,15 +48,21 @@ def normalize_patent_identifier(value: Any, source: str | None = None) -> str | 
 
     parsed = urlparse(raw)
     if parsed.scheme and parsed.netloc:
+        path_parts = [part for part in parsed.path.split("/") if part]
+        if "patents.google.com" in parsed.netloc.lower() and "patent" in [part.lower() for part in path_parts]:
+            patent_index = next(i for i, part in enumerate(path_parts) if part.lower() == "patent")
+            if patent_index + 1 < len(path_parts):
+                raw = path_parts[patent_index + 1]
+                parsed = urlparse("")
         query = parse_qs(parsed.query)
-        for key in ("docId", "id", "number"):
-            values = query.get(key) or query.get(key.lower())
-            if values:
-                raw = values[0]
-                break
-        else:
-            path_parts = [part for part in parsed.path.split("/") if part]
-            raw = path_parts[-1] if path_parts else raw
+        if parsed.scheme and parsed.netloc:
+            for key in ("docId", "id", "number"):
+                values = query.get(key) or query.get(key.lower())
+                if values:
+                    raw = values[0]
+                    break
+            else:
+                raw = path_parts[-1] if path_parts else raw
 
     raw = unquote(str(raw)).strip()
     raw = re.sub(r"^(?:patents?|patent|doc|docs)/+", "", raw, flags=re.IGNORECASE)

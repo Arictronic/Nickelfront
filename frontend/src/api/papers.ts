@@ -4,8 +4,11 @@ import type {
   PaperListFilters,
   PaperSearchFilters,
   PaperSource,
+  PdfProcessingMode,
   PaperContentPart,
   PaperContentPartRegenerateResponse,
+  FullTextSearchResult,
+  FullTextSearchStats,
 } from "../types/paper";
 import type { VectorSearchFilters, VectorSearchResponse } from "../types/paper";
 
@@ -24,7 +27,7 @@ type PaperApiModel = {
   journal: string | null;
   doi: string | null;
   abstract: string | null;
-  full_text: string | null;
+  full_text?: string | null;
   keywords: string[];
   source: PaperSource | string;
   source_id: string | null;
@@ -43,8 +46,16 @@ type PaperApiModel = {
   schema_version: string | null;
   created_at: string | null;
   updated_at: string | null;
+  rank?: number | null;
+  snippet?: string | null;
+  title_highlight?: string | null;
+  abstract_highlight?: string | null;
+  full_text_highlight?: string | null;
+  has_pdf?: boolean | null;
+  has_full_text?: boolean | null;
+  full_text_indexed?: boolean | null;
+  matched_fields?: string[] | null;
 };
-
 
 type PaperContentPartApiModel = {
   id: number;
@@ -75,7 +86,9 @@ type PaperContentPartApiModel = {
   updated_at: string | null;
 };
 
-function mapPaperContentPart(apiPart: PaperContentPartApiModel): PaperContentPart {
+function mapPaperContentPart(
+  apiPart: PaperContentPartApiModel,
+): PaperContentPart {
   return {
     id: apiPart.id,
     paperId: apiPart.paper_id,
@@ -99,7 +112,9 @@ function mapPaperContentPart(apiPart: PaperContentPartApiModel): PaperContentPar
     markdownTextChars: apiPart.markdown_text_chars ?? 0,
     extractionMethod: apiPart.extraction_method ?? null,
     extractionQualityScore: apiPart.extraction_quality_score ?? null,
-    extractionWarnings: Array.isArray(apiPart.extraction_warnings) ? apiPart.extraction_warnings : [],
+    extractionWarnings: Array.isArray(apiPart.extraction_warnings)
+      ? apiPart.extraction_warnings
+      : [],
     extractionMetadata: apiPart.extraction_metadata ?? null,
     createdAt: apiPart.created_at ?? null,
     updatedAt: apiPart.updated_at ?? null,
@@ -148,6 +163,24 @@ function mapPaper(apiPaper: PaperApiModel): Paper {
   };
 }
 
+function mapFullTextSearchResult(apiPaper: PaperApiModel): FullTextSearchResult {
+  const paper = mapPaper(apiPaper);
+  return {
+    ...paper,
+    rank: Number(apiPaper.rank ?? 0) || 0,
+    snippet: apiPaper.snippet ?? null,
+    titleHighlight: apiPaper.title_highlight ?? null,
+    abstractHighlight: apiPaper.abstract_highlight ?? null,
+    fullTextHighlight: apiPaper.full_text_highlight ?? null,
+    hasPdf: Boolean(apiPaper.has_pdf),
+    hasFullText: Boolean(apiPaper.has_full_text),
+    fullTextIndexed: Boolean(apiPaper.full_text_indexed),
+    matchedFields: Array.isArray(apiPaper.matched_fields)
+      ? apiPaper.matched_fields
+      : [],
+  };
+}
+
 export async function getPapersList(args: {
   limit: number;
   offset: number;
@@ -157,6 +190,20 @@ export async function getPapersList(args: {
     params: {
       limit: clampBackendLimit(args.limit),
       offset: args.offset,
+      source: args.source && args.source !== "all" ? args.source : undefined,
+    },
+  });
+  return data.map(mapPaper);
+}
+
+
+export async function getRecentPapers(args: {
+  limit: number;
+  source?: PaperListFilters["source"];
+}) {
+  const { data } = await apiClient.get<PaperApiModel[]>("/papers/recent", {
+    params: {
+      limit: clampBackendLimit(args.limit),
       source: args.source && args.source !== "all" ? args.source : undefined,
     },
   });
@@ -237,6 +284,7 @@ export async function parsePapers(args: {
   query: string;
   limit: number;
   source: PaperSource;
+  pdfMode: PdfProcessingMode;
 }) {
   const { data } = await apiClient.post<{
     message: string;
@@ -244,11 +292,13 @@ export async function parsePapers(args: {
     source: string;
     query: string;
     limit: number;
+    pdf_mode: PdfProcessingMode;
   }>(`/papers/parse`, undefined, {
     params: {
       query: args.query,
       limit: clampBackendLimit(args.limit, 50),
       source: args.source,
+      pdf_mode: args.pdfMode,
     },
   });
 
@@ -259,18 +309,21 @@ export async function parseAll(args: {
   limitPerQuery: number;
   source: PaperSource | "all";
   query: string;
+  pdfMode: PdfProcessingMode;
 }) {
   const { data } = await apiClient.post<{
     message: string;
     task_id: string;
     sources: string[];
     limit_per_query: number;
+    pdf_mode: PdfProcessingMode;
     query?: string | null;
   }>(`/papers/parse-all`, undefined, {
     params: {
       limit_per_query: clampBackendLimit(args.limitPerQuery, 50),
       source: args.source,
       query: args.query.trim(),
+      pdf_mode: args.pdfMode,
     },
   });
 
@@ -336,7 +389,16 @@ export async function rebuildVectorIndex() {
 
 export type CeleryTaskStatus = {
   task_id: string;
-  status: "PENDING" | "RECEIVED" | "STARTED" | "PROGRESS" | "RETRY" | "FAILURE" | "SUCCESS" | "REVOKED" | "UNKNOWN";
+  status:
+    | "PENDING"
+    | "RECEIVED"
+    | "STARTED"
+    | "PROGRESS"
+    | "RETRY"
+    | "FAILURE"
+    | "SUCCESS"
+    | "REVOKED"
+    | "UNKNOWN";
   state?: string;
   result?: {
     query?: string;
@@ -378,6 +440,7 @@ export type CeleryTaskStatus = {
   total_content_queued?: number;
   total_content_skipped?: number;
   errors?: string[];
+  error?: string;
   name?: string;
   args?: any[];
   kwargs?: Record<string, any>;
@@ -398,6 +461,12 @@ export type SharedParseJob = {
   initialCount: number;
   lastObservedCount: number;
   lastCountChangeAt: number;
+  savedCount?: number;
+  updatedCount?: number;
+  duplicateCount?: number;
+  contentQueuedCount?: number;
+  contentSkippedCount?: number;
+  lastPolledAt?: number;
   status:
     | "in_progress"
     | "completed"
@@ -540,25 +609,40 @@ export async function fullTextSearch(args: {
   source?: string;
   searchMode?: "plain" | "phrase" | "websearch";
 }) {
+  const limit = clampBackendLimit(args.limit, 20);
+  const offset = Math.max(0, Math.floor(Number(args.offset ?? 0) || 0));
   const { data } = await apiClient.post<{
     papers: PaperApiModel[];
     total: number;
     query: string;
     sources: string[];
+    search_mode?: "plain" | "phrase" | "websearch";
+    limit?: number;
+    offset?: number;
+    stats?: FullTextSearchStats;
   }>("/search/fulltext", undefined, {
     params: {
       query: args.query,
-      limit: clampBackendLimit(args.limit, 20),
-      offset: Math.max(0, Math.floor(Number(args.offset ?? 0) || 0)),
+      limit,
+      offset,
       source: args.source,
       search_mode: args.searchMode || "websearch",
     },
   });
 
   return {
-    papers: (data.papers ?? []).map(mapPaper),
+    papers: (data.papers ?? []).map(mapFullTextSearchResult),
     total: data.total ?? 0,
     query: data.query,
+    sources: data.sources ?? [],
+    searchMode: data.search_mode ?? args.searchMode ?? "websearch",
+    limit: data.limit ?? limit,
+    offset: data.offset ?? offset,
+    stats: data.stats ?? {
+      total_matches: data.total ?? 0,
+      avg_relevance: 0,
+      max_relevance: 0,
+    },
   };
 }
 
@@ -591,12 +675,17 @@ export async function searchByKeywords(
   };
 }
 
-export async function getSearchStats(query: string) {
-  const { data } = await apiClient.get<{
-    total_matches: number;
-    avg_relevance: number;
-    max_relevance: number;
-  }>("/search/stats", { params: { query } });
+export async function getSearchStats(
+  query: string,
+  args?: { source?: string; searchMode?: "plain" | "phrase" | "websearch" },
+) {
+  const { data } = await apiClient.get<FullTextSearchStats>("/search/stats", {
+    params: {
+      query,
+      source: args?.source,
+      search_mode: args?.searchMode ?? "websearch",
+    },
+  });
   return data;
 }
 
@@ -605,6 +694,7 @@ export async function getSearchHighlight(paperId: number, query: string) {
     paper_id: number;
     title: string;
     abstract: string;
+    full_text?: string | null;
   }>(`/search/highlight/${paperId}`, { params: { query } });
   return data;
 }
@@ -616,14 +706,21 @@ export async function getPaperContentParts(paperId: number) {
   return (data ?? []).map(mapPaperContentPart);
 }
 
-export async function regeneratePaperContentPart(paperId: number, partId: number) {
+export async function regeneratePaperContentPart(
+  paperId: number,
+  partId: number,
+) {
   const { data } = await apiClient.post<PaperContentPartRegenerateResponse>(
     `/papers/id/${paperId}/content-parts/${partId}/regenerate`,
   );
   return data;
 }
 
-export async function regeneratePaperMarkdownPages(paperId: number, pageStart: number, pageEnd: number) {
+export async function regeneratePaperMarkdownPages(
+  paperId: number,
+  pageStart: number,
+  pageEnd: number,
+) {
   const { data } = await apiClient.post<PaperContentPartRegenerateResponse>(
     `/papers/id/${paperId}/markdown-pages/regenerate`,
     undefined,

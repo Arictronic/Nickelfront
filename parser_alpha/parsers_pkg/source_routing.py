@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import tempfile
 import time
 from copy import deepcopy
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from parsers_pkg.sources import SourceMetadata, SourceRegistry
 from parsers_pkg.translate import get_shared_query_translator
@@ -93,6 +95,7 @@ _SOURCE_QUERY_REWRITE: dict[str, dict[str, str]] = {
     "OpenAlex": {},
     "Crossref": {},
     "EuropePMC": {},
+    "GooglePatents": {},
     "PATENTSCOPE": {},
 }
 
@@ -145,6 +148,7 @@ def adapt_query_for_source(source: str, query: str, *, allow_translation: bool =
         "eLibrary",
         "Rospatent",
         "FreePatent",
+        "GooglePatents",
         "PATENTSCOPE",
     }:
         reason = "identity"
@@ -165,7 +169,25 @@ def adapt_query_for_source(source: str, query: str, *, allow_translation: bool =
     return normalized, reason
 
 
-def _default_fallback_chain(source: str) -> list[str]:
+_PATENT_PUBLICATION_QUERY_RE = re.compile(r"^[A-Z]{0,3}\d{4,}[A-Z]?\d?$", re.IGNORECASE)
+
+
+def _is_patent_publication_lookup(query: str) -> bool:
+    raw = " ".join(str(query or "").split()).strip()
+    if not raw:
+        return False
+    parsed = urlparse(raw)
+    if (
+        parsed.scheme in {"http", "https"}
+        and "patents.google.com" in parsed.netloc.lower()
+        and "/patent/" in parsed.path.lower()
+    ):
+        return True
+    normalized = re.sub(r"[\s,.:/\-]+", "", raw).upper()
+    return bool(_PATENT_PUBLICATION_QUERY_RE.fullmatch(normalized))
+
+
+def _default_fallback_chain(source: str, query: str = "") -> list[str]:
     if source == "EuropePMC":
         return ["EuropePMC", "Crossref", "OpenAlex"]
     if source == "Crossref":
@@ -177,11 +199,16 @@ def _default_fallback_chain(source: str) -> list[str]:
     if source == "arXiv":
         return ["arXiv", "OpenAlex", "Crossref"]
     if source == "PATENTSCOPE":
-        return ["PATENTSCOPE", "Rospatent", "FreePatent"]
+        chain = ["PATENTSCOPE", "Rospatent", "FreePatent"]
+        return [chain[0], "GooglePatents", *chain[1:]] if _is_patent_publication_lookup(query) else chain
+    if source == "GooglePatents":
+        return ["GooglePatents"]
     if source == "Rospatent":
-        return ["Rospatent", "PATENTSCOPE", "FreePatent"]
+        chain = ["Rospatent", "PATENTSCOPE", "FreePatent"]
+        return [chain[0], "GooglePatents", *chain[1:]] if _is_patent_publication_lookup(query) else chain
     if source == "FreePatent":
-        return ["FreePatent", "PATENTSCOPE", "Rospatent"]
+        chain = ["FreePatent", "PATENTSCOPE", "Rospatent"]
+        return [chain[0], "GooglePatents", *chain[1:]] if _is_patent_publication_lookup(query) else chain
     if source == "eLibrary":
         return ["eLibrary", "CyberLeninka", "OpenAlex"]
     if source == "CyberLeninka":
@@ -393,7 +420,7 @@ def resolve_route(
         candidates = [registry.get(name) for name in ordered_names]
         preserve_input_order = True
     else:
-        names = _default_fallback_chain(requested)
+        names = _default_fallback_chain(requested, query)
         candidates = [registry.get(name) for name in names if registry.is_supported(name)]
         preserve_input_order = True
 

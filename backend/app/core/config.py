@@ -50,6 +50,7 @@ class Settings(BaseSettings):
 
     CORE_API_KEY: str | None = None
     CORE_API_TIMEOUT: float = 40.0
+    OPENALEX_API_KEY: str | None = None
     SEMANTIC_SCHOLAR_API_KEY: str | None = None
 
 

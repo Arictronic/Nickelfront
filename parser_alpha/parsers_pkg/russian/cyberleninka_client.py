@@ -21,6 +21,7 @@ class CyberLeninkaClient(BaseAPIClient):
     BASE_URL = "https://cyberleninka.ru"
     API_SEARCH_PATH = "/api/search"
     SOURCE_NAME = "CyberLeninka"
+    ENRICH_FULL_TEXT_WITH_PDF = True
     MAX_RETRIES = 3
     RETRY_BASE_DELAY = 2.0
     _SCRIPT_STYLE_RE = re.compile(r"<(?:script|style|noscript)[^>]*>[\s\S]*?</(?:script|style|noscript)>", re.IGNORECASE)

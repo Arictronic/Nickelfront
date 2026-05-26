@@ -8,12 +8,12 @@ from app.api.v1.endpoints.error_helpers import format_paper_db_error
 from app.db.session import get_db
 from app.services.fulltext_search_service import FullTextSearchService
 from app.services.paper_service import PaperService
-from shared.schemas.paper import PaperSearchResponse
+from shared.schemas.paper import FullTextSearchResponse
 
 router = APIRouter(prefix="/search", tags=["search"])
 
 
-@router.post("/fulltext", response_model=PaperSearchResponse)
+@router.post("/fulltext", response_model=FullTextSearchResponse)
 async def fulltext_search(
     query: str = Query(..., description="Поисковый запрос"),
     limit: int = Query(default=20, ge=1, le=100, description="Максимум результатов"),
@@ -38,7 +38,7 @@ async def fulltext_search(
     """
     try:
         service = FullTextSearchService(db)
-        papers, total = await service.search(
+        papers, total, stats = await service.search(
             query=query,
             limit=limit,
             offset=offset,
@@ -46,11 +46,15 @@ async def fulltext_search(
             search_mode=search_mode,
         )
 
-        return PaperSearchResponse(
+        return FullTextSearchResponse(
             papers=papers,
             total=total,
             query=query,
             sources=[source] if source else ["all"],
+            search_mode=search_mode,
+            limit=limit,
+            offset=offset,
+            stats=stats,
         )
 
     except Exception as e:
@@ -117,6 +121,8 @@ async def search_by_keywords(
 @router.get("/stats")
 async def get_search_stats(
     query: str = Query(..., description="Поисковый запрос"),
+    source: str | None = Query(None, description="Фильтр по источнику"),
+    search_mode: str = Query(default="websearch", description="Режим поиска: plain, phrase, websearch"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -129,7 +135,7 @@ async def get_search_stats(
     """
     try:
         service = FullTextSearchService(db)
-        stats = await service.get_search_stats(query=query)
+        stats = await service.get_search_stats(query=query, source=source, search_mode=search_mode)
 
         return stats
 
@@ -141,6 +147,7 @@ async def get_search_stats(
 async def get_search_highlight(
     paper_id: int,
     query: str = Query(..., description="Поисковый запрос для подсветки"),
+    search_mode: str = Query(default="websearch", description="Режим поиска: plain, phrase, websearch"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -161,12 +168,14 @@ async def get_search_highlight(
         highlight = await service.search_with_highlight(
             query=query,
             paper=paper,
+            search_mode=search_mode,
         )
 
         return {
             "paper_id": paper_id,
             "title": highlight.get("title_highlight", paper.title),
             "abstract": highlight.get("abstract_highlight", paper.abstract),
+            "full_text": highlight.get("full_text_highlight"),
         }
 
     except HTTPException:

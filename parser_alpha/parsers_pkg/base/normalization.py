@@ -236,6 +236,11 @@ def derive_article_url(
             return sid
         return f"https://www.freepatent.ru/{sid.lstrip('/')}"
 
+    if normalized_source == "googlepatents":
+        if sid.startswith("http://") or sid.startswith("https://"):
+            return sid
+        return f"https://patents.google.com/patent/{quote(sid, safe='')}/en"
+
     if normalized_source == "patentscope":
         if sid.startswith("http://") or sid.startswith("https://"):
             return sid
@@ -282,4 +287,3 @@ def iso_utc(value: datetime | str | None) -> str | None:
     if dt is None:
         return None
     return dt.isoformat()
-

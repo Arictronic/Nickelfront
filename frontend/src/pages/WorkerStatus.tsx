@@ -6,161 +6,22 @@ import {
   deleteCeleryTask,
   getSharedParseJobs,
   deleteSharedParseJob,
-  type CeleryTaskStatus,
 } from "../api/papers";
+import {
+  buildUpdatedJobFromCelery,
+  clearParseJobStorage,
+  getParseJobProgressPercent,
+  getParseJobSavedCount,
+  getParseJobStatusClass,
+  getParseJobStatusText,
+  isExpiredPendingTask,
+  loadJobs,
+  mergeJobs,
+  normalizeJobs,
+  saveJobs,
+  type ParseJob,
+} from "../utils/parseJobs";
 import type { PaperSource } from "../types/paper";
-
-type ParseJob = {
-  jobId: string;
-  startedAt: number;
-  query: string;
-  source: PaperSource | "all";
-  initialCount: number;
-  lastObservedCount: number;
-  lastCountChangeAt: number;
-  status: "in_progress" | "completed" | "cancelled" | "failed" | "expired";
-  celeryStatus?: CeleryTaskStatus;
-  lastPolledAt?: number;
-};
-
-const LS_KEY = "parseJobs";
-const LEGACY_LS_KEYS = ["parseJobs.v6", "parseJobs.v5", "parseJobs.v4", "parseJobs.v3", "parseJobs.v2", "parseJobs.v1", "parseJobs.reset.v3"];
-const STALE_PENDING_TASK_MS = 30 * 60_000;
-
-function clearLegacyParseJobKeys() {
-  for (const key of LEGACY_LS_KEYS) {
-    localStorage.removeItem(key);
-  }
-}
-
-function clearParseJobStorage() {
-  clearLegacyParseJobKeys();
-  localStorage.removeItem(LS_KEY);
-}
-
-function isValidParseJob(job: unknown): job is ParseJob {
-  const maybeJob = job as Partial<ParseJob> | null | undefined;
-  return typeof maybeJob?.jobId === "string" && maybeJob.jobId.trim().length > 0;
-}
-
-function normalizeJobs(jobs: unknown): ParseJob[] {
-  if (!Array.isArray(jobs)) return [];
-  return jobs
-    .filter(isValidParseJob)
-    .map((job) => ({
-      ...job,
-      jobId: String(job.jobId),
-      source: job.source as PaperSource | "all",
-      status: (["in_progress", "completed", "cancelled", "failed", "expired"].includes(String(job.status))
-        ? job.status
-        : "in_progress") as ParseJob["status"],
-    }));
-}
-
-function isExpiredPendingTask(job: ParseJob, now: number): boolean {
-  return job.status === "in_progress" && now - job.lastCountChangeAt > STALE_PENDING_TASK_MS && job.lastObservedCount <= job.initialCount;
-}
-
-function getCeleryStatusMeta(status: CeleryTaskStatus | null | undefined): Record<string, any> {
-  const progress = status?.progress && typeof status.progress === "object" ? status.progress : {};
-  const result = status?.result && typeof status.result === "object" ? status.result : {};
-  return { ...progress, ...result };
-}
-
-function toFiniteNumber(value: unknown, fallback = 0): number {
-  const parsed = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function clampPercent(value: number): number {
-  return Math.max(0, Math.min(100, Math.round(value)));
-}
-
-function getParseJobProgressPercent(job: ParseJob): number {
-  if (job.status === "completed") return 100;
-  if (job.status === "failed" || job.status === "expired" || job.status === "cancelled") return 0;
-
-  const celeryStatus = job.celeryStatus;
-  if (celeryStatus) {
-    const meta = getCeleryStatusMeta(celeryStatus);
-    const current = toFiniteNumber(celeryStatus.current ?? meta.current, 0);
-    const total = toFiniteNumber(celeryStatus.total ?? meta.total, 0);
-    if (total > 0 && current > 0) return clampPercent((current / total) * 100);
-
-    const celeryState = celeryStatus.status;
-    const stage = String(meta.stage ?? "").toLowerCase();
-    const elapsed = toFiniteNumber(meta.elapsed_seconds, 0);
-
-    if (celeryState === "PENDING") return 3;
-    if (stage === "parser_alpha") {
-      // parser_alpha can run for a long time before saving articles.
-      // Show visible heartbeat progress while the textual status is updated.
-      return clampPercent(8 + Math.min(37, elapsed / 3));
-    }
-    if (stage.includes("read") || stage.includes("result") || stage.includes("parse_results")) return 46;
-    if (stage.includes("save") || stage.includes("saving")) return 55;
-    if (celeryState === "STARTED" || celeryState === "PROGRESS" || celeryState === "RECEIVED") return 8;
-  }
-
-  const delta = Math.max(0, job.lastObservedCount - job.initialCount);
-  const expectedDelta = 50;
-  return Math.min(100, Math.round((delta / expectedDelta) * 100));
-}
-
-function getParseJobStatusText(job: ParseJob): string {
-  if (job.status === "completed") return "✓ Завершено";
-  if (job.status === "failed") return "✕ Ошибка";
-  if (job.status === "cancelled") return "Отменено";
-  if (job.status === "expired") return "Истёк / не найден";
-
-  const celeryStatus = job.celeryStatus;
-  if (!celeryStatus) return "В обработке";
-
-  const meta = getCeleryStatusMeta(celeryStatus);
-  const stateText = String(meta.status || meta.stage_label || celeryStatus.state || "").trim();
-
-  if (celeryStatus.status === "SUCCESS") return "✓ Завершено";
-  if (celeryStatus.status === "FAILURE") return stateText ? `✕ ${stateText}` : "✕ Ошибка";
-  if (celeryStatus.status === "REVOKED") return "Отменено";
-  if (celeryStatus.status === "PENDING") return "Ожидание...";
-  if (celeryStatus.status === "RETRY") return "Повтор...";
-  if (celeryStatus.status === "UNKNOWN") return "Статус неизвестен";
-  if (celeryStatus.status === "RECEIVED") return stateText || "Получено worker-ом...";
-  if (celeryStatus.status === "STARTED" || celeryStatus.status === "PROGRESS") return stateText || "В процессе...";
-
-  return stateText || "В обработке";
-}
-
-
-function loadJobs(): ParseJob[] {
-  try {
-    // Старые версионные ключи не используем: после runtime-cleanup они могут
-    // содержать task_id, которых уже нет в Redis/Celery.
-    clearLegacyParseJobKeys();
-    const raw = localStorage.getItem(LS_KEY);
-    if (!raw) return [];
-    return normalizeJobs(JSON.parse(raw));
-  } catch {
-    clearParseJobStorage();
-    return [];
-  }
-}
-
-function saveJobs(jobs: ParseJob[]) {
-  localStorage.setItem(LS_KEY, JSON.stringify(normalizeJobs(jobs)));
-}
-
-function mergeJobs(localJobs: ParseJob[], sharedJobs: ParseJob[]): ParseJob[] {
-  const byId = new Map<string, ParseJob>();
-  for (const job of normalizeJobs(localJobs)) {
-    byId.set(job.jobId, job);
-  }
-  // Backend/shared history is fresher than browser localStorage.
-  for (const job of normalizeJobs(sharedJobs)) {
-    byId.set(job.jobId, job);
-  }
-  return Array.from(byId.values()).sort((a, b) => b.startedAt - a.startedAt).slice(0, 50);
-}
 
 export default function WorkerStatus() {
   const [jobs, setJobs] = useState<ParseJob[]>(() => loadJobs());
@@ -226,43 +87,17 @@ export default function WorkerStatus() {
 
         try {
           const celeryStatus = await getCeleryTaskStatus(job.jobId);
-          const now = Date.now();
-          const isSuccess = celeryStatus.status === "SUCCESS";
-          const isFailure = celeryStatus.status === "FAILURE";
-          const isCompleted = isSuccess || isFailure;
-          const isRevoked = celeryStatus.status === "REVOKED";
-          const savedCount = celeryStatus.saved_count || celeryStatus.total_saved || celeryStatus.result?.saved_count || celeryStatus.result?.total_saved || 0;
-
-          if (celeryStatus.status === "PENDING") {
-            const source = job.source === "all" ? "all" : job.source;
-            const current = await getPapersCount(source as any);
-            const changed = current !== job.lastObservedCount;
-            const lastCountChangeAt = changed ? now : job.lastCountChangeAt;
-            const stableMs = 60_000;
-            const shouldComplete = now - lastCountChangeAt > stableMs && current > job.initialCount;
-            const expired = !shouldComplete && isExpiredPendingTask({ ...job, lastObservedCount: current, lastCountChangeAt }, now);
-
-            return {
-              ...job,
-              celeryStatus,
-              lastObservedCount: current,
-              lastCountChangeAt,
-              lastPolledAt: now,
-              status: shouldComplete ? "completed" : expired ? "expired" : "in_progress",
-            } as ParseJob;
-          }
-
-          return {
-            ...job,
-            celeryStatus,
-            lastObservedCount: savedCount > 0 ? savedCount : job.lastObservedCount,
-            lastCountChangeAt: isCompleted ? now : job.lastCountChangeAt,
-            lastPolledAt: now,
-            status: isRevoked ? "cancelled" : isFailure ? "failed" : isSuccess ? "completed" : "in_progress",
-          } as ParseJob;
+          const source =
+            job.source === "all" ? "all" : (job.source as PaperSource);
+          const current =
+            celeryStatus.status === "PENDING"
+              ? await getPapersCount(source)
+              : undefined;
+          return buildUpdatedJobFromCelery(job, celeryStatus, current);
         } catch {
-          const source = job.source === "all" ? "all" : job.source;
-          const current = await getPapersCount(source as any);
+          const source =
+            job.source === "all" ? "all" : (job.source as PaperSource);
+          const current = await getPapersCount(source);
           const now = Date.now();
           const changed = current !== job.lastObservedCount;
 
@@ -273,14 +108,17 @@ export default function WorkerStatus() {
           };
 
           const stableMs = 60_000;
-          if (now - next.lastCountChangeAt > stableMs && current > next.initialCount) {
+          if (
+            now - next.lastCountChangeAt > stableMs &&
+            current > next.initialCount
+          ) {
             next.status = "completed";
           } else if (isExpiredPendingTask(next, now)) {
             next.status = "expired";
           }
           return next;
         }
-      })
+      }),
     );
 
     // If user clicked "clear history" while refresh was in-flight, keep list empty.
@@ -306,7 +144,12 @@ export default function WorkerStatus() {
     let cancelled = false;
 
     const pollInterval = window.setInterval(async () => {
-      if (cancelled || pollingRef.current || !jobsRef.current.some((job) => job.status === "in_progress")) return;
+      if (
+        cancelled ||
+        pollingRef.current ||
+        !jobsRef.current.some((job) => job.status === "in_progress")
+      )
+        return;
       pollingRef.current = true;
       try {
         await refreshJobs();
@@ -327,10 +170,17 @@ export default function WorkerStatus() {
   const completed = jobs.filter((j) => j.status === "completed").length;
 
   const clearHistory = async () => {
-    if (!window.confirm("Очистить историю задач? Записи будут удалены из интерфейса и общей истории backend. Celery-задачи не перезапускаются.")) return;
+    if (
+      !window.confirm(
+        "Очистить историю задач? Записи будут удалены из интерфейса и общей истории backend. Celery-задачи не перезапускаются.",
+      )
+    )
+      return;
     const knownJobs = jobsRef.current;
     setError(null);
-    await Promise.allSettled(knownJobs.map((job) => deleteSharedParseJob(job.jobId)));
+    await Promise.allSettled(
+      knownJobs.map((job) => deleteSharedParseJob(job.jobId)),
+    );
     jobsRef.current = [];
     setJobs([]);
     clearParseJobStorage();
@@ -338,25 +188,30 @@ export default function WorkerStatus() {
   };
 
   const cancelJob = async (jobId: string) => {
-    if (!window.confirm("Остановить задачу? В очереди она будет отменена, а запущенная может не прерваться сразу.")) {
+    if (
+      !window.confirm(
+        "Остановить задачу? В очереди она будет отменена, а запущенная может не прерваться сразу.",
+      )
+    ) {
       return;
     }
 
     try {
       await revokeCeleryTask(jobId, false);
-      const nextJobs: ParseJob[] = jobs.map((job): ParseJob =>
-        job.jobId === jobId
-          ? {
-              ...job,
-              status: "cancelled",
-              celeryStatus: {
-                ...(job.celeryStatus || {}),
-                task_id: job.jobId,
-                status: "REVOKED",
-                state: "REVOKED",
-              },
-            }
-          : job
+      const nextJobs: ParseJob[] = jobs.map(
+        (job): ParseJob =>
+          job.jobId === jobId
+            ? {
+                ...job,
+                status: "cancelled",
+                celeryStatus: {
+                  ...(job.celeryStatus || {}),
+                  task_id: job.jobId,
+                  status: "REVOKED",
+                  state: "REVOKED",
+                },
+              }
+            : job,
       );
       setJobs(nextJobs);
       jobsRef.current = nextJobs;
@@ -367,12 +222,19 @@ export default function WorkerStatus() {
   };
 
   const deleteJob = async (jobId: string) => {
-    if (!window.confirm("Удалить задачу из истории? Это не повлияет на Celery, только удалит запись из интерфейса.")) {
+    if (
+      !window.confirm(
+        "Удалить задачу из истории? Это не повлияет на Celery, только удалит запись из интерфейса.",
+      )
+    ) {
       return;
     }
 
     try {
-      await Promise.allSettled([deleteCeleryTask(jobId), deleteSharedParseJob(jobId)]);
+      await Promise.allSettled([
+        deleteCeleryTask(jobId),
+        deleteSharedParseJob(jobId),
+      ]);
       const nextJobs: ParseJob[] = jobs.filter((job) => job.jobId !== jobId);
       setJobs(nextJobs);
       jobsRef.current = nextJobs;
@@ -396,7 +258,10 @@ export default function WorkerStatus() {
               try {
                 setError(null);
                 const fromStorage = loadJobs();
-                const [count, sharedJobsRaw] = await Promise.all([getPapersCount("all"), getSharedParseJobs(50)]);
+                const [count, sharedJobsRaw] = await Promise.all([
+                  getPapersCount("all"),
+                  getSharedParseJobs(50),
+                ]);
                 const sharedJobs = normalizeJobs(sharedJobsRaw);
 
                 if (count === 0 && sharedJobs.length === 0) {
@@ -430,9 +295,16 @@ export default function WorkerStatus() {
         <h3>Текущий срез</h3>
         <p className="muted">
           Всего статей: <strong>{allCount}</strong> (обновлено:{" "}
-          <strong>{new Date(lastUpdatedAt).toLocaleTimeString("ru-RU")}</strong>)
+          <strong>{new Date(lastUpdatedAt).toLocaleTimeString("ru-RU")}</strong>
+          )
         </p>
-        <div className="kpi-grid" style={{ marginTop: 10, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+        <div
+          className="kpi-grid"
+          style={{
+            marginTop: 10,
+            gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+          }}
+        >
           <article className="panel kpi-card">
             <h3>В обработке</h3>
             <p className="kpi">{inProgress}</p>
@@ -454,7 +326,9 @@ export default function WorkerStatus() {
       <div className="panel">
         <h3>Общая история заданий парсинга</h3>
         {jobs.length === 0 ? (
-          <p className="muted">История задач пустая. Запустите парсинг в разделе Главная.</p>
+          <p className="muted">
+            История задач пустая. Запустите парсинг в разделе Главная.
+          </p>
         ) : (
           <table className="table">
             <thead>
@@ -473,44 +347,74 @@ export default function WorkerStatus() {
               {jobs.slice(0, 30).map((j) => {
                 const progress = getProgressPercent(j);
                 const statusText = getStatusText(j);
-                const savedCount = j.celeryStatus?.saved_count || j.celeryStatus?.total_saved || j.celeryStatus?.result?.saved_count || j.celeryStatus?.result?.total_saved || (j.lastObservedCount - j.initialCount);
+                const savedCount = getParseJobSavedCount(j);
 
                 return (
                   <tr key={j.jobId}>
-                    <td style={{ wordBreak: "break-word", fontFamily: "monospace", fontSize: "0.85em" }}>
+                    <td
+                      style={{
+                        wordBreak: "break-word",
+                        fontFamily: "monospace",
+                        fontSize: "0.85em",
+                      }}
+                    >
                       {j.jobId}
                     </td>
                     <td>{j.source}</td>
                     <td style={{ maxWidth: 280 }}>{j.query}</td>
                     <td>
-                      <span className={`status ${j.status === "completed" || j.celeryStatus?.status === "SUCCESS" ? "active" : j.status === "failed" || j.celeryStatus?.status === "FAILURE" ? "failed" : ""}`}>
+                      <span className={`status ${getParseJobStatusClass(j)}`}>
                         {statusText}
                       </span>
                     </td>
                     <td style={{ minWidth: 120 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <div style={{ flex: 1, height: 8, background: "#e0e0e0", borderRadius: 4, overflow: "hidden" }}>
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                        }}
+                      >
+                        <div
+                          style={{
+                            flex: 1,
+                            height: 8,
+                            background: "#e0e0e0",
+                            borderRadius: 4,
+                            overflow: "hidden",
+                          }}
+                        >
                           <div
                             style={{
                               width: `${progress}%`,
                               height: "100%",
-                              background: progress === 100 ? "#22c55e" : "#4a6cf7",
+                              background:
+                                progress === 100 ? "#22c55e" : "#4a6cf7",
                               transition: "width 0.3s ease",
                             }}
                           />
                         </div>
-                        <span style={{ fontSize: "0.85em", minWidth: 38 }}>{progress}%</span>
+                        <span style={{ fontSize: "0.85em", minWidth: 38 }}>
+                          {progress}%
+                        </span>
                       </div>
                     </td>
                     <td>{savedCount}</td>
                     <td>{new Date(j.startedAt).toLocaleTimeString("ru-RU")}</td>
                     <td style={{ display: "flex", gap: 8 }}>
-                      {j.status === "in_progress" && j.celeryStatus?.status !== "REVOKED" ? (
-                        <button className="btn" onClick={() => cancelJob(j.jobId)}>
+                      {j.status === "in_progress" &&
+                      j.celeryStatus?.status !== "REVOKED" ? (
+                        <button
+                          className="btn"
+                          onClick={() => cancelJob(j.jobId)}
+                        >
                           Остановить
                         </button>
                       ) : (
-                        <button className="btn btn-danger" onClick={() => deleteJob(j.jobId)}>
+                        <button
+                          className="btn btn-danger"
+                          onClick={() => deleteJob(j.jobId)}
+                        >
                           Удалить
                         </button>
                       )}
@@ -522,7 +426,8 @@ export default function WorkerStatus() {
           </table>
         )}
         <p className="muted" style={{ marginTop: 10 }}>
-          Статус отображается в реальном времени через Celery API endpoint /api/v1/tasks/celery/{`{task_id}`}/status
+          Статус отображается в реальном времени через Celery API endpoint
+          /api/v1/tasks/celery/{`{task_id}`}/status
         </p>
       </div>
     </div>

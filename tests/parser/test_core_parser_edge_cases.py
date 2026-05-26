@@ -68,6 +68,23 @@ class TestCOREParserEdgeCases(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(records[0].source_id)
         self.assertEqual(records[0].url, "https://doi.org/10.1000/core.1")
 
+    async def test_core_parser_preserves_inline_full_text_and_does_not_treat_landing_as_pdf(self):
+        parser = COREParser()
+        records = await parser.parse_search_results(
+            [
+                {
+                    "id": "inline-1",
+                    "title": "Full text record",
+                    "fullText": "Body text " * 40,
+                    "sourceFulltextUrls": ["https://repo.example/article-page"],
+                }
+            ]
+        )
+
+        self.assertGreater(len(records[0].full_text or ""), 200)
+        self.assertEqual(records[0].url, "https://repo.example/article-page")
+        self.assertIsNone(records[0].pdf_url)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -198,7 +198,10 @@ class PaperService:
         source: str | None = None,
     ) -> list[PaperSchema]:
         """Получить список статей с пагинацией и опциональным фильтром по источнику."""
-        stmt = select(PaperModel).order_by(PaperModel.created_at.desc())
+        stmt = select(PaperModel).order_by(
+            PaperModel.created_at.desc(),
+            PaperModel.id.desc(),
+        )
         if source and source != "all":
             stmt = stmt.where(PaperModel.source == source)
 
@@ -213,6 +216,54 @@ class PaperService:
 
         result = await self.db.execute(stmt)
         return result.scalar() or 0
+
+    async def get_recent_lightweight(
+        self,
+        limit: int = 20,
+        source: str | None = None,
+    ) -> list[dict]:
+        """Последние статьи для dashboard без тяжёлого поля full_text."""
+        stmt = select(
+            PaperModel.id,
+            PaperModel.title,
+            PaperModel.authors,
+            PaperModel.publication_date,
+            PaperModel.journal,
+            PaperModel.doi,
+            PaperModel.abstract,
+            PaperModel.keywords,
+            PaperModel.source,
+            PaperModel.source_id,
+            PaperModel.url,
+            PaperModel.pdf_url,
+            PaperModel.pdf_local_path,
+            PaperModel.processing_status,
+            PaperModel.content_task_id,
+            PaperModel.processing_error,
+            PaperModel.summary_ru,
+            PaperModel.analysis_ru,
+            PaperModel.translation_ru,
+            PaperModel.parse_confidence,
+            PaperModel.provenance,
+            PaperModel.quality_flags,
+            PaperModel.schema_version,
+            PaperModel.created_at,
+            PaperModel.updated_at,
+            (PaperModel.full_text.isnot(None)).label("has_full_text"),
+        ).order_by(
+            PaperModel.created_at.desc(),
+            PaperModel.id.desc(),
+        )
+        if source and source != "all":
+            stmt = stmt.where(PaperModel.source == source)
+
+        result = await self.db.execute(stmt.limit(limit))
+        items: list[dict] = []
+        for row in result.mappings().all():
+            item = dict(row)
+            item["full_text"] = None
+            items.append(item)
+        return items
 
     async def update_paper(
         self,

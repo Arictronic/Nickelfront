@@ -47,7 +47,7 @@ Nickelfront/
 - Python `3.13+`
 - Node.js `20` или `22` LTS желательно
 - npm
-- PostgreSQL
+- PostgreSQL 16
 
 Опционально:
 - Git
@@ -91,7 +91,7 @@ Nickelfront/
 install_all.bat
 ```
 
-Сейчас `install_all.bat` делегирует в `scripts/nickelfront_doctor_setup_FIXED_v18.bat`. Если вы поддерживаете несколько вариантов doctor/setup-скриптов, сначала проверьте, какой из них считается каноническим для вашей ветки.
+Сейчас `install_all.bat` делегирует в `scripts/nickelfront_doctor_setup.bat`. Если вы поддерживаете несколько вариантов doctor/setup-скриптов, сначала проверьте, какой из них считается каноническим для вашей ветки.
 
 Ожидаемое поведение установки:
 - создание `.venv`

@@ -16,21 +16,21 @@ export default function Header() {
     navigate("/login");
   };
 
-  let sessionLabel = "Session: none";
+  let sessionLabel = "Сессия: нет";
   let sessionClass = "inactive";
 
   if (isSessionChecking) {
-    sessionLabel = "Session: checking";
+    sessionLabel = "Сессия: проверка";
     sessionClass = "checking";
   } else if (sessionError) {
-    sessionLabel = "Session: backend unavailable";
+    sessionLabel = "Backend недоступен";
     sessionClass = "pending";
   } else if (isAuthenticated) {
     if (user) {
-      sessionLabel = "Session: active";
+      sessionLabel = "Сессия активна";
       sessionClass = "active";
     } else {
-      sessionLabel = "Session: pending";
+      sessionLabel = "Сессия: ожидание";
       sessionClass = "pending";
     }
   }
@@ -56,7 +56,7 @@ export default function Header() {
           className="user-chip"
           title={user?.email || ""}
         >
-          {user?.username || user?.email || (isAuthenticated && sessionError ? "пользователь" : "guest")}
+          {user?.username || user?.email || (isAuthenticated && sessionError ? "пользователь" : "гость")}
         </span>
 
         {user || (isAuthenticated && sessionError) ? (

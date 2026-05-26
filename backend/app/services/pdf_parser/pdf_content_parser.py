@@ -99,6 +99,8 @@ class PDFParser(
         import pdfplumber
 
         opts = self._normalize_options(options)
+        if hasattr(self._ai_service, "reset_document_session"):
+            self._ai_service.reset_document_session()
         logger.info(
             "Извлечение PDF по страницам: mode=%s, ocr=%s, ocr_mode=%s, ocr_engine=%s",
             opts["extraction_mode"],
@@ -499,6 +501,8 @@ class PDFParser(
             "ai_page_image_format": str(raw.get("ai_page_image_format") or "png").lower(),
             "ai_timeout_sec": self._to_int(raw.get("ai_timeout_sec"), 120, minimum=1, maximum=600),
             "ai_preserve_original_text": self._to_bool(raw.get("ai_preserve_original_text"), True),
+            "ai_fallback_to_auto": self._to_bool(raw.get("ai_fallback_to_auto"), True),
+            "ai_delete_temp_images": self._to_bool(raw.get("ai_delete_temp_images"), True),
             "detect_columns": self._to_bool(raw.get("detect_columns"), True),
             "extract_tables": self._to_bool(raw.get("extract_tables"), True),
             "remove_headers_footers": self._to_bool(raw.get("remove_headers_footers"), True),
@@ -669,7 +673,8 @@ class PDFParser(
             metadata.update({"table_count": 0, "table_cells": 0})
 
         if opts.get("force_strategy") == "ai" or str(opts.get("ai_mode") or "off") == "force":
-            ai_result = self._ai_service.run_page_stub(
+            ai_result = self._ai_service.recognize_page(
+                file_bytes=file_bytes,
                 page_number=page_num,
                 page_width=page_width,
                 page_height=page_height,
@@ -685,7 +690,18 @@ class PDFParser(
             if ai_result.warnings:
                 metadata["ai_warnings"] = list(ai_result.warnings)
             if ai_result.text.strip():
-                candidates.append(self._candidate("ai_page_image", ai_result.text, page_num, opts, metadata))
+                ai_candidate = self._candidate("ai_page_image", ai_result.text, page_num, opts, metadata)
+                ai_candidate["quality_score"] = max(float(ai_candidate.get("quality_score") or 0.0), 0.995)
+                candidates.append(ai_candidate)
+            elif not bool(opts.get("ai_fallback_to_auto", True)):
+                candidates.clear()
+                candidates.append({
+                    "method": "ai_page_image_failed",
+                    "text": "",
+                    "quality_score": 0.0,
+                    "warnings": ["ai_page_recognition_failed"],
+                    "metadata": {"page": page_num},
+                })
 
         best = self._select_best_candidate(candidates)
         text = (best.get("text") or "").strip()

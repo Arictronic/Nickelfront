@@ -137,8 +137,33 @@ class QwenServiceClient:
         )
 
     def upload_file(self, file_path: str) -> dict:
-        """Documentation updated."""
+        """Upload file through qwen_service provider pipeline."""
         return self._request("POST", "/files/upload", json={"file_path": file_path})
+
+    def upload_file_and_send_message(
+        self,
+        file_path: str,
+        message: str = "",
+        session_id: str | None = None,
+        thinking_enabled: bool = True,
+        search_enabled: bool = True,
+        auto_continue: bool | None = None,
+        session_prompt: str | None = None,
+    ) -> dict:
+        """Upload a file and send it with optional message."""
+        payload = {
+            "file_path": file_path,
+            "message": message,
+            "session_id": session_id or self.current_session_id,
+            "thinking_enabled": thinking_enabled,
+            "search_enabled": search_enabled,
+            "auto_continue": auto_continue,
+            "session_prompt": session_prompt or "",
+        }
+        result = self._request("POST", "/files/upload-and-send", json=payload)
+        if result.get("session_id"):
+            self.current_session_id = result.get("session_id")
+        return result
 
     def get_file(self, file_id: str) -> dict:
         """Documentation updated."""

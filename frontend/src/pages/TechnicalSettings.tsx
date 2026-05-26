@@ -29,6 +29,7 @@ const SOURCE_HINTS: Record<string, string> = {
   eLibrary: "Осторожный источник: возможны ограничения, капчи, 403/429.",
   Rospatent: "Российские патенты. Лучше держать умеренный лимит.",
   FreePatent: "Патентный источник. Может быть шумным по нерелевантным результатам.",
+  GooglePatents: "Google Patents. Получение карточки по номеру публикации или прямой ссылке.",
   PATENTSCOPE: "WIPO/PATENTSCOPE. Полезен для международных патентов, но может быть медленным.",
 };
 
@@ -424,6 +425,83 @@ function PdfMarkdownSettingsPanel({
         </div>
         <div className="settings-form-grid">
           <label className="settings-field">
+            <span>Основной режим parser</span>
+            <select
+              className="input"
+              value={settings.parser_mode || "auto"}
+              onChange={(event) => {
+                const parser_mode = event.target.value;
+                set({
+                  parser_mode,
+                  ai_mode: parser_mode === "ai" ? "force" : settings.ai_mode || "off",
+                  force_strategy: parser_mode === "ai" ? "ai" : settings.force_strategy || "",
+                });
+              }}
+            >
+              <option value="auto">auto — обычные алгоритмы + fallback</option>
+              <option value="ai">ai — принудительный AI-анализ PDF</option>
+            </select>
+            <small>Это верхнеуровневый режим, который dashboard передаёт как pdf_mode. OCR управляется отдельно.</small>
+          </label>
+          <label className="settings-field">
+            <span>Принудительная стратегия</span>
+            <select
+              className="input"
+              value={settings.force_strategy || ""}
+              onChange={(event) => {
+                const force_strategy = event.target.value;
+                set({
+                  force_strategy,
+                  extraction_mode: force_strategy || settings.extraction_mode || "auto",
+                  parser_mode: force_strategy === "ai" ? "ai" : settings.parser_mode || "auto",
+                  ai_mode: force_strategy === "ai" ? "force" : settings.ai_mode || "off",
+                  ocr_mode: force_strategy === "ocr" ? "force" : settings.ocr_mode || "auto",
+                  ocr_enabled: force_strategy === "ocr" ? true : settings.ocr_enabled,
+                });
+              }}
+            >
+              <option value="">не форсировать</option>
+              <option value="simple">simple</option>
+              <option value="layout">layout</option>
+              <option value="columns">columns</option>
+              <option value="ocr">ocr</option>
+              <option value="ai">ai</option>
+            </select>
+            <small>Нужно для выборочного режима: руками фиксирует конкретный способ извлечения.</small>
+          </label>
+          <label className="settings-field">
+            <span>OCR режим</span>
+            <select
+              className="input"
+              value={settings.ocr_mode || (settings.ocr_enabled ? "auto" : "off")}
+              onChange={(event) => {
+                const ocr_mode = event.target.value;
+                set({ ocr_mode, ocr_enabled: ocr_mode !== "off", force_strategy: ocr_mode === "force" ? "ocr" : settings.force_strategy });
+              }}
+            >
+              <option value="auto">auto — только когда мало текста</option>
+              <option value="force">force — принудительно OCR</option>
+              <option value="off">off — не использовать OCR</option>
+            </select>
+            <small>OCR — отдельный fallback/ручной режим, не то же самое, что AI-анализ.</small>
+          </label>
+          <label className="settings-field">
+            <span>AI режим</span>
+            <select
+              className="input"
+              value={settings.ai_mode || "off"}
+              onChange={(event) => {
+                const ai_mode = event.target.value;
+                set({ ai_mode, parser_mode: ai_mode === "force" ? "ai" : settings.parser_mode || "auto", force_strategy: ai_mode === "force" ? "ai" : settings.force_strategy });
+              }}
+            >
+              <option value="off">off — выключен</option>
+              <option value="auto">auto — как fallback</option>
+              <option value="force">force — принудительно AI</option>
+            </select>
+            <small>AI получает текст/страницы как дополнительный способ восстановления содержания, а не основной Markdown-output.</small>
+          </label>
+          <label className="settings-field">
             <span>Режим извлечения</span>
             <select
               className="input"
@@ -435,6 +513,7 @@ function PdfMarkdownSettingsPanel({
               <option value="columns">columns — читать две колонки</option>
               <option value="simple">simple — обычный текст</option>
               <option value="ocr">ocr — OCR при наличии зависимостей</option>
+              <option value="ai">ai — AI-анализ страницы</option>
             </select>
             <small>auto сравнивает layout/simple/columns по quality score. Для IEEE/arXiv часто помогает columns.</small>
           </label>
@@ -469,19 +548,54 @@ function PdfMarkdownSettingsPanel({
       <section className="panel settings-card settings-card-wide">
         <div className="settings-card-title">
           <h3>OCR fallback</h3>
-          <span className={`settings-pill ${settings.ocr_enabled ? "warn" : ""}`}>{settings.ocr_enabled ? "включён" : "выключен"}</span>
+          <span className={`settings-pill ${settings.ocr_mode === "force" ? "warn" : ""}`}>{settings.ocr_mode || (settings.ocr_enabled ? "auto" : "off")}</span>
         </div>
         <div className="settings-toggle-grid">
           <Toggle
-            checked={settings.ocr_enabled}
-            onChange={(ocr_enabled) => set({ ocr_enabled })}
+            checked={settings.ocr_mode !== "off" && settings.ocr_enabled}
+            onChange={(ocr_enabled) => set({ ocr_enabled, ocr_mode: ocr_enabled ? "auto" : "off" })}
             label="Использовать OCR для сканов"
             hint="Работает только если установлены PyMuPDF, Pillow, pytesseract и системный Tesseract. Без зависимостей страница получит warning."
           />
         </div>
         <div className="settings-form-grid">
+          <label className="settings-field">
+            <span>OCR engine</span>
+            <select className="input" value={settings.ocr_engine || "auto"} onChange={(event) => set({ ocr_engine: event.target.value })}>
+              <option value="auto">auto</option>
+              <option value="tesseract">tesseract</option>
+              <option value="paddle">paddle</option>
+              <option value="surya">surya</option>
+              <option value="ocrmypdf">ocrmypdf</option>
+            </select>
+            <small>Backend сам пропустит недоступный движок и запишет warning.</small>
+          </label>
           <NumberField label="DPI OCR" min={120} max={400} value={settings.ocr_dpi ?? 220} onChange={(ocr_dpi) => set({ ocr_dpi })} hint="Выше DPI — лучше распознавание, но тяжелее CPU/RAM." suffix="dpi" />
           <TextField label="Языки OCR" value={settings.ocr_languages || "eng+rus"} onChange={(ocr_languages) => set({ ocr_languages })} hint="Формат Tesseract: eng, rus или eng+rus." />
+        </div>
+      </section>
+
+      <section className="panel settings-card settings-card-wide">
+        <div className="settings-card-title">
+          <h3>AI PDF fallback</h3>
+          <span className={`settings-pill ${settings.ai_mode === "force" ? "warn" : ""}`}>{settings.ai_mode || "off"}</span>
+        </div>
+        <div className="settings-form-grid">
+          <TextField label="AI provider" value={settings.ai_provider || ""} onChange={(ai_provider) => set({ ai_provider })} hint="Например qwen/local. Пусто — использовать backend default." />
+          <TextField label="AI model" value={settings.ai_model || ""} onChange={(ai_model) => set({ ai_model })} hint="Пусто — использовать модель из Qwen settings/.env." />
+          <TextField label="AI endpoint" value={settings.ai_endpoint || ""} onChange={(ai_endpoint) => set({ ai_endpoint })} hint="Опциональный endpoint сервиса анализа страниц." />
+          <NumberField label="AI render DPI" min={120} max={500} value={settings.ai_render_dpi ?? 220} onChange={(ai_render_dpi) => set({ ai_render_dpi })} hint="DPI рендера страницы в изображение для AI fallback." suffix="dpi" />
+          <label className="settings-field">
+            <span>Формат изображения</span>
+            <select className="input" value={settings.ai_page_image_format || "png"} onChange={(event) => set({ ai_page_image_format: event.target.value })}>
+              <option value="png">png</option>
+              <option value="jpeg">jpeg</option>
+              <option value="jpg">jpg</option>
+              <option value="webp">webp</option>
+            </select>
+            <small>PNG обычно безопаснее для текста и формул.</small>
+          </label>
+          <NumberField label="AI timeout" min={5} max={1800} value={settings.ai_timeout_sec ?? 120} onChange={(ai_timeout_sec) => set({ ai_timeout_sec })} hint="Таймаут одного AI-запроса по странице/части." suffix="сек." />
         </div>
       </section>
 
@@ -540,7 +654,7 @@ function qwenStatusLabel(status: any) {
   if (!status) return "не проверялся";
   if (status.expired) return "истёк";
   if (status.status === "missing") return "не задан";
-  if (status.status === "rate_limited" || status.rate_limited) return "действителен / rate limit";
+  if (status.status === "rate_limited" || status.rate_limited) return "действителен / лимит провайдера";
   if (status.valid) return "действителен";
   if (status.status === "service_unavailable") return "сервис недоступен";
   if (status.status === "unknown" || status.status === "bad_response") return "неизвестно";
@@ -557,15 +671,15 @@ function qwenStatusClass(status: any) {
 function qwenCheckLabel(status: any) {
   const check = status?.checked_by || status?.source;
   if (check === "smoke_chat") return "действующий токен / тестовый чат";
-  if (check === "provider_user_api") return "live /api/user";
-  if (status?.cached) return "cache";
+  if (check === "provider_user_api") return "live-проверка /api/user";
+  if (status?.cached) return "кэш";
   return "не проверялся";
 }
 
 function qwenTestStatusLabel(result: QwenTestResult | null) {
   if (!result) return "тест не запускался";
   if (result.status === "ok") return "успешно";
-  if (result.status === "rate_limited") return "rate limit";
+  if (result.status === "rate_limited") return "лимит провайдера";
   if (result.status === "partial") return "частично";
   if (result.status === "warning") return "нужно проверить";
   return "ошибка";
@@ -822,7 +936,7 @@ function QwenSettingsPanel({
             max={50}
             value={testChatCount}
             onChange={setTestChatCount}
-            hint="Максимум 50 активных тестовых чатов. Если Qwen отдаёт rate limit, токен может быть рабочим — просто слишком высокая нагрузка."
+            hint="Максимум 50 активных тестовых чатов. Если Qwen отдаёт лимит провайдера, токен может быть рабочим — просто слишком высокая нагрузка."
             suffix="чатов"
           />
           <label className="settings-field settings-card-wide">

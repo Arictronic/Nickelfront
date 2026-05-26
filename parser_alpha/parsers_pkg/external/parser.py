@@ -135,12 +135,15 @@ class ExternalParser(BaseParser):
             journal=_first_string(item.get("journal")),
             doi=_first_string(item.get("doi")),
             abstract=_first_string(item.get("abstract")),
-            full_text=None,
+            full_text=_first_string(item.get("full_text")),
             keywords=_coerce_string_list(item.get("keywords"), split_commas=True),
             source=_first_string(item.get("source")) or self.source,
             source_id=_first_string(item.get("source_id")),
             url=_first_string(item.get("url")),
             pdf_url=_first_string(item.get("pdf_url")),
+            parse_confidence=item.get("parse_confidence"),
+            provenance=item.get("provenance") if isinstance(item.get("provenance"), dict) else {},
+            quality_flags=_coerce_string_list(item.get("quality_flags"), split_commas=True),
         )
 
     async def parse_full_text(self, text: str, metadata: dict[str, Any]) -> Paper:

@@ -138,6 +138,13 @@ class TestNormalizationValidationDedupe(unittest.TestCase):
             ),
             "WO2020123456",
         )
+        self.assertEqual(
+            normalize_patent_identifier(
+                "https://patents.google.com/patent/WO2020123456A1/en",
+                source="GooglePatents",
+            ),
+            "WO2020123456A1",
+        )
 
         by_title = deduplicator.check_duplicate(
             title="Device for producing nickel alloy powder",

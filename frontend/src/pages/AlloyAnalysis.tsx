@@ -63,6 +63,51 @@ const ACTIVE_ALLOY_TASK_KEY = "alloyAnalysis.activeTask.v1";
 const ACTIVE_ALLOY_TASK_MAX_AGE_MS = 8 * 60 * 60_000;
 const STALE_PENDING_ALLOY_TASK_MS = 30 * 60_000;
 
+const CELERY_TASK_STATUS_LABELS: Record<string, string> = {
+  PENDING: "Ожидает запуска",
+  RECEIVED: "Получена воркером",
+  STARTED: "В работе",
+  PROGRESS: "В работе",
+  RETRY: "Повтор",
+  FAILURE: "Ошибка",
+  SUCCESS: "Завершено",
+  REVOKED: "Отменено",
+  UNKNOWN: "Неизвестно",
+};
+
+const ALLOY_STAGE_LABELS: Record<string, string> = {
+  qwen_analysis: "Анализ через Qwen",
+  selected_papers: "Статьи выбраны",
+  paper_analysis: "Анализ статьи",
+  chunk_analysis: "Анализ части текста",
+  chunk_done: "Часть текста завершена",
+  merging_article_json: "Сборка итогового JSON статьи",
+  completed: "Завершено",
+  failed: "Ошибка",
+};
+
+function normalizeStatusKey(value: unknown): string {
+  return String(value || "").trim();
+}
+
+function formatCeleryTaskStatus(status: string | undefined | null): string {
+  const key = normalizeStatusKey(status).toUpperCase();
+  return CELERY_TASK_STATUS_LABELS[key] || String(status || "Неизвестно");
+}
+
+function formatAlloyStageLabel(stage: unknown): string {
+  const value = normalizeStatusKey(stage);
+  if (!value) return "Ожидание";
+
+  const lowerKey = value.toLowerCase();
+  if (ALLOY_STAGE_LABELS[lowerKey]) return ALLOY_STAGE_LABELS[lowerKey];
+
+  const upperKey = value.toUpperCase();
+  if (CELERY_TASK_STATUS_LABELS[upperKey]) return CELERY_TASK_STATUS_LABELS[upperKey];
+
+  return value;
+}
+
 function clearActiveAlloyTask() {
   localStorage.removeItem(ACTIVE_ALLOY_TASK_KEY);
 }
@@ -478,9 +523,9 @@ export default function AlloyAnalysis() {
   const articleChunks = Number(progress.chunks || 0);
   const processedChunks = Number(progress.processed_chunks || 0);
   const totalChunks = Number(progress.total_chunks || 0);
-  const stageLabel = String(
-    progress.stage_label || progress.stage || taskStatus?.status || "Ожидание",
-  );
+  const stageLabel = progress.stage_label
+    ? String(progress.stage_label)
+    : formatAlloyStageLabel(progress.stage || taskStatus?.status);
   const progressPercent =
     totalChunks > 0
       ? Math.round((processedChunks / totalChunks) * 100)
@@ -490,7 +535,7 @@ export default function AlloyAnalysis() {
   const progressText =
     totalArticles > 0
       ? `${currentArticle} / ${totalArticles}`
-      : taskStatus?.status || "Ожидает запуска";
+      : formatCeleryTaskStatus(taskStatus?.status);
 
   const toggleSource = (source: string) => {
     setSelectedSources((prev) =>
@@ -588,7 +633,9 @@ export default function AlloyAnalysis() {
           </label>
           {taskId && <span className="counter-badge">task_id: {taskId}</span>}
           {taskStatus && (
-            <span className="counter-badge">статус: {taskStatus.status}</span>
+            <span className="counter-badge">
+              статус: {formatCeleryTaskStatus(taskStatus.status)}
+            </span>
           )}
           {running && (
             <span className="counter-badge">прогресс: {progressText}</span>
@@ -712,7 +759,7 @@ export default function AlloyAnalysis() {
               <strong>Этап:</strong> {stageLabel}
             </div>
             <div>
-              <strong>Статус Celery:</strong> {taskStatus.status}
+              <strong>Статус Celery:</strong> {formatCeleryTaskStatus(taskStatus.status)}
             </div>
             <div>
               <strong>Статьи:</strong> {progressText}

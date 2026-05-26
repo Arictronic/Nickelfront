@@ -6,8 +6,10 @@ Fully self-contained implementation for qwen_service
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import time
+from pathlib import Path
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -254,6 +256,9 @@ class QwenTransport:
     CHAT_URL = f"{BASE_URL}/chat/completions"
     CHATS_URL = f"{BASE_URL}/chats"
     CHATS_NEW_URL = f"{CHATS_URL}/new"
+    FILE_STS_URL = f"{BASE_URL}/files/getstsToken"
+    FILE_PARSE_URL = f"{BASE_URL}/files/parse"
+    FILE_PARSE_STATUS_URL = f"{BASE_URL}/files/parse/status"
 
     def __init__(
         self,
@@ -511,6 +516,73 @@ class QwenTransport:
         data = resp.json()
         return data.get("models") or []
 
+    def request_file_upload_token(self, *, filename: str, filesize: int, filetype: str = "file") -> dict[str, Any]:
+        """Create Qwen file upload ticket.
+
+        HAR sequence observed on chat.qwen.ai:
+        POST /api/v2/files/getstsToken -> PUT OSS signed URL -> POST /api/v2/files/parse
+        """
+        payload = {"filename": filename, "filesize": int(filesize), "filetype": filetype or "file"}
+        resp = self.session.post(self.FILE_STS_URL, json=payload, timeout=self.connect_timeout)
+        self._raise_for_bad_response(resp, operation="files/getstsToken")
+        data = self._extract_data(resp.json())
+        if not isinstance(data, dict) or not data.get("file_id") or not data.get("file_url"):
+            raise QwenProviderError("Qwen file upload ticket is missing file_id/file_url")
+        return data
+
+    def put_file_to_oss(self, *, upload_url: str, content: bytes, content_type: str | None = None) -> None:
+        """Upload file bytes to OSS using provider signed URL.
+
+        The signed URL comes from /files/getstsToken. Do not log it because it contains
+        temporary credentials in query parameters.
+        """
+        headers: dict[str, str] = {}
+        if content_type:
+            headers["Content-Type"] = content_type
+        resp = self.session.put(upload_url, data=content, headers=headers, timeout=(self.connect_timeout, 180.0))
+        self._raise_for_bad_response(resp, operation="oss_file_put")
+
+    def request_file_parse(self, file_id: str) -> dict[str, Any]:
+        resp = self.session.post(self.FILE_PARSE_URL, json={"file_id": file_id}, timeout=self.connect_timeout)
+        self._raise_for_bad_response(resp, operation="files/parse")
+        data = self._extract_data(resp.json())
+        return data if isinstance(data, dict) else {"file_id": file_id}
+
+    def poll_file_parse_status(
+        self,
+        file_id: str,
+        *,
+        timeout_sec: float = 90.0,
+        interval_sec: float = 1.5,
+    ) -> dict[str, Any]:
+        deadline = time.time() + max(1.0, float(timeout_sec))
+        last_item: dict[str, Any] = {"file_id": file_id, "status": "unknown"}
+        while True:
+            resp = self.session.post(
+                self.FILE_PARSE_STATUS_URL,
+                json={"file_id_list": [file_id]},
+                timeout=self.connect_timeout,
+            )
+            self._raise_for_bad_response(resp, operation="files/parse/status")
+            data = self._extract_data(resp.json())
+            if isinstance(data, list) and data:
+                item = data[0] if isinstance(data[0], dict) else {}
+            elif isinstance(data, dict):
+                items = data.get("items") or data.get("data") or []
+                item = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else data
+            else:
+                item = {}
+            last_item = dict(item or last_item)
+            status = str(last_item.get("status") or last_item.get("parse_status") or "").strip().lower()
+            error_msg = str(last_item.get("error_msg") or last_item.get("message") or "").strip()
+            if status in {"success", "finished", "done"}:
+                return last_item
+            if status in {"failed", "error", "fail"}:
+                raise QwenProviderError(error_msg or f"Qwen file parse failed for {file_id}")
+            if time.time() >= deadline:
+                raise QwenProviderError(f"Qwen file parse status timeout for {file_id}: {last_item}")
+            time.sleep(max(0.2, float(interval_sec)))
+
     def send_stream(
         self,
         payload: dict[str, Any],
@@ -602,6 +674,7 @@ class QwenAPI:
         self._local_to_remote: dict[str, dict[int, str]] = {}
         self._next_local_id: dict[str, int] = {}
         self._last_response_remote_id: dict[str, str] = {}
+        self._uploaded_files: dict[str, dict[str, Any]] = {}
 
     def _log(self, message: str):
         if callable(self.logger):
@@ -772,6 +845,7 @@ class QwenAPI:
         thinking_enabled: bool,
         search_enabled: bool,
         parent_id: str | None = None,
+        ref_file_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         model = self.get_model()
         remote_user_id = str(uuid4())
@@ -792,7 +866,7 @@ class QwenAPI:
                 "role": "user",
                 "content": prompt,
                 "user_action": "chat",
-                "files": [],
+                "files": self._build_file_payloads(ref_file_ids or []),
                 "timestamp": now_sec,
                 "models": [model],
                 "chat_type": "t2t",
@@ -805,6 +879,231 @@ class QwenAPI:
         }
 
         return payload
+
+    def _build_file_payloads(self, ref_file_ids: list[str]) -> list[dict[str, Any]]:
+        files: list[dict[str, Any]] = []
+        for file_id in ref_file_ids or []:
+            fid = str(file_id or "").strip()
+            if not fid:
+                continue
+            cached = self._uploaded_files.get(fid) or {}
+            filename = str(cached.get("filename") or cached.get("name") or fid)
+            size = int(cached.get("size") or 0)
+            content_type = str(cached.get("content_type") or cached.get("file_type") or "application/octet-stream")
+            url = str(cached.get("url") or cached.get("file_url") or "")
+            created_at = int(cached.get("created_at") or int(time.time() * 1000))
+            meta = cached.get("meta") if isinstance(cached.get("meta"), dict) else {}
+            if not meta:
+                meta = {
+                    "name": filename,
+                    "size": size,
+                    "content_type": content_type,
+                    "parse_meta": {"parse_status": str(cached.get("parse_status") or "success")},
+                }
+            files.append({
+                "type": "file",
+                "file": {
+                    "created_at": created_at,
+                    "data": {},
+                    "filename": filename,
+                    "hash": None,
+                    "id": fid,
+                    "user_id": str(cached.get("user_id") or ""),
+                    "meta": meta,
+                    "update_at": created_at,
+                },
+                "id": fid,
+                "url": url,
+                "name": filename,
+                "collection_name": "",
+                "progress": 0,
+                "status": str(cached.get("status") or "uploaded"),
+                "greenNet": "success",
+                "size": size,
+                "error": "",
+                "itemId": str(cached.get("itemId") or uuid4()),
+                "file_type": content_type,
+                "showType": "file",
+                "file_class": str(cached.get("file_class") or "document"),
+                "uploadTaskId": str(cached.get("uploadTaskId") or uuid4()),
+            })
+        return files
+
+    def upload_file(self, file_path: str, *, attempts: int | None = None) -> dict[str, Any]:
+        """Upload a local file to Qwen provider and wait until provider parses it.
+
+        Retries the whole get-token -> put-oss -> parse pipeline. No credentials or
+        signed URLs are logged.
+        """
+        path = Path(file_path)
+        if not path.exists() or not path.is_file():
+            raise QwenProviderError(f"File does not exist: {file_path}")
+
+        max_attempts = attempts or _env_int("QWEN_FILE_UPLOAD_ATTEMPTS", 3, min_value=1, max_value=10)
+        parse_timeout = _env_float("QWEN_FILE_PARSE_TIMEOUT_SEC", 120.0, min_value=5.0, max_value=600.0)
+        parse_interval = _env_float("QWEN_FILE_PARSE_POLL_INTERVAL_SEC", 1.5, min_value=0.2, max_value=30.0)
+        content = path.read_bytes()
+        filename = path.name
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        last_error: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                ticket = self.transport.request_file_upload_token(
+                    filename=filename,
+                    filesize=len(content),
+                    filetype="file",
+                )
+                file_id = str(ticket.get("file_id") or "").strip()
+                file_url = str(ticket.get("file_url") or "").strip()
+                if not file_id or not file_url:
+                    raise QwenProviderError("Qwen upload ticket did not include file_id/file_url")
+
+                self.transport.put_file_to_oss(
+                    upload_url=file_url,
+                    content=content,
+                    content_type=content_type,
+                )
+                self.transport.request_file_parse(file_id)
+                parse_status = self.transport.poll_file_parse_status(
+                    file_id,
+                    timeout_sec=parse_timeout,
+                    interval_sec=parse_interval,
+                )
+                file_info = {
+                    "id": file_id,
+                    "file_id": file_id,
+                    "filename": filename,
+                    "name": filename,
+                    "size": len(content),
+                    "content_type": content_type,
+                    "file_type": content_type,
+                    "url": file_url,
+                    "file_url": file_url,
+                    "status": "uploaded",
+                    "parse_status": str(parse_status.get("status") or "success"),
+                    "parse_meta": parse_status,
+                    "meta": {
+                        "name": filename,
+                        "size": len(content),
+                        "content_type": content_type,
+                        "parse_meta": {"parse_status": str(parse_status.get("status") or "success")},
+                    },
+                    "created_at": int(time.time() * 1000),
+                }
+                self._uploaded_files[file_id] = file_info
+                self._log(f"Qwen file uploaded: file_id={file_id}, name={filename}, size={len(content)}")
+                return file_info
+            except Exception as exc:
+                last_error = exc
+                self._log(f"Qwen file upload attempt {attempt}/{max_attempts} failed: {type(exc).__name__}: {exc}")
+                self.transport._reset_session_after_transport_error()
+                if attempt < max_attempts:
+                    time.sleep(min(10.0, 0.8 * attempt))
+
+        raise QwenProviderError(f"Qwen file upload failed after {max_attempts} attempts: {last_error}")
+
+    def send_file_message_with_recovery(
+        self,
+        *,
+        file_path: str,
+        message: str = "",
+        session_id: str | None = None,
+        thinking_enabled: bool = False,
+        search_enabled: bool = False,
+        auto_continue: bool | None = None,
+        session_prompt: str = "",
+    ) -> dict[str, Any]:
+        """Upload a file and send it with an optional message.
+
+        First tries the requested/current session. If upload or send fails after
+        upload retries, creates a fresh chat session and retries once there.
+        """
+        errors: list[str] = []
+        initial_session_id = session_id or self.session_id
+        sid = initial_session_id or self.create_session()
+        if not sid:
+            raise QwenProviderError("Cannot send file message: failed to create Qwen session")
+
+        def _send_session_prompt_once(target_sid: str) -> None:
+            prompt = (session_prompt or "").strip()
+            if not prompt:
+                return
+            holder: dict[str, Any] = {}
+
+            def on_complete(thinking: str, response: str) -> None:
+                holder["thinking"] = thinking
+                holder["response"] = response
+
+            def on_meta(meta: dict[str, Any]) -> None:
+                holder.update(meta or {})
+
+            callbacks = StreamCallbacks(on_complete_parts=on_complete, on_meta=on_meta)
+            self.send(
+                SendRequest(
+                    session_id=str(target_sid),
+                    prompt=prompt,
+                    ref_file_ids=[],
+                    thinking_enabled=False,
+                    search_enabled=False,
+                ),
+                callbacks,
+            )
+
+        for phase in ("current_session", "new_session"):
+            try:
+                prompt_sent_before_file = False
+                if phase == "new_session":
+                    sid = self.create_session()
+                    if not sid:
+                        raise QwenProviderError("Failed to create replacement Qwen session")
+                    _send_session_prompt_once(str(sid))
+                    prompt_sent_before_file = bool((session_prompt or "").strip())
+                elif not initial_session_id:
+                    _send_session_prompt_once(str(sid))
+                    prompt_sent_before_file = bool((session_prompt or "").strip())
+                file_info = self.upload_file(file_path, attempts=3)
+                response_holder: dict[str, Any] = {}
+
+                def on_complete(thinking: str, response: str) -> None:
+                    response_holder["thinking"] = thinking
+                    response_holder["response"] = response
+
+                def on_meta(meta: dict[str, Any]) -> None:
+                    response_holder.update(meta or {})
+
+                callbacks = StreamCallbacks(on_complete_parts=on_complete, on_meta=on_meta)
+                self.send(
+                    SendRequest(
+                        session_id=str(sid),
+                        prompt=message or "",
+                        ref_file_ids=[str(file_info["file_id"])],
+                        thinking_enabled=thinking_enabled,
+                        search_enabled=search_enabled,
+                    ),
+                    callbacks,
+                )
+                return {
+                    "session_id": sid,
+                    "message": message or "",
+                    "file_id": file_info.get("file_id"),
+                    "file_info": file_info,
+                    "response": response_holder.get("response", ""),
+                    "thinking": response_holder.get("thinking", ""),
+                    "message_id": response_holder.get("response_message_id") or response_holder.get("message_id") or 0,
+                    "used_replacement_session": phase == "new_session",
+                    "session_prompt_sent_before_file": prompt_sent_before_file,
+                    "upload_attempts": 3,
+                    "errors": errors,
+                }
+            except Exception as exc:
+                errors.append(f"{phase}: {type(exc).__name__}: {exc}")
+                self._log(f"Qwen send_file_message {phase} failed: {exc}")
+                if phase == "current_session":
+                    continue
+                raise QwenProviderError("Qwen file message failed after retrying in a new session: " + "; ".join(errors))
+
+        raise QwenProviderError("Qwen file message failed: " + "; ".join(errors))
 
     def send(self, request: SendRequest, callbacks: StreamCallbacks) -> None:
         """Send message with streaming response"""
@@ -822,6 +1121,7 @@ class QwenAPI:
                 thinking_enabled=request.thinking_enabled,
                 search_enabled=request.search_enabled,
                 parent_id=parent_id,
+                ref_file_ids=request.ref_file_ids,
             )
 
             resp = self.transport.send_stream(

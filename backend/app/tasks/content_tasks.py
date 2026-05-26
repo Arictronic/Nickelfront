@@ -27,6 +27,7 @@ from app.services.paper_content_service import (
 )
 from app.services.paper_service import PaperService
 from app.services.paper_content_part_service import PaperContentPartService
+from app.services.qwen_queue_client import run_ai_ocr_document_via_queue
 from app.services.system_settings_service import (
     get_pdf_markdown_settings_safe,
     get_postprocess_settings_safe,
@@ -37,6 +38,13 @@ from app.tasks.celery_app import celery_app
 
 
 PIPELINE_VERSION = "content-pipeline-v2"
+
+
+def _normalize_pdf_mode_override(value: Any) -> str | None:
+    if value is None:
+        return None
+    mode = str(value).strip().lower()
+    return mode if mode in {"auto", "ai"} else "auto"
 
 
 def _task_id(task_self: Any) -> str | None:
@@ -126,7 +134,11 @@ def _content_flags(
     }
 
 
-def enqueue_paper_content_pipeline(paper_id: int, root_task_id: str | None = None):
+def enqueue_paper_content_pipeline(
+    paper_id: int,
+    root_task_id: str | None = None,
+    pdf_mode: str | None = None,
+):
     """Start the article post-processing pipeline for one paper.
 
     Big text/PDF payloads are never passed through Celery results. Every stage
@@ -134,9 +146,10 @@ def enqueue_paper_content_pipeline(paper_id: int, root_task_id: str | None = Non
     """
     content_queue = settings.CONTENT_QUEUE_NAME
     qwen_queue = settings.QWEN_QUEUE_NAME
+    pdf_mode = _normalize_pdf_mode_override(pdf_mode)
 
     workflow = chain(
-        download_pdf_task.s(paper_id, root_task_id).set(queue=content_queue),
+        download_pdf_task.s(paper_id, root_task_id, pdf_mode).set(queue=content_queue),
         extract_pdf_text_task.s().set(queue=content_queue),
         celery_app.signature("app.tasks.qwen.markdown").set(queue=qwen_queue),
         celery_app.signature("app.tasks.qwen.ru_analysis").set(queue=qwen_queue),
@@ -148,15 +161,16 @@ def enqueue_paper_content_pipeline(paper_id: int, root_task_id: str | None = Non
 
 
 @celery_app.task(bind=True)
-def process_paper_content_task(self, paper_id: int) -> dict[str, Any]:
+def process_paper_content_task(self, paper_id: int, pdf_mode: str | None = None) -> dict[str, Any]:
     """Backward-compatible entry point used by parser endpoints/tasks.
 
     It no longer performs PDF/Qwen work directly. It only marks the paper as
     queued and launches the real stage-by-stage pipeline.
     """
     task_id = _task_id(self)
+    pdf_mode = _normalize_pdf_mode_override(pdf_mode)
     try:
-        result = enqueue_paper_content_pipeline(paper_id, root_task_id=task_id)
+        result = enqueue_paper_content_pipeline(paper_id, root_task_id=task_id, pdf_mode=pdf_mode)
         logger.info(
             "Content pipeline queued: paper_id={}, root_task_id={}, chain_result_id={}",
             paper_id,
@@ -169,6 +183,7 @@ def process_paper_content_task(self, paper_id: int) -> dict[str, Any]:
             "root_task_id": task_id,
             "chain_result_id": getattr(result, "id", None),
             "pipeline": PIPELINE_VERSION,
+            "pdf_mode": pdf_mode,
         }
     except Exception as exc:
         logger.exception("Failed to queue content pipeline for paper {}: {}", paper_id, exc)
@@ -176,10 +191,23 @@ def process_paper_content_task(self, paper_id: int) -> dict[str, Any]:
 
 
 @celery_app.task(bind=True, acks_late=True)
-def download_pdf_task(self, paper_id: int, root_task_id: str | None = None) -> dict[str, Any]:
+def download_pdf_task(
+    self,
+    paper_id: int,
+    root_task_id: str | None = None,
+    pdf_mode: str | None = None,
+) -> dict[str, Any]:
     task_id = _task_id(self)
     try:
-        return run_async(_download_pdf_async(self, paper_id, root_task_id=root_task_id, task_id=task_id))
+        return run_async(
+            _download_pdf_async(
+                self,
+                paper_id,
+                root_task_id=root_task_id,
+                task_id=task_id,
+                pdf_mode=pdf_mode,
+            )
+        )
     except Exception as exc:
         logger.exception("PDF download task failed for paper {}: {}", paper_id, exc)
         raise
@@ -190,15 +218,23 @@ async def _download_pdf_async(
     paper_id: int,
     root_task_id: str | None = None,
     task_id: str | None = None,
+    pdf_mode: str | None = None,
 ) -> dict[str, Any]:
     task_id = task_id or root_task_id
+    pdf_mode = _normalize_pdf_mode_override(pdf_mode)
     _safe_update_state(self, task_id, "STARTED", {"paper_id": paper_id, "stage": "downloading_pdf"})
 
     async with async_session_maker() as db:
         paper_service = PaperService(db)
         paper = await paper_service.get_by_id(paper_id)
         if not paper:
-            return {"status": "error", "paper_id": paper_id, "error": "paper_not_found", "root_task_id": root_task_id}
+            return {
+                "status": "error",
+                "paper_id": paper_id,
+                "error": "paper_not_found",
+                "root_task_id": root_task_id,
+                "pdf_mode": pdf_mode,
+            }
 
 
 
@@ -216,6 +252,7 @@ async def _download_pdf_async(
                 "status": "ok",
                 "paper_id": paper_id,
                 "root_task_id": root_task_id,
+                "pdf_mode": pdf_mode,
                 "pdf_downloaded": False,
                 "pdf_skipped": True,
                 "pipeline": PIPELINE_VERSION,
@@ -255,6 +292,7 @@ async def _download_pdf_async(
                 "status": "ok",
                 "paper_id": paper_id,
                 "root_task_id": root_task_id,
+                "pdf_mode": pdf_mode,
                 "pdf_downloaded": False,
                 "pdf_url": pdf_url,
                 "pdf_local_path": None,
@@ -274,6 +312,7 @@ async def _download_pdf_async(
             "status": "ok",
             "paper_id": paper_id,
             "root_task_id": root_task_id,
+            "pdf_mode": pdf_mode,
             "pdf_downloaded": True,
             "pdf_local_path": pdf_local_path,
             "pdf_url": pdf_url,
@@ -348,6 +387,17 @@ async def _extract_pdf_text_async(
             ai_mode = str(pdf_markdown.get("ai_mode") or ("force" if parser_mode == "ai" else "off")).strip().lower() or "off"
             force_strategy = str(pdf_markdown.get("force_strategy") or "").strip().lower()
             legacy_extraction_mode = str(pdf_markdown.get("extraction_mode") or "auto").strip().lower() or "auto"
+            launch_pdf_mode = _normalize_pdf_mode_override(previous.get("pdf_mode"))
+            if launch_pdf_mode == "ai":
+                parser_mode = "ai"
+                ai_mode = "force"
+                force_strategy = "ai"
+                legacy_extraction_mode = "ai"
+            elif launch_pdf_mode == "auto":
+                parser_mode = "auto"
+                ai_mode = "off"
+                force_strategy = ""
+                legacy_extraction_mode = "auto"
 
             extraction_options = {
                 "parser_mode": parser_mode,
@@ -373,12 +423,50 @@ async def _extract_pdf_text_async(
                 "ai_render_dpi": pdf_markdown.get("ai_render_dpi", 220),
                 "ai_page_image_format": pdf_markdown.get("ai_page_image_format", "png"),
                 "ai_timeout_sec": pdf_markdown.get("ai_timeout_sec", 120),
+                "ai_fallback_to_auto": pdf_markdown.get("ai_fallback_to_auto", True),
+                "ai_delete_temp_images": pdf_markdown.get("ai_delete_temp_images", True),
                 "min_text_chars": pdf_markdown.get("min_text_chars", 300),
                 "max_page_chars": pdf_markdown.get("max_page_chars", 60000),
             }
-            extracted_page_items = await asyncio.to_thread(extract_pdf_page_items, pdf_bytes, extraction_options)
-            extracted_pages = [str(item.get("text") or "") for item in extracted_page_items]
-            extracted_text = "\n\n".join(page for page in extracted_pages if page and page.strip()).strip()
+            ai_requested = parser_mode == "ai" or force_strategy == "ai" or ai_mode == "force"
+            if ai_requested:
+                ai_timeout = float(pdf_markdown.get("ai_document_timeout_sec") or 3600)
+                ai_result = await asyncio.to_thread(
+                    run_ai_ocr_document_via_queue,
+                    pdf_path=pdf_local_path,
+                    options=extraction_options,
+                    timeout=max(300.0, ai_timeout),
+                    purpose=f"paper-{paper_id}-ai-page-ocr",
+                )
+                ai_pages = ai_result.get("pages") if isinstance(ai_result, dict) else []
+                if isinstance(ai_pages, list) and ai_pages:
+                    extracted_page_items = [item for item in ai_pages if isinstance(item, dict)]
+                    extracted_pages = [str(item.get("text") or "") for item in extracted_page_items]
+                    extracted_text = "\n\n".join(page for page in extracted_pages if page and page.strip()).strip()
+                if not extracted_text and bool(extraction_options.get("ai_fallback_to_auto", True)):
+                    logger.warning(
+                        "AI OCR returned no text for paper {}; falling back to local auto parser. error={}",
+                        paper_id,
+                        ai_result.get("error") if isinstance(ai_result, dict) else "invalid_ai_result",
+                    )
+                    fallback_options = dict(extraction_options)
+                    fallback_options.update(
+                        {
+                            "parser_mode": "auto",
+                            "force_strategy": "",
+                            "extraction_mode": "auto",
+                            "extraction_strategy": "auto",
+                            "ai_mode": "off",
+                            "ai_enabled": False,
+                        }
+                    )
+                    extracted_page_items = await asyncio.to_thread(extract_pdf_page_items, pdf_bytes, fallback_options)
+                    extracted_pages = [str(item.get("text") or "") for item in extracted_page_items]
+                    extracted_text = "\n\n".join(page for page in extracted_pages if page and page.strip()).strip()
+            else:
+                extracted_page_items = await asyncio.to_thread(extract_pdf_page_items, pdf_bytes, extraction_options)
+                extracted_pages = [str(item.get("text") or "") for item in extracted_page_items]
+                extracted_text = "\n\n".join(page for page in extracted_pages if page and page.strip()).strip()
 
         if extracted_text:
             content_parts_count = len(extracted_pages or [extracted_text])

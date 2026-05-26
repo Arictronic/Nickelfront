@@ -6,6 +6,7 @@ import Dashboard from "./pages/Dashboard";
 import Patents from "./pages/Patents";
 import PatentDetail from "./pages/PatentDetail";
 import Analytics from "./pages/Analytics";
+import FullTextSearch from "./pages/FullTextSearch";
 import AlloyAnalysis from "./pages/AlloyAnalysis";
 import Metrics from "./pages/Metrics";
 import CeleryMonitoring from "./pages/CeleryMonitoring";
@@ -217,6 +218,9 @@ export default function App() {
           <Route path="/metrics" element={<ProtectedPage name="Метрики и Аналитика"><Metrics /></ProtectedPage>} />
           <Route path="/celery" element={<AdminPage name="Мониторинг Celery"><CeleryMonitoring /></AdminPage>} />
           <Route path="/search" element={<ProtectedPage name="Поиск"><Analytics /></ProtectedPage>} />
+          <Route path="/fulltext-search" element={<ProtectedPage name="Полнотекстовый поиск"><FullTextSearch /></ProtectedPage>} />
+          <Route path="/search/fulltext" element={<ProtectedPage name="Полнотекстовый поиск"><Navigate to="/fulltext-search" replace /></ProtectedPage>} />
+          <Route path="/full-text-search" element={<ProtectedPage name="Полнотекстовый поиск"><Navigate to="/fulltext-search" replace /></ProtectedPage>} />
           <Route path="/analysis" element={<ProtectedPage name="Анализ сплавов"><AlloyAnalysis /></ProtectedPage>} />
           <Route path="/jobs" element={<ProtectedPage name="Статус парсинга"><WorkerStatus /></ProtectedPage>} />
           <Route path="/database" element={<AdminPage name="База данных"><Database /></AdminPage>} />

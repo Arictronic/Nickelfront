@@ -8,10 +8,12 @@ export const PAPER_SOURCES = [
   "eLibrary",
   "Rospatent",
   "FreePatent",
+  "GooglePatents",
   "PATENTSCOPE",
 ] as const;
 
 export type PaperSource = (typeof PAPER_SOURCES)[number];
+export type PdfProcessingMode = "auto" | "ai";
 
 export interface Paper {
   id: number;
@@ -40,6 +42,33 @@ export interface Paper {
   schemaVersion: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+  rank?: number;
+  snippet?: string | null;
+  titleHighlight?: string | null;
+  abstractHighlight?: string | null;
+  fullTextHighlight?: string | null;
+  hasPdf?: boolean;
+  hasFullText?: boolean;
+  fullTextIndexed?: boolean;
+  matchedFields?: string[];
+}
+
+export interface FullTextSearchStats {
+  total_matches: number;
+  avg_relevance: number;
+  max_relevance: number;
+}
+
+export interface FullTextSearchResult extends Paper {
+  rank: number;
+  snippet: string | null;
+  titleHighlight: string | null;
+  abstractHighlight: string | null;
+  fullTextHighlight: string | null;
+  hasPdf: boolean;
+  hasFullText: boolean;
+  fullTextIndexed: boolean;
+  matchedFields: string[];
 }
 
 export interface PaperContentPart {
@@ -89,25 +118,32 @@ const PROCESSING_STATUS_LABELS: Record<string, string> = {
   downloading_pdf: "Загрузка PDF",
   pdf_downloaded: "PDF загружен",
   pdf_download_failed: "PDF не загрузился",
+  pdf_download_skipped: "Загрузка PDF пропущена",
   pdf_unavailable: "PDF недоступен",
   extracting_pdf_text: "Извлечение текста из PDF",
+  pdf_text_skipped: "Извлечение текста PDF пропущено",
   pdf_parsed: "Текст PDF извлечён",
   fulltext_fallback_parsed: "Текст получен из резервного источника",
   fulltext_unavailable: "Полный текст недоступен",
   formatting_markdown: "Оцифровка файла",
   digitizing_file: "Оцифровка файла",
   markdown_ready: "Файл оцифрован",
+  markdown_partial: "Файл частично оцифрован",
+  markdown_ready_without_qwen: "Текст собран без Qwen",
   markdown_failed: "Ошибка оцифровки файла",
   markdown_skipped: "Оцифровка пропущена",
   analyzing_ru: "Анализ на русском",
   ru_analysis_ready: "Русский анализ готов",
   ru_analysis_fallback: "Русский анализ в резервном режиме",
+  ru_analysis_skipped: "Русский анализ пропущен",
   extracting_keywords: "Выделение ключевых слов",
   keywords_ready: "Ключевые слова готовы",
   keywords_failed: "Ошибка ключевых слов",
+  keywords_skipped: "Ключевые слова пропущены",
   indexing_vector: "Индексация в векторной базе",
   embedding_ready: "Векторный индекс готов",
   embedding_skipped: "Векторная индексация пропущена",
+  qwen_auth_failed: "Ошибка авторизации Qwen",
   ready: "Готово",
   ready_with_fallback: "Готово (резервный режим)",
   completed: "Готово",
@@ -123,32 +159,45 @@ const PROCESSING_STATUS_PROGRESS: Record<string, number> = {
   downloading_pdf: 25,
   pdf_downloaded: 32,
   pdf_download_failed: 35,
+  pdf_download_skipped: 35,
   pdf_unavailable: 35,
   extracting_pdf_text: 40,
+  pdf_text_skipped: 48,
   pdf_parsed: 48,
   fulltext_fallback_parsed: 48,
   fulltext_unavailable: 48,
   formatting_markdown: 52,
   digitizing_file: 52,
   markdown_ready: 72,
+  markdown_partial: 72,
+  markdown_ready_without_qwen: 72,
   markdown_failed: 72,
   markdown_skipped: 72,
   analyzing_ru: 80,
   ru_analysis_ready: 86,
   ru_analysis_fallback: 86,
+  ru_analysis_skipped: 86,
   extracting_keywords: 90,
   keywords_ready: 92,
   keywords_failed: 92,
+  keywords_skipped: 92,
   indexing_vector: 96,
   embedding_ready: 98,
   embedding_skipped: 98,
+  qwen_auth_failed: 100,
   ready: 100,
   ready_with_fallback: 100,
   completed: 100,
   failed: 100,
 };
 
-const PROCESSING_FINAL_STATUSES = new Set(["ready", "ready_with_fallback", "completed", "failed"]);
+const PROCESSING_FINAL_STATUSES = new Set([
+  "ready",
+  "ready_with_fallback",
+  "completed",
+  "failed",
+  "qwen_auth_failed",
+]);
 
 type ParsedProcessingStatus = {
   key: string;
@@ -156,7 +205,9 @@ type ParsedProcessingStatus = {
   total: number | null;
 };
 
-function parseProcessingStatus(status: string | null | undefined): ParsedProcessingStatus {
+function parseProcessingStatus(
+  status: string | null | undefined,
+): ParsedProcessingStatus {
   const raw = (status ?? "").trim();
   if (!raw) return { key: "", current: null, total: null };
 
@@ -172,11 +223,15 @@ function parseProcessingStatus(status: string | null | undefined): ParsedProcess
   };
 }
 
-export function getProcessingStatusKey(status: string | null | undefined): string {
+export function getProcessingStatusKey(
+  status: string | null | undefined,
+): string {
   return parseProcessingStatus(status).key;
 }
 
-export function getProcessingStatusLabel(status: string | null | undefined): string {
+export function getProcessingStatusLabel(
+  status: string | null | undefined,
+): string {
   const parsed = parseProcessingStatus(status);
   if (!parsed.key) return "Неизвестно";
 
@@ -193,7 +248,9 @@ export function getProcessingStatusLabel(status: string | null | undefined): str
   return baseLabel;
 }
 
-export function getProcessingProgress(status: string | null | undefined): number {
+export function getProcessingProgress(
+  status: string | null | undefined,
+): number {
   const parsed = parseProcessingStatus(status);
   if (!parsed.key) return 0;
 
@@ -254,7 +311,16 @@ export interface VectorSearchResponse {
   search_type: SearchType | "text_fallback";
 }
 
-export type CeleryTaskStatusType = "PENDING" | "RECEIVED" | "STARTED" | "PROGRESS" | "RETRY" | "FAILURE" | "SUCCESS" | "REVOKED" | "UNKNOWN";
+export type CeleryTaskStatusType =
+  | "PENDING"
+  | "RECEIVED"
+  | "STARTED"
+  | "PROGRESS"
+  | "RETRY"
+  | "FAILURE"
+  | "SUCCESS"
+  | "REVOKED"
+  | "UNKNOWN";
 
 export interface CeleryTaskStatus {
   task_id: string;
@@ -290,4 +356,3 @@ export interface CeleryTaskStatus {
   args?: any[];
   kwargs?: Record<string, any>;
 }
-

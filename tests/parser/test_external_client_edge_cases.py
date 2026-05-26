@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from parsers_pkg.external.client import CrossrefClient, EuropePMCClient, OpenAlexClient, RosPatentClient
 from parsers_pkg.sources import build_default_source_registry
@@ -41,6 +42,7 @@ class TestExternalClientEdgeCases(unittest.IsolatedAsyncioTestCase):
         records = await client.search("nickel", limit=1)
 
         self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["source_id"], "10.1000/nickel.1")
         self.assertEqual(records[0]["authors"], ["Alice Smith", "The Materials Consortium"])
         self.assertEqual(records[0]["keywords"], ["metallurgy"])
         self.assertEqual(records[0]["journal"], "Journal of Alloys")
@@ -137,6 +139,71 @@ class TestExternalSourceMetadata(unittest.TestCase):
         registry = build_default_source_registry()
         self.assertTrue(registry.get("OpenAlex").capabilities.pdf_url)
         self.assertTrue(registry.get("Crossref").capabilities.pdf_url)
+
+
+class TestMetadataFirstSearchPolicies(unittest.IsolatedAsyncioTestCase):
+    async def test_openalex_does_not_require_pdf_content(self):
+        client = OpenAlexClient()
+        params_seen: dict = {}
+
+        async def fake_request_json(path: str, params: dict):
+            params_seen.update(params)
+            return {"results": []}
+
+        client._request_json = fake_request_json
+        await client.search("nickel", limit=1)
+
+        self.assertNotIn("filter", params_seen)
+
+    async def test_crossref_does_not_require_pdf_full_text_links(self):
+        client = CrossrefClient()
+        params_seen: dict = {}
+
+        async def fake_request_json(path: str, params: dict):
+            params_seen.update(params)
+            return {"message": {"items": []}}
+
+        client._request_json = fake_request_json
+        await client.search("nickel", limit=1)
+
+        self.assertNotIn("filter", params_seen)
+
+    async def test_europepmc_does_not_require_open_pdf_records(self):
+        client = EuropePMCClient()
+        params_seen: dict = {}
+
+        async def fake_request_json(path: str, params: dict):
+            params_seen.update(params)
+            return {"resultList": {"result": []}}
+
+        client._request_json = fake_request_json
+        await client.search("nickel", limit=1)
+
+        self.assertEqual(params_seen["query"], "nickel")
+
+    async def test_openalex_uses_official_content_url_without_persisting_key(self):
+        with patch.dict("os.environ", {"OPENALEX_API_KEY": "secret-key"}):
+            client = OpenAlexClient()
+
+        async def fake_request_json(path: str, params: dict):
+            return {
+                "results": [
+                    {
+                        "id": "https://openalex.org/W123",
+                        "display_name": "Official content paper",
+                        "has_content": {"pdf": True},
+                        "best_oa_location": {"pdf_url": "https://repo.example/fallback.pdf"},
+                    }
+                ]
+            }
+
+        client._request_json = fake_request_json
+        records = await client.search("nickel", limit=1)
+
+        self.assertEqual(records[0]["pdf_url"], "https://content.openalex.org/works/W123.pdf")
+        self.assertNotIn("secret-key", records[0]["pdf_url"])
+        self.assertIn("pdf_url_via_openalex_content_api", records[0]["quality_flags"])
+
 
 class TestExternalClientRound11Robustness(unittest.IsolatedAsyncioTestCase):
     async def test_openalex_uses_open_access_oa_url_pdf_as_pdf_not_article_url(self):

@@ -1,22 +1,40 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, PieChart, Pie, Cell, LineChart, Line, ResponsiveContainer, Legend } from "recharts";
 import {
   getPapersCount,
-  getPapersList,
+  getRecentPapers,
+  getCeleryTaskStatus,
+  getSharedParseJobs,
   parseAll,
   parsePapers,
-  getCeleryTaskStatus,
   revokeCeleryTask,
   deleteCeleryTask,
-  getSharedParseJobs,
   deleteSharedParseJob,
-  type CeleryTaskStatus,
 } from "../api/papers";
-import { PAPER_SOURCES, Paper, PaperSource } from "../types/paper";
+import { PAPER_SOURCES, Paper, PaperSource, PdfProcessingMode } from "../types/paper";
+import type { ParserSettings } from "../types/settings";
 import { Link } from "react-router-dom";
 import { apiClient } from "../api/client";
+import { getSystemSettings } from "../api/settings";
+import {
+  buildUpdatedJobFromCelery,
+  clearParseJobStorage,
+  getCeleryStatusMeta,
+  getParseJobProgressPercent,
+  getParseJobSavedCount,
+  getParseJobStatusClass,
+  getParseJobStatusText,
+  isExpiredPendingTask,
+  loadJobs,
+  mergeJobs,
+  normalizeJobs,
+  saveJobs,
+  type ParseJob,
+} from "../utils/parseJobs";
 
 const COLORS = ["#4a6cf7", "#00c49f", "#ffbb28", "#ff8042", "#8884d8"];
+const RECENT_PAPERS_LIMIT = 20;
+
 const COMPLETENESS_LABELS_RU: Record<string, string> = {
   with_abstract: "Аннотация",
   with_full_text: "Полный текст",
@@ -24,18 +42,6 @@ const COMPLETENESS_LABELS_RU: Record<string, string> = {
   with_doi: "DOI",
   with_authors: "Авторы",
   with_embedding: "Эмбеддинг",
-};
-
-type ParseJob = {
-  jobId: string;
-  startedAt: number;
-  query: string;
-  source: PaperSource | "all";
-  initialCount: number;
-  lastObservedCount: number;
-  lastCountChangeAt: number;
-  status: "in_progress" | "completed" | "cancelled" | "failed" | "expired";
-  celeryStatus?: CeleryTaskStatus;
 };
 
 type AnalyticsSummary = {
@@ -70,145 +76,36 @@ type QualityReport = {
   };
 };
 
-const LS_KEY = "parseJobs";
-const LEGACY_LS_KEYS = ["parseJobs.v6", "parseJobs.v5", "parseJobs.v4", "parseJobs.v3", "parseJobs.v2", "parseJobs.v1", "parseJobs.reset.v3"];
-const STALE_PENDING_TASK_MS = 30 * 60_000;
+type SourceGuidance = {
+  method: "API" | "HTML";
+  short: string;
+};
 
-function clearLegacyParseJobKeys() {
-  for (const key of LEGACY_LS_KEYS) {
-    localStorage.removeItem(key);
-  }
-}
+type DashboardLoadError = {
+  key: string;
+  label: string;
+  message: string;
+};
 
-function clearParseJobStorage() {
-  clearLegacyParseJobKeys();
-  localStorage.removeItem(LS_KEY);
-}
+const SOURCE_GUIDANCE: Record<PaperSource | "all", SourceGuidance> = {
+  all: { method: "API", short: "Запускает парсинг по всем включённым источникам. Лимит применяется на каждый источник." },
+  CORE: { method: "API", short: "Агрегатор научных работ открытого доступа; часто есть PDF и метаданные." },
+  arXiv: { method: "API", short: "Препринты с хорошей доступностью PDF; лучше для англоязычных запросов." },
+  OpenAlex: { method: "API", short: "Широкий индекс метаданных публикаций; полнотекст/PDF зависят от внешних хостов." },
+  Crossref: { method: "API", short: "Сильный источник DOI и метаданных; полнотекст часто недоступен." },
+  EuropePMC: { method: "API", short: "Биомедицинский фокус; полезен для life-science направлений." },
+  CyberLeninka: { method: "HTML", short: "Русскоязычные публикации; стабильность извлечения зависит от структуры страницы." },
+  eLibrary: { method: "HTML", short: "Русскоязычные библиографические карточки; полнотекст доступен не всегда." },
+  Rospatent: { method: "HTML", short: "Патентные документы РФ; лучше для патентных терминов и номеров." },
+  FreePatent: { method: "HTML", short: "Публичные патентные карточки; структура страниц может меняться." },
+  GooglePatents: { method: "HTML", short: "Google Patents: поиск по теме, номеру публикации или прямой ссылке." },
+  PATENTSCOPE: { method: "HTML", short: "Международные патентные публикации WIPO; ответы могут быть медленнее." },
+};
 
-function isValidParseJob(job: unknown): job is ParseJob {
-  const maybeJob = job as Partial<ParseJob> | null | undefined;
-  return typeof maybeJob?.jobId === "string" && maybeJob.jobId.trim().length > 0;
-}
-
-function normalizeJobs(jobs: unknown): ParseJob[] {
-  if (!Array.isArray(jobs)) return [];
-  return jobs
-    .filter(isValidParseJob)
-    .map((job) => ({
-      ...job,
-      jobId: String(job.jobId),
-      source: job.source as PaperSource | "all",
-      status: (["in_progress", "completed", "cancelled", "failed", "expired"].includes(String(job.status))
-        ? job.status
-        : "in_progress") as ParseJob["status"],
-    }));
-}
-
-function isExpiredPendingTask(job: ParseJob, now: number): boolean {
-  return job.status === "in_progress" && now - job.lastCountChangeAt > STALE_PENDING_TASK_MS && job.lastObservedCount <= job.initialCount;
-}
-
-function getCeleryStatusMeta(status: CeleryTaskStatus | null | undefined): Record<string, any> {
-  const progress = status?.progress && typeof status.progress === "object" ? status.progress : {};
-  const result = status?.result && typeof status.result === "object" ? status.result : {};
-  return { ...progress, ...result };
-}
-
-function toFiniteNumber(value: unknown, fallback = 0): number {
-  const parsed = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function clampPercent(value: number): number {
-  return Math.max(0, Math.min(100, Math.round(value)));
-}
-
-function getParseJobProgressPercent(job: ParseJob): number {
-  if (job.status === "completed") return 100;
-  if (job.status === "failed" || job.status === "expired" || job.status === "cancelled") return 0;
-
-  const celeryStatus = job.celeryStatus;
-  if (celeryStatus) {
-    const meta = getCeleryStatusMeta(celeryStatus);
-    const current = toFiniteNumber(celeryStatus.current ?? meta.current, 0);
-    const total = toFiniteNumber(celeryStatus.total ?? meta.total, 0);
-    if (total > 0 && current > 0) return clampPercent((current / total) * 100);
-
-    const celeryState = celeryStatus.status;
-    const stage = String(meta.stage ?? "").toLowerCase();
-    const elapsed = toFiniteNumber(meta.elapsed_seconds, 0);
-
-    if (celeryState === "PENDING") return 3;
-    if (stage === "parser_alpha") {
-      // parser_alpha can run for a long time before saving articles.
-      // Show visible heartbeat progress while the textual status is updated.
-      return clampPercent(8 + Math.min(37, elapsed / 3));
-    }
-    if (stage.includes("read") || stage.includes("result") || stage.includes("parse_results")) return 46;
-    if (stage.includes("save") || stage.includes("saving")) return 55;
-    if (celeryState === "STARTED" || celeryState === "PROGRESS" || celeryState === "RECEIVED") return 8;
-  }
-
-  const delta = Math.max(0, job.lastObservedCount - job.initialCount);
-  const expectedDelta = 50;
-  return Math.min(100, Math.round((delta / expectedDelta) * 100));
-}
-
-function getParseJobStatusText(job: ParseJob): string {
-  if (job.status === "completed") return "✓ Завершено";
-  if (job.status === "failed") return "✕ Ошибка";
-  if (job.status === "cancelled") return "Отменено";
-  if (job.status === "expired") return "Истёк / не найден";
-
-  const celeryStatus = job.celeryStatus;
-  if (!celeryStatus) return "В обработке";
-
-  const meta = getCeleryStatusMeta(celeryStatus);
-  const stateText = String(meta.status || meta.stage_label || celeryStatus.state || "").trim();
-
-  if (celeryStatus.status === "SUCCESS") return "✓ Завершено";
-  if (celeryStatus.status === "FAILURE") return stateText ? `✕ ${stateText}` : "✕ Ошибка";
-  if (celeryStatus.status === "REVOKED") return "Отменено";
-  if (celeryStatus.status === "PENDING") return "Ожидание...";
-  if (celeryStatus.status === "RETRY") return "Повтор...";
-  if (celeryStatus.status === "UNKNOWN") return "Статус неизвестен";
-  if (celeryStatus.status === "RECEIVED") return stateText || "Получено worker-ом...";
-  if (celeryStatus.status === "STARTED" || celeryStatus.status === "PROGRESS") return stateText || "В процессе...";
-
-  return stateText || "В обработке";
-}
-
-
-function loadJobs(): ParseJob[] {
-  try {
-    // Старые версионные ключи не используем: после runtime-cleanup они могут
-    // содержать task_id, которых уже нет в Redis/Celery.
-    clearLegacyParseJobKeys();
-    const raw = localStorage.getItem(LS_KEY);
-    if (!raw) return [];
-    return normalizeJobs(JSON.parse(raw));
-  } catch {
-    clearParseJobStorage();
-    return [];
-  }
-}
-
-function saveJobs(jobs: ParseJob[]) {
-  localStorage.setItem(LS_KEY, JSON.stringify(normalizeJobs(jobs)));
-}
-
-function mergeJobs(localJobs: ParseJob[], sharedJobs: ParseJob[]): ParseJob[] {
-  const byId = new Map<string, ParseJob>();
-  for (const job of normalizeJobs(localJobs)) {
-    byId.set(job.jobId, job);
-  }
-  // Backend/shared history is fresher than browser localStorage.
-  for (const job of normalizeJobs(sharedJobs)) {
-    byId.set(job.jobId, job);
-  }
-  return Array.from(byId.values()).sort((a, b) => b.startedAt - a.startedAt).slice(0, 50);
-}
-
+const PDF_MODE_LABELS: Record<PdfProcessingMode, string> = {
+  auto: "Авто",
+  ai: "AI-анализ PDF",
+};
 
 function normalizeParseLimit(value: unknown) {
   const parsed = Number(value);
@@ -216,14 +113,21 @@ function normalizeParseLimit(value: unknown) {
   return Math.max(1, Math.min(100, Math.floor(parsed)));
 }
 
-function normalizeQualityReport(data: any): QualityReport | null {
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function normalizeQualityReport(data: unknown): QualityReport | null {
   if (!data) return null;
-  const completeness = data.completeness ?? data.quality_metrics ?? {};
-  const averages = data.averages ?? {
-    avg_abstract_length: 0,
-    avg_keywords_count: 0,
-  };
-  const quality_score = data.quality_score ?? { avg: 0, min: 0, max: 0 };
+  const record = asRecord(data);
+  const completeness = asRecord(record.completeness ?? record.quality_metrics);
+  const averages = asRecord(
+    record.averages ?? {
+      avg_abstract_length: 0,
+      avg_keywords_count: 0,
+    },
+  );
+  const quality_score = asRecord(record.quality_score ?? { avg: 0, min: 0, max: 0 });
 
   return {
     total: data.total ?? 0,
@@ -233,8 +137,43 @@ function normalizeQualityReport(data: any): QualityReport | null {
   };
 }
 
+function extractErrorMessage(error: unknown): string {
+  if (!error) return "Неизвестная ошибка";
+  const maybe = error as { message?: string; response?: { data?: { detail?: unknown; message?: unknown; error?: unknown } } };
+  const detail = maybe.response?.data?.detail ?? maybe.response?.data?.message ?? maybe.response?.data?.error;
+  if (typeof detail === "string") return detail;
+  if (detail) return JSON.stringify(detail);
+  if (maybe.message) return maybe.message;
+  return String(error);
+}
+
+function resultError<T>(
+  result: PromiseSettledResult<T>,
+  key: string,
+  label: string,
+): DashboardLoadError | null {
+  if (result.status === "fulfilled") return null;
+  return { key, label, message: extractErrorMessage(result.reason) };
+}
+
+function getJobSourceForCount(source: ParseJob["source"]): PaperSource | "all" {
+  return source === "all" ? "all" : (source as PaperSource);
+}
+
+function formatDateTime(valueMs: number) {
+  return new Date(valueMs).toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
 export default function Dashboard() {
   const [totalPapers, setTotalPapers] = useState(0);
+  const [todayPapers, setTodayPapers] = useState(0);
   const [latest, setLatest] = useState<Paper[]>([]);
   const [jobs, setJobs] = useState<ParseJob[]>(() => loadJobs());
   const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
@@ -244,12 +183,16 @@ export default function Dashboard() {
   const [topAuthors, setTopAuthors] = useState<TopItem[]>([]);
   const [sourceDistribution, setSourceDistribution] = useState<Record<string, { count: number; percent: number }>>({});
   const [qualityReport, setQualityReport] = useState<QualityReport | null>(null);
+  const [parserSettings, setParserSettings] = useState<ParserSettings | null>(null);
+  const [loadErrors, setLoadErrors] = useState<DashboardLoadError[]>([]);
 
   const [query, setQuery] = useState("nickel-based superalloys");
   const [source, setSource] = useState<PaperSource | "all">("arXiv");
   const [limit, setLimit] = useState(25);
+  const [pdfMode, setPdfMode] = useState<PdfProcessingMode>("auto");
   const [parsingError, setParsingError] = useState<string | null>(null);
   const [startingParse, setStartingParse] = useState(false);
+  const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
 
   const [updatedAt, setUpdatedAt] = useState(new Date());
   const jobsRef = useRef<ParseJob[]>(jobs);
@@ -264,20 +207,27 @@ export default function Dashboard() {
     return () => window.clearInterval(id);
   }, []);
 
+  const enabledSources = useMemo(() => {
+    const flags = parserSettings?.enabled_sources ?? {};
+    return PAPER_SOURCES.filter((src) => flags[src] !== false);
+  }, [parserSettings]);
+
+  const selectedSourceDisabled = source !== "all" && parserSettings?.enabled_sources?.[source] === false;
+  const selectedGuidance = SOURCE_GUIDANCE[source];
+  const sourceLimit = source === "all"
+    ? Math.min(...enabledSources.map((src) => parserSettings?.source_limits?.[src] ?? parserSettings?.max_limit ?? 100), parserSettings?.max_limit ?? 100)
+    : parserSettings?.source_limits?.[source] ?? parserSettings?.max_limit ?? 100;
+
   const activeJobsCount = jobs.filter((j) => j.status === "in_progress").length;
   const completedJobsCount = jobs.filter((j) => j.status === "completed").length;
 
-  const todayString = useMemo(() => new Date().toISOString().slice(0, 10), []);
-  const todayPapers = useMemo(
-    () =>
-      latest.filter((p) => (p.createdAt ?? p.publicationDate ?? "").slice(0, 10) === todayString).length,
-    [latest, todayString]
-  );
-
-  const fetchPage = async () => {
-    const [countRes, latestRes, summaryRes, trendRes, journalsRes, keywordsRes, authorsRes, sourceRes, qualityRes] = await Promise.allSettled([
+  const fetchPage = useCallback(async () => {
+    const [countRes, todayRes, latestRes, summaryRes, trendRes, journalsRes, keywordsRes, authorsRes, sourceRes, qualityRes, settingsRes] = await Promise.allSettled([
       getPapersCount("all"),
-      getPapersList({ limit: 100, offset: 0, source: "all" }),
+      apiClient.get<{ total: number }>("/analytics/metrics/daily-count", {
+        params: { timezone_offset_minutes: -new Date().getTimezoneOffset() },
+      }),
+      getRecentPapers({ limit: RECENT_PAPERS_LIMIT, source: "all" }),
       apiClient.get<AnalyticsSummary>("/analytics/metrics/summary"),
       apiClient.get<{ trend: TrendData[] }>("/analytics/metrics/trend?group_by=month&limit=12"),
       apiClient.get<{ items: TopItem[] }>("/analytics/metrics/top?item_type=journals&limit=10"),
@@ -285,8 +235,11 @@ export default function Dashboard() {
       apiClient.get<{ items: TopItem[] }>("/analytics/metrics/top?item_type=authors&limit=10"),
       apiClient.get<{ distribution: Record<string, { count: number; percent: number }> }>("/analytics/metrics/source-distribution"),
       apiClient.get<QualityReport>("/analytics/metrics/quality-report"),
+      getSystemSettings(),
     ]);
+
     setTotalPapers(countRes.status === "fulfilled" ? countRes.value : 0);
+    setTodayPapers(todayRes.status === "fulfilled" ? todayRes.value.data?.total ?? 0 : 0);
     setLatest(latestRes.status === "fulfilled" ? latestRes.value : []);
     setSummary(summaryRes.status === "fulfilled" ? summaryRes.value.data ?? null : null);
     setTrend(trendRes.status === "fulfilled" ? trendRes.value.data?.trend ?? [] : []);
@@ -295,143 +248,128 @@ export default function Dashboard() {
     setTopAuthors(authorsRes.status === "fulfilled" ? authorsRes.value.data?.items ?? [] : []);
     setSourceDistribution(sourceRes.status === "fulfilled" ? sourceRes.value.data?.distribution ?? {} : {});
     setQualityReport(qualityRes.status === "fulfilled" ? normalizeQualityReport(qualityRes.value.data) : null);
-  };
+    if (settingsRes.status === "fulfilled") {
+      setParserSettings(settingsRes.value.settings.parser);
+    }
+
+    const errors = [
+      resultError(countRes, "papers-count", "Количество статей"),
+      resultError(todayRes, "daily-count", "Статьи за сегодня"),
+      resultError(latestRes, "recent-papers", "Последние статьи"),
+      resultError(summaryRes, "summary", "Сводные метрики"),
+      resultError(trendRes, "trend", "Тренд публикаций"),
+      resultError(journalsRes, "journals", "Топ журналов"),
+      resultError(keywordsRes, "keywords", "Топ ключевых слов"),
+      resultError(authorsRes, "authors", "Топ авторов"),
+      resultError(sourceRes, "sources", "Распределение источников"),
+      resultError(qualityRes, "quality", "Качество данных"),
+      resultError(settingsRes, "settings", "Технические настройки"),
+    ].filter(Boolean) as DashboardLoadError[];
+    setLoadErrors(errors);
+  }, []);
+
+  const refreshSharedJobs = useCallback(async () => {
+    const [countRes, sharedJobsRes] = await Promise.allSettled([getPapersCount("all"), getSharedParseJobs(50)]);
+    const total = countRes.status === "fulfilled" ? countRes.value : null;
+    const sharedJobs = sharedJobsRes.status === "fulfilled" ? normalizeJobs(sharedJobsRes.value) : [];
+
+    if (total === 0 && sharedJobs.length === 0) {
+      clearParseJobStorage();
+      jobsRef.current = [];
+      setJobs([]);
+      return;
+    }
+
+    setJobs((current) => {
+      const merged = mergeJobs(current, sharedJobs);
+      jobsRef.current = merged;
+      saveJobs(merged);
+      return merged;
+    });
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
 
-    fetchPage().catch(() => {
-      // initial load errors - just keep empty UI
+    fetchPage().catch((error) => {
+      if (!cancelled) {
+        setLoadErrors([{ key: "dashboard", label: "Главная", message: extractErrorMessage(error) }]);
+      }
     });
 
-    Promise.allSettled([getPapersCount("all"), getSharedParseJobs(50)])
-      .then(([countRes, sharedJobsRes]) => {
-        if (cancelled) return;
-
-        const total = countRes.status === "fulfilled" ? countRes.value : null;
-        const sharedJobs = sharedJobsRes.status === "fulfilled" ? normalizeJobs(sharedJobsRes.value) : [];
-
-        // После runtime cleanup backend удаляет data/parse_jobs.json и papers.
-        // В этом состоянии локальная browser-история устарела: не надо опрашивать
-        // старые task_id и создавать видимость "живых" задач.
-        if (total === 0 && sharedJobs.length === 0) {
-          clearParseJobStorage();
-          jobsRef.current = [];
-          setJobs([]);
-          return;
-        }
-
-        setJobs((current) => {
-          const merged = mergeJobs(current, sharedJobs);
-          jobsRef.current = merged;
-          saveJobs(merged);
-          return merged;
-        });
-      })
-      .catch(() => null);
+    refreshSharedJobs().catch((error) => {
+      if (!cancelled) {
+        setLoadErrors((prev) => [
+          ...prev.filter((item) => item.key !== "parse-jobs"),
+          { key: "parse-jobs", label: "История задач", message: extractErrorMessage(error) },
+        ]);
+      }
+    });
 
     return () => {
       cancelled = true;
     };
+  }, [fetchPage, refreshSharedJobs]);
+
+  const refreshJobs = useCallback(async (baseJobs?: ParseJob[]) => {
+    const sourceJobs = baseJobs ?? jobsRef.current;
+    if (sourceJobs.length === 0) return;
+
+    const updatedJobs = await Promise.all(
+      sourceJobs.map(async (job) => {
+        if (job.status !== "in_progress") return job;
+        if (job.celeryStatus?.status === "REVOKED") return job;
+
+        try {
+          const celeryStatus = await getCeleryTaskStatus(job.jobId);
+          const current = celeryStatus.status === "PENDING"
+            ? await getPapersCount(getJobSourceForCount(job.source))
+            : undefined;
+          return buildUpdatedJobFromCelery(job, celeryStatus, current);
+        } catch {
+          const current = await getPapersCount(getJobSourceForCount(job.source));
+          const now = Date.now();
+          const changed = current !== job.lastObservedCount;
+          const next: ParseJob = {
+            ...job,
+            lastObservedCount: current,
+            lastCountChangeAt: changed ? now : job.lastCountChangeAt,
+          };
+          const stableMs = 60_000;
+          if (now - next.lastCountChangeAt > stableMs && current > next.initialCount) {
+            next.status = "completed";
+          } else if (isExpiredPendingTask(next, now)) {
+            next.status = "expired";
+          }
+          return next;
+        }
+      }),
+    );
+
+    jobsRef.current = updatedJobs;
+    setJobs(updatedJobs);
+    saveJobs(updatedJobs);
   }, []);
 
-  // Реальное время: берем статус из Celery API, иначе fallback на рост papers count.
   useEffect(() => {
     const interval = window.setInterval(async () => {
-      const currentJobs = jobsRef.current;
-      if (!currentJobs.some((job) => job.status === "in_progress") || pollingRef.current) return;
+      if (!jobsRef.current.some((job) => job.status === "in_progress") || pollingRef.current) return;
       pollingRef.current = true;
-
       try {
-        const updatedJobs = await Promise.all(
-          currentJobs.map(async (job) => {
-            // Не обновляем завершённые или отменённые задачи
-            if (job.status !== "in_progress") return job;
-            // Если уже отменено в Celery, не обновляем статус из API
-            if (job.celeryStatus?.status === "REVOKED") return job;
-
-            try {
-              const celeryStatus = await getCeleryTaskStatus(job.jobId);
-              const now = Date.now();
-              const isSuccess = celeryStatus.status === "SUCCESS";
-              const isFailure = celeryStatus.status === "FAILURE";
-              const isCompleted = isSuccess || isFailure;
-              const isRevoked = celeryStatus.status === "REVOKED";
-              const savedCount = celeryStatus.saved_count || celeryStatus.total_saved || celeryStatus.result?.saved_count || celeryStatus.result?.total_saved || 0;
-
-              if (celeryStatus.status === "PENDING") {
-                const current = await getPapersCount(job.source === "all" ? "all" : job.source);
-                const changed = current !== job.lastObservedCount;
-                const lastCountChangeAt = changed ? now : job.lastCountChangeAt;
-                const stableMs = 60_000;
-                const shouldComplete = now - lastCountChangeAt > stableMs && current > job.initialCount;
-                const expired = !shouldComplete && isExpiredPendingTask({ ...job, lastObservedCount: current, lastCountChangeAt }, now);
-
-                const next: ParseJob = {
-                  ...job,
-                  celeryStatus,
-                  lastObservedCount: current,
-                  lastCountChangeAt,
-                  status: shouldComplete ? "completed" : expired ? "expired" : "in_progress",
-                };
-
-                return next;
-              }
-
-              const next: ParseJob = {
-                ...job,
-                celeryStatus,
-                lastObservedCount: savedCount > 0 ? savedCount : job.lastObservedCount,
-                lastCountChangeAt: isCompleted ? now : job.lastCountChangeAt,
-                status: isRevoked ? "cancelled" : isFailure ? "failed" : isSuccess ? "completed" : "in_progress",
-              };
-
-              return next;
-            } catch {
-              const current = await getPapersCount(job.source === "all" ? "all" : job.source);
-              const now = Date.now();
-              const changed = current !== job.lastObservedCount;
-
-              const next: ParseJob = {
-                ...job,
-                lastObservedCount: current,
-                lastCountChangeAt: changed ? now : job.lastCountChangeAt,
-              };
-
-              const stableMs = 60_000;
-              if (now - next.lastCountChangeAt > stableMs && current > next.initialCount) {
-                next.status = "completed";
-              } else if (isExpiredPendingTask(next, now)) {
-                next.status = "expired";
-              }
-
-              return next;
-            }
-          })
-        );
-
-        const previousById = new Map(currentJobs.map((job) => [job.jobId, job.status]));
-        const hasNewlyFinishedJobs = updatedJobs.some((job) => {
+        const previousById = new Map(jobsRef.current.map((job) => [job.jobId, job.status]));
+        await refreshJobs();
+        const hasNewlyFinishedJobs = jobsRef.current.some((job) => {
           const previousStatus = previousById.get(job.jobId);
           return previousStatus === "in_progress" && ["completed", "cancelled", "failed", "expired"].includes(job.status);
         });
-
-        jobsRef.current = updatedJobs;
-        setJobs(updatedJobs);
-        saveJobs(updatedJobs);
-
-        if (hasNewlyFinishedJobs) {
-          await fetchPage().catch(() => null);
-        }
-      } catch {
-        // ignore polling errors
+        if (hasNewlyFinishedJobs) await fetchPage().catch(() => null);
       } finally {
         pollingRef.current = false;
       }
     }, 5000);
 
     return () => window.clearInterval(interval);
-  }, []);
+  }, [fetchPage, refreshJobs]);
 
   const sourcePieData = useMemo(
     () =>
@@ -467,9 +405,22 @@ export default function Dashboard() {
       setParsingError("Поле поискового запроса обязательно");
       return;
     }
+    if (parserSettings?.enabled === false) {
+      setParsingError("Парсинг отключён в технических настройках");
+      return;
+    }
+    if (selectedSourceDisabled) {
+      setParsingError(`Источник ${source} отключён в технических настройках`);
+      return;
+    }
+    if (source === "all") {
+      const ok = window.confirm(`Запустить парсинг по всем включённым источникам (${enabledSources.length})? Лимит ${limit} будет применён на каждый источник.`);
+      if (!ok) return;
+    }
+
     setStartingParse(true);
     try {
-      const normalizedLimit = normalizeParseLimit(limit);
+      const normalizedLimit = normalizeParseLimit(Math.min(limit, sourceLimit || 100));
       setLimit(normalizedLimit);
       const currentCount = await getPapersCount(source);
       let job: ParseJob;
@@ -478,6 +429,7 @@ export default function Dashboard() {
           limitPerQuery: normalizedLimit,
           source: "all",
           query: normalizedQuery,
+          pdfMode,
         });
         job = {
           jobId: String(res.task_id),
@@ -490,7 +442,7 @@ export default function Dashboard() {
           status: "in_progress",
         };
       } else {
-        const res = await parsePapers({ query: normalizedQuery, limit: normalizedLimit, source });
+        const res = await parsePapers({ query: normalizedQuery, limit: normalizedLimit, source, pdfMode });
         job = {
           jobId: String(res.task_id),
           startedAt: Date.now(),
@@ -503,137 +455,146 @@ export default function Dashboard() {
         };
       }
 
-      setJobs((prev: ParseJob[]): ParseJob[] => {
-        const nextJobs: ParseJob[] = [job, ...prev].slice(0, 30);
+      setJobs((prev): ParseJob[] => {
+        const nextJobs = mergeJobs([job, ...prev], []);
         jobsRef.current = nextJobs;
         saveJobs(nextJobs);
         return nextJobs;
       });
     } catch (e) {
-      setParsingError((e as Error).message);
+      setParsingError(extractErrorMessage(e));
     } finally {
       setStartingParse(false);
     }
   };
 
   const cancelJob = async (jobId: string) => {
-    if (!window.confirm("Остановить задачу? В очереди она будет отменена, а запущенная может не прерваться сразу.")) {
-      return;
-    }
+    if (!window.confirm("Остановить задачу? В очереди она будет отменена, а запущенная может не прерваться сразу.")) return;
 
     try {
       await revokeCeleryTask(jobId, false);
-      setJobs((prev: ParseJob[]): ParseJob[] => {
-        const nextJobs: ParseJob[] = prev.map((job): ParseJob => {
-          if (job.jobId !== jobId) return job;
-          return {
-            ...job,
-            status: "cancelled",
-            celeryStatus: {
-              ...(job.celeryStatus || {}),
-              task_id: job.jobId,
-              status: "REVOKED",
-              state: "REVOKED",
-            },
-          };
-        });
+      setJobs((prev): ParseJob[] => {
+        const nextJobs = prev.map((job): ParseJob =>
+          job.jobId === jobId
+            ? {
+                ...job,
+                status: "cancelled",
+                celeryStatus: {
+                  ...(job.celeryStatus || {}),
+                  task_id: job.jobId,
+                  status: "REVOKED",
+                  state: "REVOKED",
+                },
+              }
+            : job,
+        );
+        jobsRef.current = nextJobs;
         saveJobs(nextJobs);
         return nextJobs;
       });
     } catch (e) {
-      setParsingError((e as Error).message);
+      setParsingError(extractErrorMessage(e));
     }
   };
 
   const deleteJob = async (jobId: string) => {
-    if (!window.confirm("Удалить задачу из истории? Это не повлияет на Celery, только удалит запись из интерфейса.")) {
-      return;
-    }
+    if (!window.confirm("Удалить задачу из истории? Это не повлияет на Celery, только удалит запись из интерфейса.")) return;
 
     try {
       await Promise.allSettled([deleteCeleryTask(jobId), deleteSharedParseJob(jobId)]);
-      setJobs((prev: ParseJob[]): ParseJob[] => {
-        const nextJobs: ParseJob[] = prev.filter((job) => job.jobId !== jobId);
+      setJobs((prev): ParseJob[] => {
+        const nextJobs = prev.filter((job) => job.jobId !== jobId);
+        jobsRef.current = nextJobs;
         saveJobs(nextJobs);
         return nextJobs;
       });
     } catch (e) {
-      setParsingError((e as Error).message);
+      setParsingError(extractErrorMessage(e));
     }
   };
 
+  const refreshDashboard = async () => {
+    await Promise.allSettled([fetchPage(), refreshSharedJobs(), refreshJobs()]);
+    setUpdatedAt(new Date());
+  };
+
   return (
-    <div className="page">
+    <div className="page dashboard-page">
       <div className="page-head">
         <h2>Главная</h2>
         <div className="actions">
-          <button className="btn btn-primary" onClick={startParsing} disabled={startingParse}>
+          <button className="btn" onClick={refreshDashboard}>Обновить</button>
+          <button className="btn btn-primary" onClick={startParsing} disabled={startingParse || selectedSourceDisabled || parserSettings?.enabled === false}>
             {startingParse ? "Запуск..." : "Запустить парсинг статей"}
           </button>
         </div>
       </div>
 
+      {loadErrors.length > 0 && (
+        <div className="panel dashboard-warning-panel">
+          <h3>Часть данных не загрузилась</h3>
+          <p className="muted">Главная больше не скрывает ошибки API: проверь backend, БД, миграции или авторизацию.</p>
+          <ul className="dashboard-error-list">
+            {loadErrors.slice(0, 6).map((item) => (
+              <li key={item.key}><strong>{item.label}:</strong> {item.message}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div className="panel">
         <h3>Параметры парсинга</h3>
-        <div className="filters">
-          <input className="input" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Поисковый запрос" />
-          <select value={source} onChange={(e) => setSource(e.target.value as PaperSource | "all")}>
-            <option value="all">Все шаблоны</option>
-            {PAPER_SOURCES.map((src) => (
-              <option key={src} value={src}>
-                {src}
-              </option>
-            ))}
-          </select>
-          <input
-            className="input"
-            type="number"
-            min={1}
-            max={100}
-            value={limit}
-            onChange={(e) => setLimit(normalizeParseLimit(e.target.value))}
-            style={{ width: 120 }}
-          />
+        <div className="dashboard-parse-grid">
+          <div className="filters dashboard-parse-controls">
+            <input className="input" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Поисковый запрос" />
+            <select value={source} onChange={(e) => setSource(e.target.value as PaperSource | "all")}>
+              <option value="all" disabled={enabledSources.length === 0}>Все включённые источники</option>
+              {PAPER_SOURCES.map((src) => (
+                <option key={src} value={src} disabled={parserSettings?.enabled_sources?.[src] === false}>
+                  {src}{parserSettings?.enabled_sources?.[src] === false ? " — отключён" : ""}
+                </option>
+              ))}
+            </select>
+            <select value={pdfMode} onChange={(e) => setPdfMode(e.target.value as PdfProcessingMode)}>
+              <option value="auto">{PDF_MODE_LABELS.auto}</option>
+              <option value="ai">{PDF_MODE_LABELS.ai}</option>
+            </select>
+            <input
+              className="input dashboard-limit-input"
+              type="number"
+              min={1}
+              max={sourceLimit || 100}
+              value={limit}
+              onChange={(e) => setLimit(normalizeParseLimit(e.target.value))}
+            />
+          </div>
+          <aside className="panel dashboard-source-card">
+            <div className="dashboard-source-head">
+              <h4>Источник</h4>
+              <span className="status neutral">{selectedGuidance.method}</span>
+            </div>
+            <p className="muted">{selectedGuidance.short}</p>
+            <p className="muted">Режим PDF: <strong>{PDF_MODE_LABELS[pdfMode]}</strong></p>
+            <p className="muted">Эффективный лимит: <strong>{Math.min(limit, sourceLimit || 100)}</strong>{source === "all" ? " на источник" : ""}</p>
+            {source === "all" && <p className="muted">Будут использованы только включённые источники: {enabledSources.length || 0}.</p>}
+            {selectedSourceDisabled && <p className="error">Источник отключён в технических настройках.</p>}
+          </aside>
         </div>
         {parsingError && <p className="error">{parsingError}</p>}
       </div>
 
       <div className="kpi-grid">
-        <article className="panel kpi-card">
-          <h3>Всего статей</h3>
-          <p className="kpi">{totalPapers}</p>
-        </article>
-        <article className="panel kpi-card">
-          <h3>За сегодня (по последним добавлениям)</h3>
-          <p className="kpi">{todayPapers}</p>
-        </article>
-        <article className="panel kpi-card">
-          <h3>В обработке</h3>
-          <p className={`kpi-status ${activeJobsCount > 0 ? "ok" : "idle"}`}>{activeJobsCount}</p>
-        </article>
-        <article className="panel kpi-card">
-          <h3>Завершено (ваши)</h3>
-          <p className="kpi">{completedJobsCount}</p>
-        </article>
-        <article className="panel kpi-card">
-          <h3>С эмбеддингами</h3>
-          <p className="kpi">{summary?.papers_with_embedding || 0}</p>
-        </article>
-        <article className="panel kpi-card">
-          <h3>Покрытие эмбеддингами</h3>
-          <p className="kpi">{summary?.embedding_coverage || 0}%</p>
-        </article>
-        <article className="panel kpi-card">
-          <h3>Полнота данных</h3>
-          <p className="kpi">{avgCompleteness}%</p>
-        </article>
-        <article className="panel kpi-card">
-          <h3>Среднее качество</h3>
-          <p className="kpi">{summary?.avg_quality_score || 0}</p>
-        </article>
+        <article className="panel kpi-card"><h3>Всего статей</h3><p className="kpi">{totalPapers}</p></article>
+        <article className="panel kpi-card"><h3>За сегодня</h3><p className="kpi">{todayPapers}</p></article>
+        <article className="panel kpi-card"><h3>В обработке</h3><p className={`kpi-status ${activeJobsCount > 0 ? "ok" : "idle"}`}>{activeJobsCount}</p></article>
+        <article className="panel kpi-card"><h3>Завершено</h3><p className="kpi">{completedJobsCount}</p></article>
+        <article className="panel kpi-card"><h3>С эмбеддингами</h3><p className="kpi">{summary?.papers_with_embedding || 0}</p></article>
+        <article className="panel kpi-card"><h3>Покрытие эмбеддингами</h3><p className="kpi">{summary?.embedding_coverage || 0}%</p></article>
+        <article className="panel kpi-card"><h3>Полнота данных</h3><p className="kpi">{avgCompleteness}%</p></article>
+        <article className="panel kpi-card"><h3>Среднее качество</h3><p className="kpi">{summary?.avg_quality_score || 0}</p></article>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 16 }}>
+      <div className="dashboard-grid-two">
         <article className="panel">
           <h3>Тренд публикаций (по месяцам)</h3>
           {trend.length > 0 ? (
@@ -645,9 +606,7 @@ export default function Dashboard() {
                 <Line type="monotone" dataKey="count" stroke="#4a6cf7" strokeWidth={2} />
               </LineChart>
             </ResponsiveContainer>
-          ) : (
-            <p className="muted">Нет данных</p>
-          )}
+          ) : <p className="muted">Нет данных</p>}
         </article>
         <article className="panel">
           <h3>Распределение по источникам</h3>
@@ -655,21 +614,17 @@ export default function Dashboard() {
             <ResponsiveContainer width="100%" height={250}>
               <PieChart>
                 <Pie data={sourcePieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label>
-                  {sourcePieData.map((_, index) => (
-                    <Cell key={index} fill={COLORS[index % COLORS.length]} />
-                  ))}
+                  {sourcePieData.map((_, index) => <Cell key={index} fill={COLORS[index % COLORS.length]} />)}
                 </Pie>
                 <Tooltip />
                 <Legend />
               </PieChart>
             </ResponsiveContainer>
-          ) : (
-            <p className="muted">Нет данных</p>
-          )}
+          ) : <p className="muted">Нет данных</p>}
         </article>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 16 }}>
+      <div className="dashboard-grid-two">
         <article className="panel">
           <h3>Топ журналов</h3>
           {topJournals.length > 0 ? (
@@ -681,9 +636,7 @@ export default function Dashboard() {
                 <Bar dataKey="count" fill="#4a6cf7" />
               </BarChart>
             </ResponsiveContainer>
-          ) : (
-            <p className="muted">Нет данных</p>
-          )}
+          ) : <p className="muted">Нет данных</p>}
         </article>
         <article className="panel">
           <h3>Полнота данных</h3>
@@ -696,179 +649,151 @@ export default function Dashboard() {
                 <Bar dataKey="percent" fill="#00c49f" />
               </BarChart>
             </ResponsiveContainer>
-          ) : (
-            <p className="muted">Нет данных</p>
-          )}
+          ) : <p className="muted">Нет данных</p>}
         </article>
       </div>
 
       <div className="panel">
         <h3>Топ авторов</h3>
         {topAuthors.length > 0 ? (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Автор</th>
-                <th>Количество статей</th>
-              </tr>
-            </thead>
-            <tbody>
-              {topAuthors.map((author, idx) => (
-                <tr key={idx}>
-                  <td>{idx + 1}</td>
-                  <td>{author.name}</td>
-                  <td>{author.count}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <p className="muted">Нет данных</p>
-        )}
+          <div className="table-wrapper">
+            <table className="table">
+              <thead><tr><th>#</th><th>Автор</th><th>Количество статей</th></tr></thead>
+              <tbody>{topAuthors.map((author, idx) => <tr key={idx}><td>{idx + 1}</td><td>{author.name}</td><td>{author.count}</td></tr>)}</tbody>
+            </table>
+          </div>
+        ) : <p className="muted">Нет данных</p>}
       </div>
 
       <div className="panel">
         <h3>Топ ключевых слов</h3>
         {topKeywords.length > 0 ? (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          <div className="dashboard-tag-cloud">
             {topKeywords.map((item, idx) => (
-              <span
-                key={idx}
-                style={{
-                  padding: "6px 12px",
-                  background: `rgba(74, 108, 247, ${0.1 + (idx / topKeywords.length) * 0.4})`,
-                  borderRadius: 16,
-                  fontSize: 14,
-                  color: "var(--text)",
-                  border: "1px solid var(--border)",
-                }}
-              >
-                {item.name} <strong style={{ marginLeft: 4 }}>{item.count}</strong>
-              </span>
+              <span key={idx} className="dashboard-keyword-chip">{item.name} <strong>{item.count}</strong></span>
             ))}
           </div>
-        ) : (
-          <p className="muted">Нет данных</p>
-        )}
+        ) : <p className="muted">Нет данных</p>}
       </div>
 
       <div className="panel">
         <h3>Последние добавленные</h3>
-        <table className="table">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Название</th>
-              <th>Источник</th>
-              <th>Дата</th>
-              <th>Действия</th>
-            </tr>
-          </thead>
-          <tbody>
-            {latest.length === 0 ? (
-              <tr>
-                <td colSpan={5} className="muted">
-                  Пока нет данных. Запустите парсинг.
-                </td>
-              </tr>
-            ) : (
-              latest.map((p) => (
+        <div className="table-wrapper">
+          <table className="table">
+            <thead><tr><th>ID</th><th>Название</th><th>Источник</th><th>Дата</th><th>Действия</th></tr></thead>
+            <tbody>
+              {latest.length === 0 ? (
+                <tr><td colSpan={5} className="muted">Пока нет данных. Запустите парсинг.</td></tr>
+              ) : latest.slice(0, RECENT_PAPERS_LIMIT).map((p) => (
                 <tr key={p.id}>
                   <td>{p.id}</td>
-                  <td style={{ maxWidth: 520 }}>{p.title}</td>
+                  <td className="dashboard-title-cell">{p.title}</td>
                   <td>{p.source}</td>
                   <td>{p.publicationDate ? p.publicationDate.slice(0, 10) : "—"}</td>
-                  <td>
-                    <Link className="action-link" to={`/papers/${p.id}`}>
-                      Открыть
-                    </Link>
-                  </td>
+                  <td><Link className="action-link" to={`/papers/${p.id}`}>Открыть</Link></td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              ))}
+            </tbody>
+          </table>
+        </div>
         <p className="muted">Обновлено: {updatedAt.toLocaleTimeString("ru-RU")}</p>
       </div>
 
       <div className="panel">
         <h3>Текущие парсинг-задачи</h3>
-        {jobs.length === 0 ? (
-          <p className="muted">Задачи появятся после запуска парсинга.</p>
-        ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Celery task_id</th>
-                <th>Источник</th>
-                <th>Запрос</th>
-                <th>Статус</th>
-                <th>Прогресс</th>
-                <th>Сохранено</th>
-                <th>Действия</th>
-              </tr>
-            </thead>
-            <tbody>
-              {jobs.slice(0, 10).map((j) => {
-                const progress = getParseJobProgressPercent(j);
-                const statusText = getParseJobStatusText(j);
+        {jobs.length === 0 ? <p className="muted">Задачи появятся после запуска парсинга.</p> : (
+          <div className="table-wrapper">
+            <table className="table">
+              <thead>
+                <tr><th>Celery task_id</th><th>Источник</th><th>Запрос</th><th>Статус</th><th>Прогресс</th><th>Сохранено</th><th>Действия</th></tr>
+              </thead>
+              <tbody>
+                {jobs.slice(0, 10).map((j) => {
+                  const progress = getParseJobProgressPercent(j);
+                  const statusText = getParseJobStatusText(j);
+                  const meta = getCeleryStatusMeta(j.celeryStatus);
+                  const current = Number(j.celeryStatus?.current ?? meta.current ?? 0) || 0;
+                  const total = Number(j.celeryStatus?.total ?? meta.total ?? 0) || 0;
+                  const elapsed = Number(meta.elapsed_seconds ?? 0) || 0;
+                  const stage = String(meta.stage_label || meta.stage || "").trim();
+                  const celeryState = String(j.celeryStatus?.status || j.celeryStatus?.state || "UNKNOWN");
+                  const apiStatus = String(meta.status || "").trim();
+                  const errorText = String(meta.error || j.celeryStatus?.error || "").trim();
+                  const isExpanded = expandedJobId === j.jobId;
+                  const savedCount = getParseJobSavedCount(j);
+                  const sourceDetailsRaw = asRecord(meta.sources ?? j.celeryStatus?.result?.sources_status);
+                  const perSourceRows = Object.entries(sourceDetailsRaw).map(([name, value]) => {
+                    const item = asRecord(value);
+                    return {
+                      name,
+                      status: String(item.status || "unknown"),
+                      saved: Number(item.saved_count || 0) || 0,
+                      updated: Number(item.updated_count || 0) || 0,
+                      duplicates: Number(item.duplicate_count || 0) || 0,
+                      queued: Number(item.content_queued_count || 0) || 0,
+                      skipped: Number(item.content_skipped_count || 0) || 0,
+                      error: String(item.error || "").trim(),
+                    };
+                  });
 
-                const savedCount =
-                  j.celeryStatus?.saved_count ||
-                  j.celeryStatus?.total_saved ||
-                  j.celeryStatus?.result?.saved_count ||
-                  j.celeryStatus?.result?.total_saved ||
-                  j.lastObservedCount - j.initialCount;
-
-                return (
-                  <tr key={j.jobId}>
-                    <td style={{ wordBreak: "break-word", fontFamily: "monospace", fontSize: "0.85em" }}>
-                      {j.jobId}
-                    </td>
-                    <td>{j.source}</td>
-                    <td style={{ maxWidth: 280 }}>{j.query}</td>
-                    <td>
-                      <span
-                        className={`status ${
-                          j.status === "completed" || j.celeryStatus?.status === "SUCCESS" ? "active" : j.status === "failed" || j.celeryStatus?.status === "FAILURE" ? "failed" : ""
-                        }`}
-                      >
-                        {statusText}
-                      </span>
-                    </td>
-                    <td style={{ minWidth: 120 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <div style={{ flex: 1, height: 8, background: "#e0e0e0", borderRadius: 4, overflow: "hidden" }}>
-                          <div
-                            style={{
-                              width: `${progress}%`,
-                              height: "100%",
-                              background: progress === 100 ? "#22c55e" : "#4a6cf7",
-                              transition: "width 0.3s ease",
-                            }}
-                          />
-                        </div>
-                        <span style={{ fontSize: "0.85em", minWidth: 38 }}>{progress}%</span>
-                      </div>
-                    </td>
-                    <td>{savedCount}</td>
-                    <td style={{ display: "flex", gap: 8 }}>
-                      {j.status === "in_progress" && j.celeryStatus?.status !== "REVOKED" ? (
-                        <button className="btn" onClick={() => cancelJob(j.jobId)}>
-                          Остановить
-                        </button>
-                      ) : (
-                        <button className="btn btn-danger" onClick={() => deleteJob(j.jobId)}>
-                          Удалить
-                        </button>
+                  return (
+                    <Fragment key={j.jobId}>
+                      <tr>
+                        <td className="dashboard-task-id">{j.jobId}</td>
+                        <td>{j.source}</td>
+                        <td className="dashboard-query-cell">{j.query}</td>
+                        <td><span className={`status ${getParseJobStatusClass(j)}`}>{statusText}</span></td>
+                        <td>
+                          <div className="dashboard-progress-cell">
+                            <div className="dashboard-progress-track"><div className="dashboard-progress-fill" data-complete={progress === 100 ? "true" : "false"} style={{ width: `${progress}%` }} /></div>
+                            <span>{progress}%</span>
+                          </div>
+                        </td>
+                        <td>{savedCount}</td>
+                        <td className="actions-inline">
+                          <button className="btn" onClick={() => setExpandedJobId(isExpanded ? null : j.jobId)}>{isExpanded ? "Скрыть" : "Подробнее"}</button>
+                          {j.status === "in_progress" && j.celeryStatus?.status !== "REVOKED" ? (
+                            <button className="btn" onClick={() => cancelJob(j.jobId)}>Остановить</button>
+                          ) : (
+                            <button className="btn btn-danger" onClick={() => deleteJob(j.jobId)}>Удалить</button>
+                          )}
+                        </td>
+                      </tr>
+                      {isExpanded && (
+                        <tr>
+                          <td colSpan={7} className="dashboard-job-details">
+                            <div className="dashboard-job-details-grid">
+                              <div><strong>Этап:</strong> {stage || "—"}</div>
+                              <div><strong>Состояние Celery:</strong> {celeryState}</div>
+                              <div><strong>Статус API:</strong> {apiStatus || "—"}</div>
+                              <div><strong>Счётчик:</strong> {current}/{total || "—"}</div>
+                              <div><strong>Сохранено:</strong> {savedCount}</div>
+                              <div><strong>Прогресс:</strong> {progress}%</div>
+                              <div><strong>Запущено:</strong> {formatDateTime(j.startedAt)}</div>
+                              <div><strong>Обновлено:</strong> {formatDateTime(j.lastCountChangeAt)}</div>
+                              <div><strong>Длительность:</strong> {elapsed > 0 ? `${elapsed.toFixed(1)} с` : "—"}</div>
+                            </div>
+                            {String(j.source) === "all" && perSourceRows.length > 0 && (
+                              <div className="dashboard-source-statuses">
+                                <strong>Источники:</strong>
+                                <div className="table-wrapper">
+                                  <table className="table">
+                                    <thead><tr><th>Источник</th><th>Статус</th><th>Сохранено</th><th>Обновлено</th><th>Дубликаты</th><th>В очередь</th><th>Пропущено</th><th>Ошибка</th></tr></thead>
+                                    <tbody>{perSourceRows.map((row) => <tr key={`${j.jobId}:${row.name}`}><td>{row.name}</td><td>{row.status}</td><td>{row.saved}</td><td>{row.updated}</td><td>{row.duplicates}</td><td>{row.queued}</td><td>{row.skipped}</td><td className="dashboard-error-cell">{row.error || "—"}</td></tr>)}</tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            )}
+                            {errorText && <p className="error"><strong>Ошибка:</strong> {errorText}</p>}
+                          </td>
+                        </tr>
                       )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>

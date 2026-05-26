@@ -13,6 +13,7 @@ const ICONS = {
   home:     "M3 9.5L12 3l9 6.5V21H15v-6H9v6H3z",
   papers:   "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2",
   search:   "M21 21l-4.35-4.35M17 11A6 6 0 111 11a6 6 0 0116 0z",
+  fulltext: "M5 4h14v16H5z M8 8h8 M8 12h8 M8 16h5",
   metrics:  "M3 12h3l3-9 3 18 3-9h3M3 21h18",
   analysis: "M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z",
   jobs:     "M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z",
@@ -25,6 +26,7 @@ const RU = {
   home:     "Главная",
   papers:   "Статьи",
   search:   "Поиск",
+  fulltext: "Полнотекст",
   metrics:  "Метрики",
   analysis: "Анализ сплавов",
   jobs:     "Статус парсинга",
@@ -55,6 +57,11 @@ export default function Sidebar() {
       <NavLink className={cls} to="/search" title={RU.search}>
         <Icon path={ICONS.search} />
         <span>{RU.search}</span>
+      </NavLink>
+
+      <NavLink className={cls} to="/fulltext-search" title={RU.fulltext}>
+        <Icon path={ICONS.fulltext} />
+        <span>{RU.fulltext}</span>
       </NavLink>
 
       <NavLink className={cls} to="/metrics" title={RU.metrics}>

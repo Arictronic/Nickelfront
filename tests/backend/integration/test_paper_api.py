@@ -57,11 +57,17 @@ class TestPaperAPI:
 
         from app.api.v1.endpoints import parse as parse_endpoint
 
-        monkeypatch.setattr(parse_endpoint.parse_papers_task, "delay", lambda **kwargs: FakeTask())
+        captured: dict = {}
+
+        def fake_delay(**kwargs):
+            captured.update(kwargs)
+            return FakeTask()
+
+        monkeypatch.setattr(parse_endpoint.parse_papers_task, "delay", fake_delay)
 
         response = await client.post(
             "/api/v1/papers/parse",
-            params={"query": "nickel alloys", "limit": 5},
+            params={"query": "nickel alloys", "limit": 5, "pdf_mode": "ai"},
             headers=auth_headers,
         )
         assert response.status_code == 200
@@ -69,6 +75,8 @@ class TestPaperAPI:
         assert "message" in data
         assert "task_id" in data
         assert data["message"] == "Парсинг запущен"
+        assert data["pdf_mode"] == "ai"
+        assert captured["pdf_mode"] == "ai"
 
     @pytest.mark.asyncio
     async def test_start_parsing_all(self, client: AsyncClient, auth_headers: dict[str, str], monkeypatch):
@@ -78,11 +86,17 @@ class TestPaperAPI:
 
         from app.api.v1.endpoints import parse as parse_endpoint
 
-        monkeypatch.setattr(parse_endpoint.parse_all_sources_task, "delay", lambda **kwargs: FakeTask())
+        captured: dict = {}
+
+        def fake_delay(**kwargs):
+            captured.update(kwargs)
+            return FakeTask()
+
+        monkeypatch.setattr(parse_endpoint.parse_all_sources_task, "delay", fake_delay)
 
         response = await client.post(
             "/api/v1/papers/parse-all",
-            params={"limit_per_query": 5, "query": "nickel alloys"},
+            params={"limit_per_query": 5, "query": "nickel alloys", "pdf_mode": "ai"},
             headers=auth_headers,
         )
         assert response.status_code == 200
@@ -90,6 +104,18 @@ class TestPaperAPI:
         assert "message" in data
         assert "task_id" in data
         assert data["message"] == "Массовый парсинг запущен"
+        assert data["pdf_mode"] == "ai"
+        assert captured["pdf_mode"] == "ai"
+
+    @pytest.mark.asyncio
+    async def test_start_parsing_rejects_unknown_pdf_mode(self, client: AsyncClient, auth_headers: dict[str, str]):
+        response = await client.post(
+            "/api/v1/papers/parse",
+            params={"query": "nickel alloys", "pdf_mode": "manual"},
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 422
 
     @pytest.mark.asyncio
     async def test_health_check(self, client: AsyncClient):

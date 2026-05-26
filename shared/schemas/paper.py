@@ -265,6 +265,55 @@ class Paper(PaperBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class PaperListItem(BaseModel):
+    """Лёгкая схема списка статей без полного PDF/full_text payload."""
+
+    id: int
+    title: str
+    authors: list[str] = Field(default_factory=list)
+    publication_date: datetime | None = None
+    journal: str | None = None
+    doi: str | None = None
+    abstract: str | None = None
+    full_text: str | None = None
+    keywords: list[str] = Field(default_factory=list)
+    source: str
+    source_id: str | None = None
+    url: str | None = None
+    pdf_url: str | None = None
+    pdf_local_path: str | None = None
+    processing_status: str = "pending"
+    content_task_id: str | None = None
+    processing_error: str | None = None
+    summary_ru: str | None = None
+    analysis_ru: str | None = None
+    translation_ru: str | None = None
+    parse_confidence: float | None = None
+    provenance: dict = Field(default_factory=dict)
+    quality_flags: list[str] = Field(default_factory=list)
+    schema_version: str | None = "2.0"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    has_full_text: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("title", "journal", "doi", "abstract", "source", "source_id", "url", "pdf_url", "pdf_local_path", "processing_status", "content_task_id", "processing_error", "summary_ru", "analysis_ru", "translation_ru", "schema_version", mode="before")
+    @classmethod
+    def _normalize_scalar_text_fields(cls, value, info: ValidationInfo):
+        if info.field_name in {"title", "source"} and isinstance(value, str) and value.strip() == "":
+            return ""
+        return _coerce_text_scalar(value)
+
+    @field_validator("authors", "keywords", "quality_flags", mode="before")
+    @classmethod
+    def _normalize_list_fields(cls, value, info: ValidationInfo):
+        return _coerce_json_list(value, split_commas=info.field_name != "authors")
+
+    @field_validator("provenance", mode="before")
+    @classmethod
+    def _normalize_provenance(cls, value):
+        return _coerce_json_dict(value)
 
 
 class PaperContentPart(BaseModel):
@@ -330,6 +379,73 @@ class PaperSearchResponse(BaseModel):
     total: int
     query: str
     sources: list[str]
+
+
+
+
+class FullTextSearchStats(BaseModel):
+    """Статистика полнотекстового поиска для текущего запроса и фильтров."""
+
+    total_matches: int = 0
+    avg_relevance: float = 0
+    max_relevance: float = 0
+
+
+class FullTextSearchItem(BaseModel):
+    """Лёгкий элемент выдачи полнотекстового поиска.
+
+    `full_text` намеренно остаётся пустым, чтобы список результатов не тащил
+    большие PDF-тексты. Полный текст загружается только в карточке статьи.
+    """
+
+    id: int
+    title: str
+    authors: list[str] = Field(default_factory=list)
+    publication_date: datetime | None = None
+    journal: str | None = None
+    doi: str | None = None
+    abstract: str | None = None
+    full_text: str | None = None
+    keywords: list[str] = Field(default_factory=list)
+    source: str
+    source_id: str | None = None
+    url: str | None = None
+    pdf_url: str | None = None
+    pdf_local_path: str | None = None
+    processing_status: str = "pending"
+    content_task_id: str | None = None
+    processing_error: str | None = None
+    summary_ru: str | None = None
+    analysis_ru: str | None = None
+    translation_ru: str | None = None
+    parse_confidence: float | None = None
+    provenance: dict = Field(default_factory=dict)
+    quality_flags: list[str] = Field(default_factory=list)
+    schema_version: str | None = "2.0"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    rank: float = 0
+    snippet: str | None = None
+    title_highlight: str | None = None
+    abstract_highlight: str | None = None
+    full_text_highlight: str | None = None
+    has_pdf: bool = False
+    has_full_text: bool = False
+    full_text_indexed: bool = False
+    matched_fields: list[str] = Field(default_factory=list)
+
+
+class FullTextSearchResponse(BaseModel):
+    """Ответ PostgreSQL FTS без тяжёлого полного текста в выдаче."""
+
+    papers: list[FullTextSearchItem]
+    total: int
+    query: str
+    sources: list[str]
+    search_mode: str = "websearch"
+    limit: int = 20
+    offset: int = 0
+    stats: FullTextSearchStats = Field(default_factory=FullTextSearchStats)
 
 
 class VectorSearchRequest(BaseModel):

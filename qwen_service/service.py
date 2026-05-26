@@ -795,6 +795,16 @@ class SendMessageRequest(BaseModel):
     auto_continue: bool | None = None
 
 
+class FileMessageRequest(BaseModel):
+    file_path: str
+    message: str = ""
+    session_id: str | None = None
+    thinking_enabled: bool = DEFAULT_THINKING_ENABLED
+    search_enabled: bool = DEFAULT_SEARCH_ENABLED
+    auto_continue: bool | None = None
+    session_prompt: str = ""
+
+
 class ContinueMessageRequest(BaseModel):
     session_id: str
     message_id: int
@@ -2327,31 +2337,76 @@ async def upload_file(
     file_path_data: dict[str, str],
     credentials: HTTPAuthorizationCredentials | None = Security(security),
 ):
-    """Documentation updated."""
+    """Upload a file to Qwen provider with 3 retries.
+
+    HAR endpoint sequence used by qwen_api.upload_file:
+    /files/getstsToken -> OSS PUT -> /files/parse -> /files/parse/status.
+    """
     if not verify_token(credentials):
         raise HTTPException(status_code=401, detail="Неверный API ключ")
 
     if not qwen_api:
-        raise HTTPException(status_code=503, detail="Qwen API ?? ???????????????")
+        raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
 
     file_path = file_path_data.get("file_path", "")
     if not file_path:
         raise HTTPException(status_code=400, detail="Не указан путь к файлу")
 
-    if not hasattr(qwen_api, "upload_file"):
-        raise HTTPException(
-            status_code=501,
-            detail="Qwen provider file upload is not implemented in the standalone client",
-        )
-
     try:
-        file_info = await _run_qwen_locked(qwen_api.upload_file, file_path)
+        file_info = await _run_qwen_locked(qwen_api.upload_file, file_path, attempts=3)
         if not file_info:
             raise HTTPException(status_code=500, detail="Не удалось загрузить файл")
-        return {"file_id": file_info.get("id"), "file_info": file_info}
+        return {"file_id": file_info.get("file_id") or file_info.get("id"), "file_info": file_info}
     except HTTPException:
         raise
     except Exception as e:
+        logging.exception("Qwen file upload failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/files/upload-and-send")
+async def upload_file_and_send_message(
+    request: FileMessageRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(security),
+):
+    """Upload a file and send it with an optional message.
+
+    Tries upload/send in the requested session. If it fails, creates a new chat
+    session and retries there. File upload itself is retried 3 times.
+    """
+    if not verify_token(credentials):
+        raise HTTPException(status_code=401, detail="Неверный API ключ")
+
+    if not qwen_api:
+        raise HTTPException(status_code=503, detail="Qwen API не инициализирован")
+
+    if not request.file_path:
+        raise HTTPException(status_code=400, detail="Не указан путь к файлу")
+
+    try:
+        client = _get_session_qwen_api(request.session_id) if request.session_id else _new_qwen_api()
+        if client is None:
+            raise QwenProviderError("Qwen API не инициализирован")
+        if request.session_id:
+            client.session_id = request.session_id
+        result = await run_in_threadpool(
+            client.send_file_message_with_recovery,
+            file_path=request.file_path,
+            message=request.message or "",
+            session_id=request.session_id,
+            thinking_enabled=request.thinking_enabled,
+            search_enabled=request.search_enabled,
+            auto_continue=request.auto_continue,
+            session_prompt=request.session_prompt or "",
+        )
+        sid = str(result.get("session_id") or "")
+        if sid:
+            _register_session_qwen_api(sid, client)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.exception("Qwen upload-and-send failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 
