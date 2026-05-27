@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 from urllib.parse import urlparse
 
@@ -120,6 +121,40 @@ def _add_quality_flag(paper: Any, flag: str) -> None:
         flags.append(flag)
 
 
+def _set_provenance(paper: Any, field_name: str, origin: str) -> None:
+    provenance = getattr(paper, "provenance", None)
+    if not isinstance(provenance, dict):
+        provenance = {}
+    provenance[field_name] = origin
+    paper.provenance = provenance
+
+
+def _add_metadata_quality_flags(paper: Any) -> None:
+    for field_name, flag in (
+        ("authors", "metadata_missing_authors"),
+        ("publication_date", "metadata_missing_publication_date"),
+        ("abstract", "metadata_missing_abstract"),
+        ("source_id", "metadata_missing_source_id"),
+    ):
+        if getattr(paper, field_name, None) in (None, "", [], {}):
+            _add_quality_flag(paper, flag)
+
+
+def _set_default_parse_confidence(paper: Any) -> None:
+    if getattr(paper, "parse_confidence", None) is not None:
+        return
+    signals = (
+        bool(getattr(paper, "title", None) and paper.title != "Untitled"),
+        bool(getattr(paper, "authors", None)),
+        bool(getattr(paper, "publication_date", None)),
+        bool(getattr(paper, "abstract", None)),
+        bool(getattr(paper, "source_id", None)),
+        bool(getattr(paper, "url", None)),
+        bool(getattr(paper, "pdf_url", None) or getattr(paper, "full_text", None)),
+    )
+    paper.parse_confidence = round(sum(signals) / len(signals), 3)
+
+
 async def _enrich_content_access(
     client: Any,
     papers: list[Any],
@@ -148,6 +183,7 @@ async def _enrich_content_access(
                         verified_url = None
                 if _looks_like_http_url(verified_url):
                     paper.pdf_url = verified_url
+                    _set_provenance(paper, "pdf_url", f"{paper.source}:verified")
                     _add_quality_flag(paper, "pdf_url_verified")
                     content_available = True
                 else:
@@ -180,10 +216,12 @@ async def _enrich_content_access(
         if _looks_like_pdf_url(candidate):
             if not content_available:
                 paper.pdf_url = candidate
+                _set_provenance(paper, "pdf_url", f"{paper.source}:detail")
                 _add_quality_flag(paper, "pdf_url_resolved_from_detail")
             content_available = True
         elif isinstance(candidate, str) and not _looks_like_http_url(candidate) and len(candidate.strip()) >= 200:
             paper.full_text = candidate.strip()
+            _set_provenance(paper, "full_text", f"{paper.source}:detail")
             _add_quality_flag(paper, "full_text_extracted_from_detail")
             content_available = True
         if not content_available:
@@ -195,6 +233,8 @@ async def _enrich_content_access(
                     severity="info",
                     record_id=getattr(paper, "source_id", None),
                 )
+        _add_metadata_quality_flags(paper)
+        _set_default_parse_confidence(paper)
         enriched.append(paper)
         if max_results and len(enriched) >= max_results:
             break
@@ -291,6 +331,7 @@ async def execute_source_search(
     sample_limit: int = 5,
 ) -> SourceExecutionResult:
     artifacts = SourceExecutionArtifacts()
+    started_at = monotonic()
     try:
         try:
             raw, papers = await _execute_source(
@@ -307,6 +348,21 @@ async def execute_source_search(
         except Exception as exc:
             raise SourceUnavailableError(source=source, message=str(exc)) from exc
         raw_items = _coerce_raw_list(raw)
+        elapsed_seconds = monotonic() - started_at
+        if (
+            not raw_items
+            and elapsed_seconds >= max(10.0, runtime_config.timeout)
+            and artifacts.parser is not None
+            and hasattr(artifacts.parser, "diagnostics")
+        ):
+            parser_diagnostics = getattr(artifacts.parser, "diagnostics")
+            if hasattr(parser_diagnostics, "add"):
+                parser_diagnostics.add(
+                    stage="fetch",
+                    reason="slow_empty_response",
+                    severity="warning",
+                    details={"duration_seconds": round(elapsed_seconds, 3)},
+                )
         if raw_items and not papers and artifacts.parser is not None and hasattr(artifacts.parser, "diagnostics"):
             parser_diagnostics = getattr(artifacts.parser, "diagnostics")
             if hasattr(parser_diagnostics, "add"):
@@ -316,6 +372,13 @@ async def execute_source_search(
                     severity="warning",
                     details={"raw_count": len(raw_items)},
                 )
+        if artifacts.parser is not None and hasattr(artifacts.parser, "validate_paper"):
+            valid_papers: list[Any] = []
+            for paper in papers:
+                valid, _ = artifacts.parser.validate_paper(paper)
+                if valid:
+                    valid_papers.append(paper)
+            papers = valid_papers
 
         diagnostics: dict[str, Any] = {}
         if artifacts.parser is not None and hasattr(artifacts.parser, "diagnostics"):

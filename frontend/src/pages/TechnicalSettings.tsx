@@ -433,12 +433,18 @@ function PdfMarkdownSettingsPanel({
                 const parser_mode = event.target.value;
                 set({
                   parser_mode,
-                  ai_mode: parser_mode === "ai" ? "force" : settings.ai_mode || "off",
-                  force_strategy: parser_mode === "ai" ? "ai" : settings.force_strategy || "",
+                  ai_mode: parser_mode === "ai" ? "force" : "off",
+                  force_strategy: parser_mode === "ai" ? "ai" : parser_mode === "mypdf" ? "mypdf" : "",
+                  extraction_mode: parser_mode === "mypdf" ? "mypdf" : parser_mode === "ai" ? "ai" : "auto",
+                  ocr_mode: parser_mode === "mypdf" ? "off" : settings.ocr_mode || "auto",
+                  ocr_enabled: parser_mode === "mypdf" ? false : settings.ocr_enabled,
+                  extract_tables: parser_mode === "mypdf" ? false : settings.extract_tables,
+                  detect_columns: parser_mode === "mypdf" ? false : settings.detect_columns,
                 });
               }}
             >
               <option value="auto">auto — обычные алгоритмы + fallback</option>
+              <option value="mypdf">mypdf — быстрый текстовый слой без OCR/таблиц</option>
               <option value="ai">ai — принудительный AI-анализ PDF</option>
             </select>
             <small>Это верхнеуровневый режим, который dashboard передаёт как pdf_mode. OCR управляется отдельно.</small>
@@ -453,10 +459,12 @@ function PdfMarkdownSettingsPanel({
                 set({
                   force_strategy,
                   extraction_mode: force_strategy || settings.extraction_mode || "auto",
-                  parser_mode: force_strategy === "ai" ? "ai" : settings.parser_mode || "auto",
-                  ai_mode: force_strategy === "ai" ? "force" : settings.ai_mode || "off",
-                  ocr_mode: force_strategy === "ocr" ? "force" : settings.ocr_mode || "auto",
-                  ocr_enabled: force_strategy === "ocr" ? true : settings.ocr_enabled,
+                  parser_mode: force_strategy === "ai" ? "ai" : force_strategy === "mypdf" ? "mypdf" : settings.parser_mode || "auto",
+                  ai_mode: force_strategy === "ai" ? "force" : "off",
+                  ocr_mode: force_strategy === "ocr" ? "force" : force_strategy === "mypdf" ? "off" : settings.ocr_mode || "auto",
+                  ocr_enabled: force_strategy === "ocr" ? true : force_strategy === "mypdf" ? false : settings.ocr_enabled,
+                  extract_tables: force_strategy === "mypdf" ? false : settings.extract_tables,
+                  detect_columns: force_strategy === "mypdf" ? false : settings.detect_columns,
                 });
               }}
             >
@@ -465,6 +473,7 @@ function PdfMarkdownSettingsPanel({
               <option value="layout">layout</option>
               <option value="columns">columns</option>
               <option value="ocr">ocr</option>
+              <option value="mypdf">mypdf</option>
               <option value="ai">ai</option>
             </select>
             <small>Нужно для выборочного режима: руками фиксирует конкретный способ извлечения.</small>
@@ -513,9 +522,10 @@ function PdfMarkdownSettingsPanel({
               <option value="columns">columns — читать две колонки</option>
               <option value="simple">simple — обычный текст</option>
               <option value="ocr">ocr — OCR при наличии зависимостей</option>
+              <option value="mypdf">mypdf — быстрый текстовый слой без OCR/таблиц</option>
               <option value="ai">ai — AI-анализ страницы</option>
             </select>
-            <small>auto сравнивает layout/simple/columns по quality score. Для IEEE/arXiv часто помогает columns.</small>
+            <small>auto сравнивает layout/simple/columns по quality score. mypdf — самый быстрый режим: только текстовый слой PDF, без OCR, фото и восстановления таблиц.</small>
           </label>
           <NumberField
             label="Мин. символов страницы"

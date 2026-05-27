@@ -31,11 +31,11 @@ export type PdfMarkdownSettings = {
   save_markdown_parts: boolean;
   normalize_math: boolean;
   show_extraction_diagnostics: boolean;
-  parser_mode: "auto" | "ai" | string;
+  parser_mode: "auto" | "ai" | "mypdf" | string;
   ocr_mode: "auto" | "force" | "off" | string;
   ai_mode: "off" | "auto" | "force" | string;
-  force_strategy: "" | "simple" | "layout" | "columns" | "ocr" | "ai" | string;
-  extraction_mode: "auto" | "layout" | "columns" | "simple" | "ocr" | "ai" | string;
+  force_strategy: "" | "simple" | "layout" | "columns" | "ocr" | "ai" | "mypdf" | string;
+  extraction_mode: "auto" | "layout" | "columns" | "simple" | "ocr" | "ai" | "mypdf" | string;
   ocr_engine: "auto" | "tesseract" | "paddle" | "surya" | "ocrmypdf" | string;
   ai_provider: string;
   ai_model: string;

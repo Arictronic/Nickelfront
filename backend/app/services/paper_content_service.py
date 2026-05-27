@@ -232,6 +232,102 @@ def extract_pdf_page_items(pdf_bytes: bytes, options: dict | None = None) -> lis
         ]
 
 
+def _clean_fast_pdf_text(value: str) -> str:
+    text = (value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def extract_pdf_page_items_mypdf(pdf_bytes: bytes, options: dict | None = None) -> list[dict]:
+    """Fast text-layer PDF extraction through PyMuPDF/fitz.
+
+    This mode intentionally does not run OCR, image/page AI recognition or table
+    reconstruction. It is meant for PDFs with a good embedded text layer where
+    speed is more important than layout/table recovery.
+    """
+    opts = options or {}
+    max_page_chars = int(opts.get("max_page_chars") or 60000)
+    try:
+        import fitz
+
+        page_items: list[dict] = []
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            for page_index in range(len(doc)):
+                page = doc.load_page(page_index)
+                raw_text = page.get_text("text", sort=True) or ""
+                text = _clean_fast_pdf_text(raw_text)[:max_page_chars]
+                if not text:
+                    continue
+                word_count = len(re.findall(r"[A-Za-zА-Яа-я0-9]{2,}", text))
+                quality = 0.55 + min(0.4, len(text) / 12000)
+                if word_count < 25:
+                    quality = min(quality, 0.5)
+                page_items.append(
+                    {
+                        "page_number": page_index + 1,
+                        "text": text,
+                        "method": "mypdf_text_layer",
+                        "quality_score": round(quality, 3),
+                        "warnings": [],
+                        "metadata": {
+                            "parser_mode": "mypdf",
+                            "extraction_mode": "mypdf",
+                            "extraction_strategy": "mypdf_text_layer",
+                            "selected_strategy": "mypdf_text_layer",
+                            "primary_selected_strategy": "mypdf_text_layer",
+                            "ocr_enabled": False,
+                            "ocr_used": False,
+                            "ai_enabled": False,
+                            "ai_used": False,
+                            "extract_tables": False,
+                            "images_processed": False,
+                            "chars": len(text),
+                            "words": word_count,
+                        },
+                    }
+                )
+        return page_items
+    except Exception as exc:
+        logger.warning("Fast mypdf/PyMuPDF extraction failed: {}", exc)
+        fallback_options = {
+            **opts,
+            "parser_mode": "auto",
+            "extraction_mode": "simple",
+            "force_strategy": "simple",
+            "extract_tables": False,
+            "detect_columns": False,
+            "ocr_enabled": False,
+            "ocr_mode": "off",
+            "ocr_force": False,
+            "ai_enabled": False,
+            "ai_mode": "off",
+        }
+        items = extract_pdf_page_items(pdf_bytes, fallback_options)
+        for item in items:
+            metadata = dict(item.get("metadata") or {})
+            metadata.update(
+                {
+                    "parser_mode": "mypdf",
+                    "extraction_mode": "mypdf",
+                    "extraction_strategy": "simple_text_layer_fallback",
+                    "selected_strategy": metadata.get("selected_strategy") or "simple_text_layer_fallback",
+                    "ocr_enabled": False,
+                    "ocr_used": False,
+                    "ai_enabled": False,
+                    "ai_used": False,
+                    "extract_tables": False,
+                    "mypdf_fallback_reason": type(exc).__name__,
+                }
+            )
+            item["metadata"] = metadata
+            item["method"] = item.get("method") or "simple_text_layer_fallback"
+            item["warnings"] = sorted(set(list(item.get("warnings") or []) + ["mypdf_fallback_used"]))
+        return items
+
+
 def extract_pdf_pages(pdf_bytes: bytes) -> list[str]:
     """Backward-compatible page text extraction."""
     return [str(item.get("text") or "") for item in extract_pdf_page_items(pdf_bytes)]

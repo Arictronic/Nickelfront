@@ -1,41 +1,40 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { deletePaper, getPapersCount, getPapersList } from "../api/papers";
+import {
+  deletePaper,
+  exportPapersCsv,
+  getPaperProcessingStatuses,
+  getPapersPage,
+  type PaperListSortBy,
+} from "../api/papers";
 import Pagination from "../components/ui/Pagination";
 import { useToast } from "../components/ui/Toast";
+import { useAuthStore } from "../store/authStore";
 import {
   getProcessingProgress,
-  getProcessingStatusKey,
   getProcessingStatusLabel,
   isPaperProcessing,
   PAPER_SOURCES,
 } from "../types/paper";
-import type { Paper, PaperListFilters, PaperSource } from "../types/paper";
+import type { Paper, PaperListFilters } from "../types/paper";
 
 type SortState = {
   sortKey: "id" | "authors" | "createdAt" | "publicationDate";
   sortDir: "asc" | "desc";
 };
 
-const LS_SELECTED = "selectedPapers.v1";
 const PAGE_SIZE = 10;
-const CLIENT_SCAN_LIMIT = 5000;
-const CLIENT_SCAN_PAGE_SIZE = 100;
 const DEFAULT_SORT: SortState = { sortKey: "createdAt", sortDir: "desc" };
 
 const RU = {
   pageTitle: "Статьи",
   filters: "Фильтры",
   allSources: "Все источники",
-  queryPlaceholder: "Поиск по title/abstract/keywords",
-  fullTextOnly: "Статьи только с полным текстом",
+  queryPlaceholder: "Поиск по названию, аннотации, авторам, DOI и ключевым словам",
+  fullTextOnly: "Только с извлечённым полным текстом",
   from: "с:",
   to: "по:",
   statusAll: "По статусу: все",
-  clientFiltersNote: (limit: number, loaded: number, filtered: number) =>
-    loaded >= limit
-      ? `Загружено ${loaded} записей, после фильтров осталось ${filtered}. Для полной точности по большой базе нужны backend-фильтры.`
-      : `Загружено ${loaded} записей, после фильтров осталось ${filtered}.`,
   sorting: "Сортировка",
   sortById: "По ID",
   sortByAuthors: "По авторам",
@@ -43,9 +42,11 @@ const RU = {
   sortByPublication: "По дате публикации",
   sortDesc: "По убыванию",
   sortAsc: "По возрастанию",
-  exportCsv: "Экспорт CSV",
+  exportCsv: "Экспорт выбранных на странице",
+  exportAllCsv: "Экспорт всех найденных (до 10 000)",
+  exporting: "Экспорт...",
   deleteSelected: "Удалить выбранные",
-  total: "Всего",
+  total: "Найдено",
   loading: "Загрузка...",
   noResults: "Нет результатов.",
   colTitle: "Название",
@@ -60,47 +61,25 @@ const RU = {
   open: "Открыть",
   del: "Удалить",
   dash: "—",
+  adminOnly: "Удаление доступно только администратору.",
   confirmDelete: (n: number) => `Удалить ${n} статей из базы?`,
   hiddenSelectedIgnored: (n: number) =>
     `Скрытые выбранные записи не будут удалены: ${n}.`,
   deletedOk: (n: number) => `Удалено ${n} статей`,
   deleteError: "Ошибка при удалении",
   pickForExport: "Выберите элементы на текущей странице для экспорта.",
+  exportAllError: "Не удалось экспортировать найденные статьи",
   pickForDelete: "Выберите элементы на текущей странице для удаления.",
 } as const;
 
-function loadSelected(): number[] {
-  try {
-    const raw = localStorage.getItem(LS_SELECTED);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as number[];
-    return Array.isArray(parsed)
-      ? parsed.filter((id) => Number.isFinite(id))
-      : [];
-  } catch {
-    return [];
-  }
+function hasExtractedFullText(p: Paper) {
+  return Boolean(p.hasFullText || (p.fullText && p.fullText.trim().length > 0));
 }
 
-function clearSelected() {
-  localStorage.removeItem(LS_SELECTED);
-}
-
-function saveSelected(ids: number[]) {
-  localStorage.setItem(LS_SELECTED, JSON.stringify(ids));
-}
-
-function hasFullTextOrPdf(p: Paper) {
-  return Boolean(
-    (p.fullText && p.fullText.trim().length > 0) || p.pdfUrl || p.pdfLocalPath,
-  );
-}
-
-function isDefaultSort(sort: SortState) {
-  return (
-    sort.sortKey === DEFAULT_SORT.sortKey &&
-    sort.sortDir === DEFAULT_SORT.sortDir
-  );
+function toApiSortKey(sortKey: SortState["sortKey"]): PaperListSortBy {
+  if (sortKey === "createdAt") return "created_at";
+  if (sortKey === "publicationDate") return "publication_date";
+  return sortKey;
 }
 
 const PROCESSING_STATUS_OPTIONS = [
@@ -144,7 +123,6 @@ const PROCESSING_STATUS_OPTIONS = [
   "failed",
 ];
 
-
 function useDebouncedValue<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
 
@@ -156,29 +134,10 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
   return debounced;
 }
 
-function queryMatchesPaper(paper: Paper, rawQuery: string) {
-  const query = rawQuery.trim().toLowerCase();
-  if (!query) return true;
-
-  const haystack = [
-    paper.title,
-    paper.abstract,
-    paper.journal,
-    paper.doi,
-    paper.sourceId,
-    paper.source,
-    ...(paper.authors ?? []),
-    ...(paper.keywords ?? []),
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-
-  return haystack.includes(query);
-}
-
 export default function Patents() {
   const toast = useToast();
+  const isAdmin = !!useAuthStore((s) => s.user?.is_admin);
+  const requestSeq = useRef(0);
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
   const [filters, setFilters] = useState<PaperListFilters>({
@@ -191,27 +150,12 @@ export default function Patents() {
   });
   const [papers, setPapers] = useState<Paper[]>([]);
   const [totalCount, setTotalCount] = useState(0);
-  const [loadedCount, setLoadedCount] = useState(0);
-  const [filteredCount, setFilteredCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedIds, setSelectedIds] = useState<number[]>(() =>
-    loadSelected(),
-  );
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [exportingAll, setExportingAll] = useState(false);
   const debouncedQuery = useDebouncedValue(filters.query ?? "", 450);
-
-  useEffect(() => {
-    saveSelected(selectedIds);
-  }, [selectedIds]);
-
-  const clientFiltersEnabled = Boolean(
-    debouncedQuery ||
-    filters.fullTextOnly ||
-    filters.dateFrom ||
-    filters.dateTo ||
-    (filters.processingStatus && filters.processingStatus !== "all"),
-  );
-  const clientDatasetMode = clientFiltersEnabled || !isDefaultSort(sort);
+  const [statusOptions, setStatusOptions] = useState<{ key: string; label: string }[]>([]);
 
   useEffect(() => {
     setPage(1);
@@ -226,91 +170,58 @@ export default function Patents() {
     sort.sortDir,
   ]);
 
-  const loadAllPapersForClientMode = async () => {
-    const src = (filters.source ?? "all") as PaperListFilters["source"];
-    const expectedTotal = await getPapersCount(
-      src === "all" ? "all" : (src as PaperSource),
-    );
-    const maxToLoad = Math.min(expectedTotal, CLIENT_SCAN_LIMIT);
-    const pages: Paper[][] = [];
+  useEffect(() => {
+    getPaperProcessingStatuses()
+      .then((items) => {
+        const normalized = items
+          .filter((item) => item.key)
+          .map((item) => ({ key: item.key, label: item.label || getProcessingStatusLabel(item.key) }));
+        setStatusOptions(normalized.length ? normalized : PROCESSING_STATUS_OPTIONS.map((key) => ({ key, label: getProcessingStatusLabel(key) })));
+      })
+      .catch(() => setStatusOptions(PROCESSING_STATUS_OPTIONS.map((key) => ({ key, label: getProcessingStatusLabel(key) }))));
+  }, []);
 
-    for (let offset = 0; offset < maxToLoad; offset += CLIENT_SCAN_PAGE_SIZE) {
-      const limit = Math.min(CLIENT_SCAN_PAGE_SIZE, maxToLoad - offset);
-      const chunk = await getPapersList({ limit, offset, source: src });
-      pages.push(chunk);
-      if (chunk.length < limit) break;
-    }
-
-    return pages.flat();
-  };
+  useEffect(() => {
+    setSelectedIds([]);
+  }, [
+    page,
+    filters.source,
+    debouncedQuery,
+    filters.fullTextOnly,
+    filters.dateFrom,
+    filters.dateTo,
+    filters.processingStatus,
+    sort.sortKey,
+    sort.sortDir,
+  ]);
 
   const fetchData = async (showLoading = true) => {
+    const requestId = ++requestSeq.current;
     if (showLoading) setLoading(true);
     setError(null);
     try {
-      if (!clientDatasetMode) {
-        const src = (filters.source ?? "all") as PaperListFilters["source"];
-        const count = await getPapersCount(
-          src === "all" ? "all" : (src as PaperSource),
-        );
-        const offset = (page - 1) * PAGE_SIZE;
-        const items = await getPapersList({
-          limit: PAGE_SIZE,
-          offset,
-          source: src,
-        });
-        setTotalCount(count);
-        setLoadedCount(items.length);
-        setFilteredCount(items.length);
-        setPapers(items);
-        if (count === 0) {
-          setSelectedIds([]);
-          clearSelected();
-        }
-        return;
-      }
+      const response = await getPapersPage({
+        limit: PAGE_SIZE,
+        offset: (page - 1) * PAGE_SIZE,
+        source: filters.source ?? "all",
+        query: debouncedQuery,
+        fullTextOnly: filters.fullTextOnly,
+        dateFrom: filters.dateFrom,
+        dateTo: filters.dateTo,
+        processingStatus: filters.processingStatus,
+        sortBy: toApiSortKey(sort.sortKey),
+        sortDir: sort.sortDir,
+      });
 
-      let items = await loadAllPapersForClientMode();
-      const loadedTotal = items.length;
-
-      if (debouncedQuery)
-        items = items.filter((paper) =>
-          queryMatchesPaper(paper, debouncedQuery),
-        );
-      if (filters.fullTextOnly) items = items.filter(hasFullTextOrPdf);
-
-      const dateFrom = filters.dateFrom ? filters.dateFrom.slice(0, 10) : "";
-      const dateTo = filters.dateTo ? filters.dateTo.slice(0, 10) : "";
-      if (dateFrom)
-        items = items.filter(
-          (p) => (p.publicationDate ?? "").slice(0, 10) >= dateFrom,
-        );
-      if (dateTo)
-        items = items.filter(
-          (p) => (p.publicationDate ?? "").slice(0, 10) <= dateTo,
-        );
-      if (filters.processingStatus && filters.processingStatus !== "all") {
-        items = items.filter(
-          (p) => getProcessingStatusKey(p.processingStatus) === filters.processingStatus,
-        );
-      }
-
-      const filteredTotal = items.length;
-      const pageStart = (page - 1) * PAGE_SIZE;
-      const pageItems = items.slice(pageStart, pageStart + PAGE_SIZE);
-
-      setTotalCount(filteredTotal);
-      setLoadedCount(loadedTotal);
-      setFilteredCount(filteredTotal);
-      setPapers(pageItems);
-      if (filteredTotal === 0) {
-        setSelectedIds([]);
-        clearSelected();
-      }
+      if (requestId !== requestSeq.current) return;
+      setTotalCount(response.total);
+      setPapers(response.papers);
+      if (response.total === 0) setSelectedIds([]);
     } catch (e) {
+      if (requestId !== requestSeq.current) return;
       setError((e as Error).message);
     } finally {
-      if (showLoading) setLoading(false);
+      if (requestId === requestSeq.current && showLoading) setLoading(false);
     }
   };
 
@@ -328,43 +239,8 @@ export default function Patents() {
     sort.sortDir,
   ]);
 
-  const sortedPapers = useMemo(() => {
-    const copy = [...papers];
-    copy.sort((a, b) => {
-      let cmp = 0;
-      if (sort.sortKey === "id") cmp = a.id - b.id;
-      else if (sort.sortKey === "authors") {
-        const left = (a.authors?.[0] ?? "").toLowerCase();
-        const right = (b.authors?.[0] ?? "").toLowerCase();
-        cmp = left.localeCompare(right);
-      } else {
-        const left =
-          sort.sortKey === "createdAt" ? a.createdAt : a.publicationDate;
-        const right =
-          sort.sortKey === "createdAt" ? b.createdAt : b.publicationDate;
-        cmp = (left ?? "").localeCompare(right ?? "");
-      }
-      return sort.sortDir === "asc" ? cmp : -cmp;
-    });
-    return copy;
-  }, [papers, sort]);
-
+  const visiblePapers = papers;
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
-  const visiblePapers = clientDatasetMode
-    ? sortedPapers.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
-    : sortedPapers;
-
-  const statusOptions = useMemo(() => {
-    const fromLoaded = papers
-      .map((p) => getProcessingStatusKey(p.processingStatus))
-      .filter(Boolean);
-    const unique = Array.from(
-      new Set([...PROCESSING_STATUS_OPTIONS, ...fromLoaded]),
-    );
-    return unique.sort((a, b) =>
-      getProcessingStatusLabel(a).localeCompare(getProcessingStatusLabel(b)),
-    );
-  }, [papers]);
 
   const currentIds = visiblePapers.map((p) => p.id);
   const allChecked =
@@ -388,6 +264,8 @@ export default function Patents() {
     filters.dateFrom,
     filters.dateTo,
     filters.processingStatus,
+    sort.sortKey,
+    sort.sortDir,
   ]);
 
   const toggleOne = (id: number) => {
@@ -405,6 +283,11 @@ export default function Patents() {
   };
 
   const deleteByIds = async (ids: number[]) => {
+    if (!isAdmin) {
+      toast.error(RU.adminOnly);
+      return;
+    }
+
     const visibleIds = ids.filter((id) => currentIds.includes(id));
     const hiddenCount = ids.length - visibleIds.length;
     if (visibleIds.length === 0) {
@@ -423,7 +306,15 @@ export default function Patents() {
     }
   };
 
-  const exportCSV = () => {
+  const downloadBlobUrl = (url: string, filename: string) => {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportSelectedCSV = () => {
     const ids = selectedIds.filter((id) => currentIds.includes(id));
     if (ids.length === 0) {
       toast.warning(RU.pickForExport);
@@ -431,15 +322,15 @@ export default function Patents() {
     }
     const rows = visiblePapers.filter((p) => ids.includes(p.id));
     const csvHeader = [
-      "id",
-      "title",
-      "source",
-      "publicationDate",
-      "doi",
-      "journal",
-      "authors",
-      "keywords",
-      "fullText",
+      "ID",
+      "Название",
+      "Источник",
+      "Дата публикации",
+      "DOI",
+      "Журнал",
+      "Авторы",
+      "Ключевые слова",
+      "Извлечённый полный текст",
     ];
     const csv = [
       csvHeader.join(","),
@@ -453,19 +344,38 @@ export default function Patents() {
           p.journal ?? "",
           (p.authors ?? []).join("; "),
           (p.keywords ?? []).join("; "),
-          hasFullTextOrPdf(p) ? "yes" : "no",
+          hasExtractedFullText(p) ? "Да" : "Нет",
         ];
         return row.map((x) => `"${String(x).replace(/"/g, '""')}"`).join(",");
       }),
     ].join("\n");
 
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "papers.csv";
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlobUrl(url, "articles_selected_page.csv");
+  };
+
+  const exportAllCSV = async () => {
+    if (exportingAll) return;
+    setExportingAll(true);
+    try {
+      const url = await exportPapersCsv({
+        source: filters.source ?? "all",
+        query: debouncedQuery,
+        fullTextOnly: filters.fullTextOnly,
+        dateFrom: filters.dateFrom,
+        dateTo: filters.dateTo,
+        processingStatus: filters.processingStatus,
+        sortBy: toApiSortKey(sort.sortKey),
+        sortDir: sort.sortDir,
+        maxRows: 10000,
+      });
+      downloadBlobUrl(url, "articles_found.csv");
+    } catch (e) {
+      toast.error(`${RU.exportAllError}: ${(e as Error).message}`);
+    } finally {
+      setExportingAll(false);
+    }
   };
 
   return (
@@ -479,12 +389,13 @@ export default function Patents() {
         <div className="filters">
           <input
             className="input"
-            style={{ minWidth: 540 }}
+            style={{ minWidth: "min(540px, 100%)", flex: "1 1 320px" }}
             value={filters.query ?? ""}
             onChange={(e) =>
               setFilters((s) => ({ ...s, query: e.target.value }))
             }
             placeholder={RU.queryPlaceholder}
+            aria-label={RU.queryPlaceholder}
           />
           <select
             value={filters.source ?? "all"}
@@ -494,6 +405,7 @@ export default function Patents() {
                 source: e.target.value as PaperListFilters["source"],
               }))
             }
+            aria-label="Фильтр по источнику"
           >
             <option value="all">{RU.allSources}</option>
             {PAPER_SOURCES.map((src) => (
@@ -537,19 +449,15 @@ export default function Patents() {
             onChange={(e) =>
               setFilters((s) => ({ ...s, processingStatus: e.target.value }))
             }
+            aria-label="Фильтр по статусу обработки"
           >
             <option value="all">{RU.statusAll}</option>
             {statusOptions.map((st) => (
-              <option key={st} value={st}>
-                {getProcessingStatusLabel(st)}
+              <option key={st.key} value={st.key}>
+                {st.label}
               </option>
             ))}
           </select>
-          {clientDatasetMode && (
-            <span className="muted">
-              {RU.clientFiltersNote(CLIENT_SCAN_LIMIT, loadedCount, filteredCount)}
-            </span>
-          )}
         </div>
       </div>
 
@@ -564,6 +472,7 @@ export default function Patents() {
                 sortKey: e.target.value as SortState["sortKey"],
               }))
             }
+            aria-label="Поле сортировки"
           >
             <option value="id">{RU.sortById}</option>
             <option value="authors">{RU.sortByAuthors}</option>
@@ -578,6 +487,7 @@ export default function Patents() {
                 sortDir: e.target.value as SortState["sortDir"],
               }))
             }
+            aria-label="Направление сортировки"
           >
             <option value="desc">{RU.sortDesc}</option>
             <option value="asc">{RU.sortAsc}</option>
@@ -586,16 +496,21 @@ export default function Patents() {
       </div>
 
       <div className="actions">
-        <button className="btn btn-primary" onClick={exportCSV}>
+        <button className="btn btn-primary" onClick={exportSelectedCSV}>
           {RU.exportCsv}
         </button>
-        <button
-          className="btn btn-danger"
-          onClick={() => deleteByIds(selectedIds)}
-          disabled={!currentIds.some((id) => selectedIds.includes(id))}
-        >
-          {RU.deleteSelected}
+        <button className="btn" onClick={() => void exportAllCSV()} disabled={exportingAll || totalCount === 0}>
+          {exportingAll ? RU.exporting : RU.exportAllCsv}
         </button>
+        {isAdmin && (
+          <button
+            className="btn btn-danger"
+            onClick={() => deleteByIds(selectedIds)}
+            disabled={!currentIds.some((id) => selectedIds.includes(id))}
+          >
+            {RU.deleteSelected}
+          </button>
+        )}
         <div className="counter-badge" style={{ marginLeft: "auto" }}>
           {RU.total}: {totalCount}
         </div>
@@ -604,105 +519,115 @@ export default function Patents() {
       {loading && <p className="muted">{RU.loading}</p>}
       {error && <p className="error">{error}</p>}
 
-      <table className="table">
-        <thead>
-          <tr>
-            <th>
-              <input
-                type="checkbox"
-                checked={allChecked}
-                onChange={toggleAllCurrent}
-              />
-            </th>
-            <th>ID</th>
-            <th>{RU.colTitle}</th>
-            <th>{RU.colAuthors}</th>
-            <th>{RU.colSource}</th>
-            <th>{RU.colDate}</th>
-            <th>DOI</th>
-            <th>{RU.colFullText}</th>
-            <th>{RU.colStatus}</th>
-            <th>{RU.colActions}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {visiblePapers.length === 0 ? (
+      <div className="table-wrapper">
+        <table className="table">
+          <caption className="sr-only">Список статей</caption>
+          <thead>
             <tr>
-              <td colSpan={10} className="muted">
-                {RU.noResults}
-              </td>
+              <th>
+                <input
+                  type="checkbox"
+                  checked={allChecked}
+                  onChange={toggleAllCurrent}
+                  aria-label="Выбрать все статьи на текущей странице"
+                />
+              </th>
+              <th>ID</th>
+              <th>{RU.colTitle}</th>
+              <th>{RU.colAuthors}</th>
+              <th>{RU.colSource}</th>
+              <th>{RU.colDate}</th>
+              <th>DOI</th>
+              <th>{RU.colFullText}</th>
+              <th>{RU.colStatus}</th>
+              <th>{RU.colActions}</th>
             </tr>
-          ) : (
-            visiblePapers.map((p) => {
-              const checked = selectedIds.includes(p.id);
-              return (
-                <tr key={p.id}>
-                  <td>
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleOne(p.id)}
-                    />
-                  </td>
-                  <td>{p.id}</td>
-                  <td style={{ maxWidth: 520 }}>
-                    <div style={{ fontWeight: 700 }}>{p.title}</div>
-                  </td>
-                  <td>
-                    {p.authors.slice(0, 2).join(", ")}
-                    {p.authors.length > 2 ? "..." : ""}
-                  </td>
-                  <td>{p.source}</td>
-                  <td>
-                    {p.publicationDate
-                      ? p.publicationDate.slice(0, 10)
-                      : RU.dash}
-                  </td>
-                  <td>{p.doi ?? RU.dash}</td>
-                  <td>{hasFullTextOrPdf(p) ? RU.yes : RU.no}</td>
-                  <td>
-                    <div className="paper-progress">
-                      <div className="paper-progress-head">
-                        <span>
-                          {getProcessingStatusLabel(p.processingStatus)}
-                        </span>
-                        <span>
-                          {getProcessingProgress(p.processingStatus)}%
-                        </span>
-                      </div>
-                      <div
-                        className="paper-progress-track"
-                        aria-label={`progress-${p.id}`}
-                      >
+          </thead>
+          <tbody>
+            {visiblePapers.length === 0 ? (
+              <tr>
+                <td colSpan={10} className="muted">
+                  {RU.noResults}
+                </td>
+              </tr>
+            ) : (
+              visiblePapers.map((p) => {
+                const checked = selectedIds.includes(p.id);
+                const progress = getProcessingProgress(p.processingStatus);
+                return (
+                  <tr key={p.id}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleOne(p.id)}
+                        aria-label={`Выбрать статью ${p.id}`}
+                      />
+                    </td>
+                    <td>{p.id}</td>
+                    <td style={{ maxWidth: 520 }}>
+                      <div style={{ fontWeight: 700 }}>{p.title}</div>
+                    </td>
+                    <td>
+                      {p.authors.slice(0, 2).join(", ")}
+                      {p.authors.length > 2 ? "..." : ""}
+                    </td>
+                    <td>{p.source}</td>
+                    <td>
+                      {p.publicationDate
+                        ? p.publicationDate.slice(0, 10)
+                        : RU.dash}
+                    </td>
+                    <td>{p.doi ?? RU.dash}</td>
+                    <td>{hasExtractedFullText(p) ? RU.yes : RU.no}</td>
+                    <td>
+                      <div className="paper-progress">
+                        <div className="paper-progress-head">
+                          <span>
+                            {getProcessingStatusLabel(p.processingStatus)}
+                          </span>
+                          <span>{progress}%</span>
+                        </div>
                         <div
-                          className={`paper-progress-fill ${p.processingStatus === "failed" ? "failed" : getProcessingProgress(p.processingStatus) === 100 ? "done" : ""}`}
-                          style={{
-                            width: `${Math.max(3, getProcessingProgress(p.processingStatus))}%`,
-                          }}
-                        />
+                          className="paper-progress-track"
+                          role="progressbar"
+                          aria-label={`Прогресс обработки статьи ${p.id}`}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={progress}
+                        >
+                          <div
+                            className={`paper-progress-fill ${p.processingStatus === "failed" ? "failed" : progress === 100 ? "done" : ""}`}
+                            style={{
+                              width: `${Math.max(3, progress)}%`,
+                            }}
+                          />
+                        </div>
                       </div>
-                    </div>
-                  </td>
-                  <td>
-                    <div className="actions-inline">
-                      <Link className="action-link" to={`/papers/${p.id}`}>
-                        {RU.open}
-                      </Link>
-                      <button
-                        type="button"
-                        className="btn"
-                        onClick={() => deleteByIds([p.id])}
-                      >
-                        {RU.del}
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })
-          )}
-        </tbody>
-      </table>
+                    </td>
+                    <td>
+                      <div className="actions-inline">
+                        <Link className="action-link" to={`/papers/${p.id}`}>
+                          {RU.open}
+                        </Link>
+                        {isAdmin && (
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => deleteByIds([p.id])}
+                          >
+                            {RU.del}
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
 
       {totalPages > 1 && (
         <Pagination page={page} totalPages={totalPages} onChange={setPage} />

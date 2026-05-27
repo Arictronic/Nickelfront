@@ -5,8 +5,12 @@ import type {
   PaperSearchFilters,
   PaperSource,
   PdfProcessingMode,
+  PaperRegenerationMode,
   PaperContentPart,
   PaperContentPartRegenerateResponse,
+  PaperDetailResponse,
+  PaperProcessingStatusInfo,
+  PaperReportData,
   FullTextSearchResult,
   FullTextSearchStats,
 } from "../types/paper";
@@ -31,6 +35,7 @@ type PaperApiModel = {
   keywords: string[];
   source: PaperSource | string;
   source_id: string | null;
+  canonical_patent_id: string | null;
   url: string | null;
   pdf_url: string | null;
   pdf_local_path: string | null;
@@ -56,6 +61,23 @@ type PaperApiModel = {
   full_text_indexed?: boolean | null;
   matched_fields?: string[] | null;
 };
+
+
+type PaperListResponseApiModel = {
+  items: PaperApiModel[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+type PaperDetailResponseApiModel = {
+  paper: PaperApiModel;
+  content_parts: PaperContentPartApiModel[];
+  status_info: PaperProcessingStatusInfo;
+};
+
+export type PaperListSortBy = "id" | "authors" | "created_at" | "publication_date";
+export type PaperListSortDir = "asc" | "desc";
 
 type PaperContentPartApiModel = {
   id: number;
@@ -145,6 +167,7 @@ function mapPaper(apiPaper: PaperApiModel): Paper {
       .filter(Boolean),
     source: apiPaper.source,
     sourceId: apiPaper.source_id ?? null,
+    canonicalPatentId: apiPaper.canonical_patent_id ?? null,
     url: apiPaper.url ?? null,
     pdfUrl: apiPaper.pdf_url ?? null,
     pdfLocalPath: apiPaper.pdf_local_path ?? null,
@@ -160,6 +183,9 @@ function mapPaper(apiPaper: PaperApiModel): Paper {
     schemaVersion: apiPaper.schema_version ?? null,
     createdAt: apiPaper.created_at ?? null,
     updatedAt: apiPaper.updated_at ?? null,
+    hasPdf: Boolean(apiPaper.has_pdf ?? apiPaper.pdf_url ?? apiPaper.pdf_local_path),
+    hasFullText: Boolean(apiPaper.has_full_text ?? apiPaper.full_text),
+    fullTextIndexed: Boolean(apiPaper.full_text_indexed),
   };
 }
 
@@ -181,19 +207,51 @@ function mapFullTextSearchResult(apiPaper: PaperApiModel): FullTextSearchResult 
   };
 }
 
+export async function getPapersPage(args: {
+  limit: number;
+  offset: number;
+  source?: PaperListFilters["source"];
+  query?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  processingStatus?: string;
+  fullTextOnly?: boolean;
+  sortBy?: PaperListSortBy;
+  sortDir?: PaperListSortDir;
+}) {
+  const { data } = await apiClient.get<PaperListResponseApiModel>("/papers", {
+    params: {
+      limit: clampBackendLimit(args.limit),
+      offset: args.offset,
+      source: args.source && args.source !== "all" ? args.source : undefined,
+      query: args.query?.trim() || undefined,
+      date_from: args.dateFrom || undefined,
+      date_to: args.dateTo || undefined,
+      processing_status:
+        args.processingStatus && args.processingStatus !== "all"
+          ? args.processingStatus
+          : undefined,
+      full_text_only: args.fullTextOnly || undefined,
+      sort_by: args.sortBy ?? "created_at",
+      sort_dir: args.sortDir ?? "desc",
+    },
+  });
+
+  return {
+    papers: (data.items ?? []).map(mapPaper),
+    total: data.total ?? 0,
+    limit: data.limit ?? args.limit,
+    offset: data.offset ?? args.offset,
+  };
+}
+
 export async function getPapersList(args: {
   limit: number;
   offset: number;
   source?: PaperListFilters["source"];
 }) {
-  const { data } = await apiClient.get<PaperApiModel[]>("/papers", {
-    params: {
-      limit: clampBackendLimit(args.limit),
-      offset: args.offset,
-      source: args.source && args.source !== "all" ? args.source : undefined,
-    },
-  });
-  return data.map(mapPaper);
+  const page = await getPapersPage(args);
+  return page.papers;
 }
 
 
@@ -217,6 +275,42 @@ export async function getPapersCount(source?: PaperSource | "all") {
     },
   });
   return data.total;
+}
+
+export async function getPaperProcessingStatuses() {
+  const { data } = await apiClient.get<PaperProcessingStatusInfo[]>("/papers/statuses");
+  return data ?? [];
+}
+
+export async function exportPapersCsv(args: {
+  source?: PaperListFilters["source"];
+  query?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  processingStatus?: string;
+  fullTextOnly?: boolean;
+  sortBy?: PaperListSortBy;
+  sortDir?: PaperListSortDir;
+  maxRows?: number;
+}) {
+  const { data } = await apiClient.get<Blob>("/papers/export.csv", {
+    responseType: "blob",
+    params: {
+      source: args.source && args.source !== "all" ? args.source : undefined,
+      query: args.query?.trim() || undefined,
+      date_from: args.dateFrom || undefined,
+      date_to: args.dateTo || undefined,
+      processing_status:
+        args.processingStatus && args.processingStatus !== "all"
+          ? args.processingStatus
+          : undefined,
+      full_text_only: args.fullTextOnly || undefined,
+      sort_by: args.sortBy ?? "created_at",
+      sort_dir: args.sortDir ?? "desc",
+      max_rows: args.maxRows ?? 10000,
+    },
+  });
+  return URL.createObjectURL(data);
 }
 
 export async function searchPapers(filters: PaperSearchFilters) {
@@ -243,26 +337,50 @@ export async function getPaperById(paperId: number) {
   return mapPaper(data);
 }
 
+export async function getPaperDetails(paperId: number): Promise<PaperDetailResponse> {
+  const { data } = await apiClient.get<PaperDetailResponseApiModel>(`/papers/id/${paperId}/details`);
+  return {
+    paper: mapPaper(data.paper),
+    contentParts: (data.content_parts ?? []).map(mapPaperContentPart),
+    statusInfo: data.status_info,
+  };
+}
+
 export function getPaperPdfUrl(paperId: number) {
   return `${apiClient.defaults.baseURL}/papers/id/${paperId}/pdf`;
 }
 
-export async function reprocessPaperContent(paperId: number) {
+export async function getPaperPdfBlobUrl(paperId: number) {
+  const { data } = await apiClient.get<Blob>(`/papers/id/${paperId}/pdf`, {
+    responseType: "blob",
+  });
+  return URL.createObjectURL(data);
+}
+
+export async function reprocessPaperContent(
+  paperId: number,
+  pdfMode: PdfProcessingMode = "auto",
+) {
   const { data } = await apiClient.post<{
     paper_id: number;
     task_id: string;
     status: string;
-  }>(`/papers/id/${paperId}/reprocess`);
+    pdf_mode?: PdfProcessingMode;
+  }>(`/papers/id/${paperId}/reprocess`, undefined, {
+    params: { pdf_mode: pdfMode },
+  });
   return data;
 }
 
 export async function reprocessAllPapers(args?: {
   limit?: number;
   source?: string;
+  pdfMode?: PdfProcessingMode;
 }) {
   const { data } = await apiClient.post<{
     queued: number;
     task_ids: string[];
+    pdf_mode?: PdfProcessingMode;
   }>(`/papers/reprocess-all`, undefined, {
     params: {
       limit: (() => {
@@ -271,6 +389,7 @@ export async function reprocessAllPapers(args?: {
         return Math.max(1, Math.min(5000, Math.floor(parsed)));
       })(),
       source: args?.source,
+      pdf_mode: args?.pdfMode ?? "auto",
     },
   });
   return data;
@@ -709,9 +828,12 @@ export async function getPaperContentParts(paperId: number) {
 export async function regeneratePaperContentPart(
   paperId: number,
   partId: number,
+  mode: PaperRegenerationMode = "text",
 ) {
   const { data } = await apiClient.post<PaperContentPartRegenerateResponse>(
     `/papers/id/${paperId}/content-parts/${partId}/regenerate`,
+    undefined,
+    { params: { mode } },
   );
   return data;
 }
@@ -720,11 +842,29 @@ export async function regeneratePaperMarkdownPages(
   paperId: number,
   pageStart: number,
   pageEnd: number,
+  mode: PaperRegenerationMode = "text",
 ) {
   const { data } = await apiClient.post<PaperContentPartRegenerateResponse>(
     `/papers/id/${paperId}/markdown-pages/regenerate`,
     undefined,
-    { params: { page_start: pageStart, page_end: pageEnd } },
+    { params: { page_start: pageStart, page_end: pageEnd, mode } },
   );
   return data;
+}
+
+export async function getPaperReport(paperId: number) {
+  const { data } = await apiClient.get<PaperReportData>(`/reports/paper/${paperId}`);
+  return data;
+}
+
+export async function exportPaperReport(paperId: number, format: "pdf" | "docx") {
+  const response = await apiClient.get(`/reports/paper/${paperId}/${format}`, {
+    responseType: "blob",
+    timeout: 10 * 60_000,
+  });
+  const type =
+    format === "pdf"
+      ? "application/pdf"
+      : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  return new Blob([response.data], { type });
 }

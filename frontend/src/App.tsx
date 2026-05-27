@@ -13,7 +13,6 @@ import CeleryMonitoring from "./pages/CeleryMonitoring";
 import WorkerStatus from "./pages/WorkerStatus";
 import TechnicalSettings from "./pages/TechnicalSettings";
 import Database from "./pages/Database";
-import PaperReport from "./pages/PaperReport";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Landing from "./pages/Landing";
@@ -213,7 +212,6 @@ export default function App() {
           <Route path="/dashboard" element={<ProtectedPage name="Главная"><Dashboard /></ProtectedPage>} />
           <Route path="/papers" element={<ProtectedPage name="Статьи"><Patents /></ProtectedPage>} />
           <Route path="/papers/:id" element={<ProtectedPage name="Карточка статьи"><PatentDetail /></ProtectedPage>} />
-          <Route path="/papers/:id/report" element={<ProtectedPage name="Отчёт по статье"><PaperReport /></ProtectedPage>} />
           <Route path="/vector-search" element={<ProtectedPage name="Векторный поиск"><Navigate to="/search" replace /></ProtectedPage>} />
           <Route path="/metrics" element={<ProtectedPage name="Метрики и Аналитика"><Metrics /></ProtectedPage>} />
           <Route path="/celery" element={<AdminPage name="Мониторинг Celery"><CeleryMonitoring /></AdminPage>} />

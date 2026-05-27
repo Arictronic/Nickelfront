@@ -21,6 +21,7 @@ from app.services.embedding_service import get_embedding_service
 from app.services.paper_content_service import (
     download_pdf_bytes,
     extract_pdf_page_items,
+    extract_pdf_page_items_mypdf,
     fetch_additional_full_text,
     resolve_pdf_url,
     save_pdf_locally,
@@ -44,7 +45,7 @@ def _normalize_pdf_mode_override(value: Any) -> str | None:
     if value is None:
         return None
     mode = str(value).strip().lower()
-    return mode if mode in {"auto", "ai"} else "auto"
+    return mode if mode in {"auto", "ai", "mypdf"} else "auto"
 
 
 def _task_id(task_self: Any) -> str | None:
@@ -393,11 +394,24 @@ async def _extract_pdf_text_async(
                 ai_mode = "force"
                 force_strategy = "ai"
                 legacy_extraction_mode = "ai"
+            elif launch_pdf_mode == "mypdf":
+                parser_mode = "mypdf"
+                ai_mode = "off"
+                force_strategy = "mypdf"
+                legacy_extraction_mode = "mypdf"
+                ocr_mode = "off"
             elif launch_pdf_mode == "auto":
                 parser_mode = "auto"
                 ai_mode = "off"
                 force_strategy = ""
                 legacy_extraction_mode = "auto"
+
+            use_mypdf = (
+                launch_pdf_mode == "mypdf"
+                or parser_mode == "mypdf"
+                or force_strategy == "mypdf"
+                or legacy_extraction_mode == "mypdf"
+            )
 
             extraction_options = {
                 "parser_mode": parser_mode,
@@ -405,18 +419,18 @@ async def _extract_pdf_text_async(
                 "ai_mode": ai_mode,
                 "force_strategy": force_strategy,
                 "extraction_mode": legacy_extraction_mode,
-                "detect_columns": pdf_markdown.get("detect_columns", True),
-                "extract_tables": pdf_markdown.get("extract_tables", True),
+                "detect_columns": False if use_mypdf else pdf_markdown.get("detect_columns", True),
+                "extract_tables": False if use_mypdf else pdf_markdown.get("extract_tables", True),
                 "remove_headers_footers": pdf_markdown.get("remove_headers_footers", True),
                 "merge_hyphenated_words": pdf_markdown.get("merge_hyphenated_words", True),
                 "normalize_math": pdf_markdown.get("normalize_math", True),
-                "mark_formula_candidates": pdf_markdown.get("mark_formula_candidates", True),
-                "ocr_enabled": ocr_mode != "off",
+                "mark_formula_candidates": False if use_mypdf else pdf_markdown.get("mark_formula_candidates", True),
+                "ocr_enabled": False if use_mypdf else ocr_mode != "off",
                 "ocr_force": ocr_mode == "force",
                 "ocr_engine": pdf_markdown.get("ocr_engine", "auto"),
                 "ocr_dpi": pdf_markdown.get("ocr_dpi", 220),
                 "ocr_languages": pdf_markdown.get("ocr_languages", "eng+rus"),
-                "ai_enabled": parser_mode == "ai" or ai_mode in {"auto", "force"} or force_strategy == "ai",
+                "ai_enabled": False if use_mypdf else parser_mode == "ai" or ai_mode in {"auto", "force"} or force_strategy == "ai",
                 "ai_provider": pdf_markdown.get("ai_provider", ""),
                 "ai_model": pdf_markdown.get("ai_model", ""),
                 "ai_endpoint": pdf_markdown.get("ai_endpoint", ""),
@@ -429,7 +443,11 @@ async def _extract_pdf_text_async(
                 "max_page_chars": pdf_markdown.get("max_page_chars", 60000),
             }
             ai_requested = parser_mode == "ai" or force_strategy == "ai" or ai_mode == "force"
-            if ai_requested:
+            if use_mypdf:
+                extracted_page_items = await asyncio.to_thread(extract_pdf_page_items_mypdf, pdf_bytes, extraction_options)
+                extracted_pages = [str(item.get("text") or "") for item in extracted_page_items]
+                extracted_text = "\n\n".join(page for page in extracted_pages if page and page.strip()).strip()
+            elif ai_requested:
                 ai_timeout = float(pdf_markdown.get("ai_document_timeout_sec") or 3600)
                 ai_result = await asyncio.to_thread(
                     run_ai_ocr_document_via_queue,

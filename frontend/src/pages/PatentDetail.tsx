@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -7,16 +7,25 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import {
   deletePaper,
-  getPaperById,
-  getPaperContentParts,
-  getPaperPdfUrl,
+  exportPaperReport,
+  getPaperDetails,
+  getPaperPdfBlobUrl,
+  getPaperReport,
   regeneratePaperContentPart,
   regeneratePaperMarkdownPages,
   reprocessPaperContent,
 } from "../api/papers";
 import { getPublicDisplaySettings } from "../api/settings";
 import { useToast } from "../components/ui/Toast";
-import type { Paper, PaperContentPart } from "../types/paper";
+import { useAuthStore } from "../store/authStore";
+import type {
+  Paper,
+  PaperContentPart,
+  PaperProcessingStatusInfo,
+  PaperRegenerationMode,
+  PdfProcessingMode,
+  PaperReportData,
+} from "../types/paper";
 import {
   getProcessingProgress,
   getProcessingStatusLabel,
@@ -25,6 +34,7 @@ import {
 
 type Tab = "main" | "parts" | "report";
 type BusyAction = "delete" | "reprocess" | null;
+type ReportExportFormat = "pdf" | "docx";
 type TextViewMode = "raw" | "ai";
 
 type PartLayerStatus = {
@@ -71,33 +81,55 @@ const RU = {
   keywords: "Ключевые слова",
   status: "Статус обработки",
   fullText: "Полный текст",
+  abstract: "Аннотация",
+  allArticleData: "Все данные статьи",
+  allArticleDataHint: "Развернуть технические данные записи",
+  identifiers: "Идентификаторы",
+  sourceId: "ID в источнике",
+  canonicalPatentId: "Canonical patent ID",
+  createdAt: "Добавлена",
+  updatedAt: "Обновлена",
+  parseConfidence: "Уверенность парсера",
+  schemaVersion: "Версия схемы",
+  qualityFlags: "Флаги качества",
+  provenance: "Происхождение полей",
+  pdfUrl: "PDF URL",
+  pdfLocalPath: "Локальный PDF",
+  contentPartsMeta: "Сохранённые части документа",
+  contentPartsCount: "Количество частей",
+  rawChars: "Символов текста из файла",
+  aiChars: "Символов текста после ИИ",
+  embeddingParts: "Частей для embeddings",
+  noQualityFlags: "Флагов качества нет.",
+  noProvenance: "Данных provenance нет.",
   yes: "Есть",
   no: "Нет",
   open: "Открыть",
   openPdf: "Открыть PDF",
-  workerTask: "Worker task",
+  workerTask: "Задача Celery",
   tabMain: "Главная",
   tabParts: "Текст по страницам",
-  tabReport: "Отчет",
+  tabReport: "Отчёт",
   gist: "Суть статьи",
   gistNotReady: "Здесь будет короткий пересказ всего документа: о чём он, какие ключевые результаты и почему он полезен для анализа.",
   pdfLen: "PDF",
+  pdfLoading: "PDF загружается...",
+  pdfLoadError: "PDF недоступен",
+  pdfNotCached: "PDF-ссылка есть, но файл ещё не сохранён локально. Запустите обработку документа, чтобы скачать PDF через очередь.",
+  queuePdfProcessing: "Поставить PDF в очередь",
   articleText: "Текст статьи",
-  reportBtn: "Открыть отчет на отдельной странице",
+  reportTitle: "Отчёт по статье",
+  reportLoadError: "JSON-отчёт не загрузился. Показаны доступные данные статьи.",
+  exportPdf: "Экспорт PDF",
+  exportDocx: "Экспорт DOCX",
+  exporting: "Экспорт...",
   reprocessBtn: "Перезапустить обработку всего документа",
   parts: "Текст по страницам",
   emptyText: "Текст пуст.",
   selectedPart: "Выбранная страница",
-  localMetrics: "Локальные метрики (эвристики)",
-  localMetricsHint: "Быстрый локальный разбор выбранной части без обращения к AI.",
-  temps: "Температуры (°C)",
-  aiAnalysis: "AI анализ (русский)",
-  aiNotReady: "Анализ ещё не готов.",
-  translation: "Перевод (русский)",
-  translationNotReady: "Перевод ещё не готов.",
   processingError: "Ошибка обработки",
-  noTextForReport: "Нет текста для отчета.",
-  quickOverview: "Страницы (быстрый обзор)",
+  noTextForReport: "Нет данных для отчёта.",
+  symbols: "символов",
   deletePaper: "Удалить статью",
   copyGist: "Копировать суть",
   backToList: "Назад к списку",
@@ -110,6 +142,18 @@ const RU = {
   regenerateQueued: "Перегенерация страницы поставлена в очередь.",
   regenerateError: "Не удалось перегенерировать страницу",
   regenerate: "Перегенерировать",
+  regenerateMode: "Режим",
+  regenerateModeText: "По тексту",
+  regenerateModeImage: "По фото",
+  regenerateModeTextHint: "Берёт сохранённый исходный текст части",
+  regenerateModeImageHint: "Рендерит страницу PDF как изображение и отправляет её в Qwen",
+  pdfMode: "Режим PDF",
+  pdfModeAuto: "Auto — обычный",
+  pdfModeAutoHint: "Обычные алгоритмы извлечения текста и fallback без принудительного AI по фото",
+  pdfModeMypdf: "MyPDF — быстрый текст",
+  pdfModeMypdfHint: "Быстро берёт текстовый слой PDF через PyMuPDF: без OCR, фото и таблиц",
+  pdfModeAi: "AI — по фото",
+  pdfModeAiHint: "Рендерит страницы PDF как изображения и отправляет в Qwen",
   regenerating: "Перегенерация...",
   actionInProgress: "Выполняется...",
   rawText: "Текст из файла",
@@ -124,7 +168,9 @@ const RU = {
   quality: "Целостность",
   extractionDiagnostics: "Диагностика извлечения",
   extractionDiagnosticsHidden: "Диагностика извлечения скрыта настройками.",
-  noStoredParts: "Сохранённых страниц пока нет. Показываю legacy-разбиение полного текста.",
+  noStoredParts: "Сохранённых страниц пока нет. Показываю старое разбиение полного текста.",
+  contentPartsLoadError: "Не удалось загрузить сохранённые страницы/части документа. Показываю общий текст, если он есть.",
+  adminOnlyRegenerate: "Перегенерация страниц доступна только администратору.",
   confirmDelete: "Удалить статью из базы?",
   unknown: "—",
 };
@@ -183,6 +229,33 @@ function pageTitle(pageStart: number | null, pageEnd: number | null, fallback: s
   if (!pageStart || !pageEnd) return fallback;
   if (pageStart === pageEnd) return `Страница ${pageStart}`;
   return `Страницы ${pageStart}-${pageEnd}`;
+}
+
+function formatDateTime(value: string | null | undefined): string {
+  if (!value) return RU.unknown;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString("ru-RU");
+}
+
+function formatPercent(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return RU.unknown;
+  const normalized = Number(value) <= 1 ? Number(value) * 100 : Number(value);
+  return `${Math.max(0, Math.min(100, Math.round(normalized)))}%`;
+}
+
+function nonEmptyEntries(record: Record<string, string> | null | undefined): [string, string][] {
+  return Object.entries(record ?? {}).filter(([key, value]) => Boolean(key.trim() || String(value ?? "").trim()));
+}
+
+function FieldList({ rows }: { rows: Array<[string, ReactNode]> }) {
+  return (
+    <div className="detail-grid">
+      {rows.map(([label, value]) => (
+        <p key={label}><strong>{label}:</strong> {value || RU.unknown}</p>
+      ))}
+    </div>
+  );
 }
 
 function splitLegacyMarkdownParts(text: string): DisplayPart[] {
@@ -257,14 +330,39 @@ function splitLegacyMarkdownParts(text: string): DisplayPart[] {
   return chunks;
 }
 
-function mapStoredPart(part: PaperContentPart): DisplayPart {
+
+function findFallbackMarkdownForPages(
+  fallbackParts: DisplayPart[],
+  pageStart: number | null,
+  pageEnd: number | null,
+  orderIndex: number,
+): string | null {
+  if (!fallbackParts.length) return null;
+
+  if (pageStart && pageEnd) {
+    const exact = fallbackParts.find((part) => part.pageStart === pageStart && part.pageEnd === pageEnd);
+    if (exact?.markdown.trim()) return exact.markdown;
+
+    const covering = fallbackParts.find((part) => {
+      if (!part.pageStart || !part.pageEnd) return false;
+      return part.pageStart <= pageStart && part.pageEnd >= pageEnd;
+    });
+    if (covering?.markdown.trim()) return covering.markdown;
+  }
+
+  const byOrder = fallbackParts[orderIndex];
+  return byOrder?.markdown.trim() ? byOrder.markdown : null;
+}
+
+function mapStoredPart(part: PaperContentPart, fallbackMarkdown: string | null = null): DisplayPart {
   const title = pageTitle(part.pageStart, part.pageEnd, `Часть ${part.partIndex}`);
+  const markdown = part.markdownText?.trim() || fallbackMarkdown?.trim() || "";
   return {
     id: part.id,
     title,
     pageStart: part.pageStart,
     pageEnd: part.pageEnd,
-    markdown: part.markdownText || "",
+    markdown,
     rawText: part.rawText,
     status: part.status,
     error: part.error,
@@ -320,7 +418,7 @@ function mergeExtractionMethod(parts: PaperContentPart[]): string | null {
   return "mixed";
 }
 
-function aggregateStoredPartsByPage(parts: PaperContentPart[]): DisplayPart[] {
+function aggregateStoredPartsByPage(parts: PaperContentPart[], fallbackParts: DisplayPart[] = []): DisplayPart[] {
   const groups = new Map<string, PaperContentPart[]>();
 
   for (const part of parts) {
@@ -333,17 +431,22 @@ function aggregateStoredPartsByPage(parts: PaperContentPart[]): DisplayPart[] {
   return Array.from(groups.values()).map((group) => {
     const first = group[0];
 
-    if (group.length === 1) return mapStoredPart(first);
+    if (group.length === 1) {
+      const fallbackMarkdown = findFallbackMarkdownForPages(fallbackParts, first.pageStart, first.pageEnd, first.partIndex - 1);
+      return mapStoredPart(first, fallbackMarkdown);
+    }
 
     const rawText = group
       .map((part) => part.rawText?.trim() ?? "")
       .filter(Boolean)
       .join("\n\n");
 
-    const markdown = group
+    const markdownFromParts = group
       .map((part) => part.markdownText?.trim() ?? "")
       .filter(Boolean)
       .join("\n\n");
+    const fallbackMarkdown = findFallbackMarkdownForPages(fallbackParts, first.pageStart, first.pageEnd, first.partIndex - 1);
+    const markdown = markdownFromParts || fallbackMarkdown || "";
 
     const errors = group
       .map((part) => part.error?.trim() ?? "")
@@ -391,36 +494,6 @@ function getRegenerationKey(part: DisplayPart | null): string | null {
   return null;
 }
 
-
-function localExtractMetrics(text: string) {
-  const lower = text.toLowerCase();
-  const keywords = [
-    "nickel",
-    "superalloy",
-    "inconel",
-    "hastelloy",
-    "creep",
-    "tensile",
-    "fatigue",
-    "yield",
-    "temperature",
-    "corrosion",
-  ];
-  const found: Record<string, number> = {};
-  for (const k of keywords) {
-    const re = new RegExp(k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
-    const m = lower.match(re);
-    found[k] = m ? m.length : 0;
-  }
-
-  const temps = (text.match(/(\d+(?:\.\d+)?)\s*(?:°\s*)?c/gi) ?? []).slice(0, 20);
-  const topKeywords = Object.entries(found)
-    .sort((a, b) => b[1] - a[1])
-    .filter(([, v]) => v > 0)
-    .slice(0, 8);
-
-  return { topKeywords, temps };
-}
 
 
 function normalizePartStatus(status: string | null | undefined): string {
@@ -520,7 +593,7 @@ function getRawPartStatus(part: DisplayPart | null): PartLayerStatus {
 function getAiPartStatus(part: DisplayPart | null): PartLayerStatus {
   if (!part) return { key: "none", label: "В очереди", tone: "neutral" };
   const status = normalizePartStatus(part.status);
-  if (part.markdown?.trim() && part.markdownTextChars > 0) {
+  if (part.markdown?.trim()) {
     return { key: "ai_ready", label: "Готово", tone: "success" };
   }
   if (status === "processing") return { key: "ai_processing", label: "В обработке", tone: "processing" };
@@ -579,7 +652,7 @@ function MarkdownText({ text }: { text: string }) {
     <div className="markdown-body">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex]}
+        rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
         skipHtml
       >
         {normalizeMarkdownForDisplay(text)}
@@ -689,6 +762,80 @@ function parsePlainTextForReading(text: string): PlainTextBlock[] {
   return blocks;
 }
 
+function extractApiErrorMessage(error: any): string {
+  const data = error?.response?.data;
+  if (data?.detail) return String(data.detail);
+  if (data?.message) return String(data.message);
+  return error?.message || "unknown error";
+}
+
+function ReportScoreCard({ title, value }: { title: string; value: number }) {
+  const score = Math.max(0, Math.min(100, Math.round(Number(value || 0))));
+  return (
+    <article className="panel kpi-card article-report-score-card">
+      <h3>{title}</h3>
+      <p className={`kpi ${score >= 70 ? "ok" : score >= 40 ? "" : "idle"}`}>{score}%</p>
+    </article>
+  );
+}
+
+function RegenerationModeSelect({
+  value,
+  onChange,
+  disabled = false,
+  id,
+}: {
+  value: PaperRegenerationMode;
+  onChange: (value: PaperRegenerationMode) => void;
+  disabled?: boolean;
+  id: string;
+}) {
+  return (
+    <label className="regeneration-mode-select" htmlFor={id}>
+      <span>{RU.regenerateMode}</span>
+      <select
+        id={id}
+        className="input"
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value as PaperRegenerationMode)}
+      >
+        <option value="text" title={RU.regenerateModeTextHint}>{RU.regenerateModeText}</option>
+        <option value="image" title={RU.regenerateModeImageHint}>{RU.regenerateModeImage}</option>
+      </select>
+    </label>
+  );
+}
+
+function PdfProcessingModeSelect({
+  value,
+  onChange,
+  disabled = false,
+  id,
+}: {
+  value: PdfProcessingMode;
+  onChange: (value: PdfProcessingMode) => void;
+  disabled?: boolean;
+  id: string;
+}) {
+  return (
+    <label className="regeneration-mode-select" htmlFor={id}>
+      <span>{RU.pdfMode}</span>
+      <select
+        id={id}
+        className="input"
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value as PdfProcessingMode)}
+      >
+        <option value="auto" title={RU.pdfModeAutoHint}>{RU.pdfModeAuto}</option>
+        <option value="mypdf" title={RU.pdfModeMypdfHint}>{RU.pdfModeMypdf}</option>
+        <option value="ai" title={RU.pdfModeAiHint}>{RU.pdfModeAi}</option>
+      </select>
+    </label>
+  );
+}
+
 function PlainTextDocument({ text }: { text: string }) {
   const blocks = parsePlainTextForReading(text);
 
@@ -709,19 +856,31 @@ export default function PatentDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const toast = useToast();
+  const isAdmin = !!useAuthStore((s) => s.user?.is_admin);
 
   const [paper, setPaper] = useState<Paper | null>(null);
+  const [paperStatusInfo, setPaperStatusInfo] = useState<PaperProcessingStatusInfo | null>(null);
   const [contentParts, setContentParts] = useState<PaperContentPart[]>([]);
+  const [contentPartsError, setContentPartsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pollingWarning, setPollingWarning] = useState<string | null>(null);
+  const [pdfObjectUrl, setPdfObjectUrl] = useState<string | null>(null);
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("main");
   const [activePartIndex, setActivePartIndex] = useState(0);
   const [textViewMode, setTextViewMode] = useState<TextViewMode>("ai");
   const [showExtractionDiagnostics, setShowExtractionDiagnostics] = useState(true);
   const [actionBusy, setActionBusy] = useState<BusyAction>(null);
   const [regeneratingPartKey, setRegeneratingPartKey] = useState<string | null>(null);
+  const [partRegenerationMode, setPartRegenerationMode] = useState<PaperRegenerationMode>("text");
+  const [documentPdfMode, setDocumentPdfMode] = useState<PdfProcessingMode>("auto");
+  const [report, setReport] = useState<PaperReportData | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportWarning, setReportWarning] = useState<string | null>(null);
+  const [exportingReport, setExportingReport] = useState<ReportExportFormat | null>(null);
 
   const loadPaper = async (showLoading = true) => {
     const paperId = Number(id);
@@ -735,15 +894,11 @@ export default function PatentDetail() {
     if (showLoading) setLoadError(null);
 
     try {
-      const nextPaper = await getPaperById(paperId);
-      setPaper(nextPaper);
-      try {
-        const nextParts = await getPaperContentParts(paperId);
-        setContentParts(nextParts);
-      } catch (partsError) {
-        setContentParts([]);
-        console.warn("Failed to load paper content parts", partsError);
-      }
+      const details = await getPaperDetails(paperId);
+      setPaper(details.paper);
+      setPaperStatusInfo(details.statusInfo ?? null);
+      setContentParts(details.contentParts);
+      setContentPartsError(null);
       setLoadError(null);
       setPollingWarning(null);
     } catch (e) {
@@ -756,6 +911,9 @@ export default function PatentDetail() {
   };
 
   useEffect(() => {
+    setReport(null);
+    setReportWarning(null);
+    setActivePartIndex(0);
     loadPaper();
     getPublicDisplaySettings()
       .then((value) => setShowExtractionDiagnostics(value.show_extraction_diagnostics ?? true))
@@ -763,22 +921,85 @@ export default function PatentDetail() {
   }, [id]);
 
   useEffect(() => {
-    if (!paper || !isPaperProcessing(paper.processingStatus)) return;
+    if (!paper) return;
+    const processing = paperStatusInfo ? !paperStatusInfo.final : isPaperProcessing(paper.processingStatus);
+    if (!processing) return;
     const timer = window.setInterval(() => {
       loadPaper(false).catch(() => null);
     }, 4000);
     return () => window.clearInterval(timer);
-  }, [paper?.id, paper?.processingStatus]);
+  }, [paper?.id, paper?.processingStatus, paperStatusInfo?.final]);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl: string | null = null;
+
+    if (!paper?.id || !(paper.pdfUrl || paper.pdfLocalPath)) {
+      setPdfObjectUrl(null);
+      setPdfLoading(false);
+      setPdfError(null);
+      return () => undefined;
+    }
+
+    if (!paper.pdfLocalPath) {
+      setPdfObjectUrl(null);
+      setPdfLoading(false);
+      setPdfError(RU.pdfNotCached);
+      return () => undefined;
+    }
+
+    setPdfObjectUrl(null);
+    setPdfLoading(true);
+    setPdfError(null);
+
+    getPaperPdfBlobUrl(paper.id)
+      .then((url) => {
+        objectUrl = url;
+        if (active) setPdfObjectUrl(url);
+        else URL.revokeObjectURL(url);
+      })
+      .catch((e) => {
+        if (!active) return;
+        setPdfError((e as Error).message || RU.pdfLoadError);
+      })
+      .finally(() => {
+        if (active) setPdfLoading(false);
+      });
+
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [paper?.id, paper?.pdfUrl, paper?.pdfLocalPath]);
 
   const fullText = paper?.fullText ?? "";
   const hasFullText = Boolean(fullText.trim().length);
-  const hasFullTextOrPdf = Boolean(hasFullText || paper?.pdfUrl || paper?.pdfLocalPath);
+  const hasPdf = Boolean(paper?.pdfUrl || paper?.pdfLocalPath);
+  const hasLocalPdf = Boolean(paper?.pdfLocalPath);
+  const provenanceEntries = nonEmptyEntries(paper?.provenance);
+  const rawPartsChars = contentParts.reduce((sum, part) => sum + Number(part.rawTextChars || part.rawText?.length || 0), 0);
+  const markdownPartsChars = contentParts.reduce((sum, part) => sum + Number(part.markdownTextChars || part.markdownText?.length || 0), 0);
+  const embeddingPartsCount = contentParts.filter((part) => part.includeInEmbedding).length;
+  const paperStatusLabel = paperStatusInfo?.label || getProcessingStatusLabel(paper?.processingStatus);
+  const paperStatusProgress = paperStatusInfo?.final ? 100 : getProcessingProgress(paper?.processingStatus);
+
+  const legacyMarkdownParts = useMemo<DisplayPart[]>(() => splitLegacyMarkdownParts(fullText), [fullText]);
 
   const displayParts = useMemo<DisplayPart[]>(() => {
-    if (contentParts.length) return aggregateStoredPartsByPage(contentParts);
-    return splitLegacyMarkdownParts(fullText);
-  }, [contentParts, fullText]);
+    if (!contentParts.length) return legacyMarkdownParts;
 
+    const storedParts = aggregateStoredPartsByPage(contentParts, legacyMarkdownParts);
+    const hasAnyAiMarkdown = storedParts.some((part) => part.markdown.trim().length > 0);
+
+    // Если backend уже собрал Markdown в paper.full_text, но отдельные content_parts
+    // ещё не содержат markdown_text, не показываем ложное «Текст после ИИ ещё не готов».
+    // Это типичный режим при save_markdown_parts=false или после legacy-сборки full_text.
+    if (!hasAnyAiMarkdown && legacyMarkdownParts.length) return legacyMarkdownParts;
+
+    return storedParts;
+  }, [contentParts, legacyMarkdownParts]);
+
+  const displayedAiChars = displayParts.reduce((sum, part) => sum + (part.markdownTextChars || part.markdown.length || 0), 0);
   const selectedPart = displayParts[activePartIndex] ?? null;
 
   useEffect(() => {
@@ -797,13 +1018,10 @@ export default function PatentDetail() {
   const rawOverallStatus = useMemo(() => getOverallLayerStatus(displayParts, "raw"), [displayParts]);
   const aiOverallStatus = useMemo(() => getOverallLayerStatus(displayParts, "ai"), [displayParts]);
 
-  const partMetrics = useMemo(() => {
-    if (!selectedPart) return null;
-    const text = textViewMode === "raw" ? selectedPart.rawText || "" : selectedPart.markdown || "";
-    return localExtractMetrics(text || selectedPart.markdown || selectedPart.rawText || "");
-  }, [selectedPart, textViewMode]);
+
 
   const onDelete = async () => {
+    if (!isAdmin) return;
     if (!paper || actionBusy) return;
     if (!window.confirm(RU.confirmDelete)) return;
     setActionBusy("delete");
@@ -822,11 +1040,12 @@ export default function PatentDetail() {
   };
 
   const onReprocess = async () => {
+    if (!isAdmin) return;
     if (!paper || actionBusy) return;
     setActionBusy("reprocess");
     setActionError(null);
     try {
-      await reprocessPaperContent(paper.id);
+      await reprocessPaperContent(paper.id, documentPdfMode);
       toast.success(RU.reprocessQueued);
       await loadPaper(false);
     } catch (e) {
@@ -838,16 +1057,20 @@ export default function PatentDetail() {
     }
   };
 
-  const onRegeneratePart = async (part: DisplayPart) => {
+  const onRegeneratePart = async (part: DisplayPart, mode: PaperRegenerationMode = partRegenerationMode) => {
+    if (!isAdmin) {
+      toast.error(RU.adminOnlyRegenerate);
+      return;
+    }
     const key = getRegenerationKey(part);
     if (!paper || !key || regeneratingPartKey) return;
     setRegeneratingPartKey(key);
     setActionError(null);
     try {
       if (part.id) {
-        await regeneratePaperContentPart(paper.id, part.id);
+        await regeneratePaperContentPart(paper.id, part.id, mode);
       } else if (part.pageStart && part.pageEnd) {
-        await regeneratePaperMarkdownPages(paper.id, part.pageStart, part.pageEnd);
+        await regeneratePaperMarkdownPages(paper.id, part.pageStart, part.pageEnd, mode);
       }
       toast.success(RU.regenerateQueued);
       await loadPaper(false);
@@ -873,6 +1096,49 @@ export default function PatentDetail() {
     }
   };
 
+  const loadReport = async () => {
+    if (!paper?.id || reportLoading) return;
+    setReportLoading(true);
+    setReportWarning(null);
+    try {
+      const nextReport = await getPaperReport(paper.id);
+      setReport(nextReport);
+    } catch (e) {
+      setReport(null);
+      setReportWarning(`${RU.reportLoadError} Подробности: ${(e as Error).message}`);
+    } finally {
+      setReportLoading(false);
+    }
+  };
+
+  const onExportReport = async (format: ReportExportFormat) => {
+    if (!paper?.id || exportingReport) return;
+    setExportingReport(format);
+    setActionError(null);
+    try {
+      const blob = await exportPaperReport(paper.id, format);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `paper_${paper.id}_report.${format}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } catch (e: any) {
+      const message = extractApiErrorMessage(e);
+      setActionError(`${format === "pdf" ? RU.exportPdf : RU.exportDocx}: ${message}`);
+    } finally {
+      setExportingReport(null);
+    }
+  };
+
+  useEffect(() => {
+    if (tab === "report" && paper?.id && !report && !reportLoading && !reportWarning) {
+      loadReport().catch(() => null);
+    }
+  }, [tab, paper?.id, report, reportLoading, reportWarning]);
+
   if (loading) return <p className="muted">{RU.loading}</p>;
   if (loadError && !paper) return <p className="error">{loadError}</p>;
   if (!paper) return <p className="muted">{RU.notFound}</p>;
@@ -885,34 +1151,110 @@ export default function PatentDetail() {
 
       {actionError && <p className="error">{actionError}</p>}
       {pollingWarning && <p className="muted">{pollingWarning}</p>}
+      {contentPartsError && <p className="muted">{RU.contentPartsLoadError} Подробности: {contentPartsError}</p>}
 
       <div className="panel">
         <h2 style={{ marginTop: 0 }}>{paper.title}</h2>
         <div className="detail-grid">
-          <p><strong>{RU.authors}:</strong> {paper.authors.length ? paper.authors.slice(0, 4).join(", ") + (paper.authors.length > 4 ? "..." : "") : RU.unknown}</p>
+          <p><strong>{RU.authors}:</strong> {paper.authors.length ? paper.authors.join(", ") : RU.unknown}</p>
           <p><strong>{RU.source}:</strong> {paper.source}</p>
           <p><strong>{RU.date}:</strong> {paper.publicationDate ? paper.publicationDate.slice(0, 10) : RU.unknown}</p>
           <p><strong>{RU.journal}:</strong> {paper.journal ?? RU.unknown}</p>
           <p><strong>DOI:</strong> {paper.doi ?? RU.unknown}</p>
-          <p><strong>{RU.keywords}:</strong> {paper.keywords.length ? paper.keywords.slice(0, 10).join(", ") : RU.unknown}</p>
+          <p><strong>{RU.keywords}:</strong> {paper.keywords.length ? paper.keywords.join(", ") : RU.unknown}</p>
           <div className="detail-progress">
             <div className="paper-progress-head">
               <strong>{RU.status}:</strong>
-              <span>{getProcessingStatusLabel(paper.processingStatus)} - {getProcessingProgress(paper.processingStatus)}%</span>
+              <span>{paperStatusLabel} - {paperStatusProgress}%</span>
             </div>
-            <div className="paper-progress-track" aria-label={`paper-${paper.id}-progress`}>
+            <div
+              className="paper-progress-track"
+              role="progressbar"
+              aria-label={`Прогресс обработки статьи ${paper.id}`}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={paperStatusProgress}
+            >
               <div
-                className={`paper-progress-fill ${paper.processingStatus === "failed" ? "failed" : getProcessingProgress(paper.processingStatus) === 100 ? "done" : ""}`}
-                style={{ width: `${Math.max(3, getProcessingProgress(paper.processingStatus))}%` }}
+                className={`paper-progress-fill ${paperStatusInfo?.group === "error" || paper.processingStatus === "failed" ? "failed" : paperStatusProgress === 100 ? "done" : ""}`}
+                style={{ width: `${Math.max(3, paperStatusProgress)}%` }}
               />
             </div>
           </div>
-          <p><strong>{RU.fullText}:</strong> {hasFullTextOrPdf ? RU.yes : RU.no}</p>
+          <p><strong>{RU.fullText}:</strong> {hasFullText ? RU.yes : RU.no}</p>
           <p><strong>URL:</strong> {paper.url ? <a href={paper.url} target="_blank" rel="noreferrer" className="action-link">{RU.open}</a> : RU.unknown}</p>
-          <p><strong>PDF:</strong> {paper.pdfUrl || paper.pdfLocalPath ? <a href={getPaperPdfUrl(paper.id)} target="_blank" rel="noreferrer" className="action-link">{RU.openPdf}</a> : RU.unknown}</p>
+          <p>
+            <strong>PDF:</strong>{" "}
+            {hasPdf ? (
+              pdfObjectUrl ? (
+                <a href={pdfObjectUrl} target="_blank" rel="noreferrer" className="action-link">{RU.openPdf}</a>
+              ) : pdfLoading ? (
+                <span className="muted">{RU.pdfLoading}</span>
+              ) : hasLocalPdf ? (
+                <span className="error">{pdfError || RU.pdfLoadError}</span>
+              ) : (
+                <span className="muted">{RU.pdfNotCached}</span>
+              )
+            ) : RU.unknown}
+          </p>
           <p><strong>{RU.workerTask}:</strong> {paper.contentTaskId ?? RU.unknown}</p>
         </div>
       </div>
+
+      {paper.abstract?.trim() && (
+        <section className="panel article-section">
+          <h2 className="article-section-title">{RU.abstract}</h2>
+          <p style={{ whiteSpace: "pre-wrap" }}>{paper.abstract}</p>
+        </section>
+      )}
+
+      <details className="panel article-section article-data-details">
+        <summary className="article-data-summary">
+          <span>{RU.allArticleData}</span>
+          <small>{RU.allArticleDataHint}</small>
+        </summary>
+        <FieldList
+          rows={[
+            [RU.status, paperStatusLabel],
+            [RU.sourceId, paper.sourceId ?? RU.unknown],
+            [RU.canonicalPatentId, paper.canonicalPatentId ?? RU.unknown],
+            [RU.pdfUrl, paper.pdfUrl ? <a href={paper.pdfUrl} target="_blank" rel="noreferrer" className="action-link">{paper.pdfUrl}</a> : RU.unknown],
+            [RU.pdfLocalPath, paper.pdfLocalPath ? "Есть" : "Нет"],
+            [RU.createdAt, formatDateTime(paper.createdAt)],
+            [RU.updatedAt, formatDateTime(paper.updatedAt)],
+            [RU.parseConfidence, formatPercent(paper.parseConfidence)],
+            [RU.schemaVersion, paper.schemaVersion ?? RU.unknown],
+            [RU.contentPartsCount, String(contentParts.length)],
+            [RU.rawChars, String(rawPartsChars)],
+            [RU.aiChars, String(displayedAiChars || markdownPartsChars)],
+            [RU.embeddingParts, String(embeddingPartsCount)],
+          ]}
+        />
+
+        <div style={{ marginTop: 12 }}>
+          <h3 style={{ marginBottom: 8 }}>{RU.qualityFlags}</h3>
+          {paper.qualityFlags.length ? (
+            <div className="part-warning-list">
+              {paper.qualityFlags.map((flag) => <span key={flag} className="part-warning-chip">{flag}</span>)}
+            </div>
+          ) : (
+            <p className="muted">{RU.noQualityFlags}</p>
+          )}
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <h3 style={{ marginBottom: 8 }}>{RU.provenance}</h3>
+          {provenanceEntries.length ? (
+            <div className="detail-grid">
+              {provenanceEntries.map(([key, value]) => (
+                <p key={key}><strong>{key}:</strong> {value}</p>
+              ))}
+            </div>
+          ) : (
+            <p className="muted">{RU.noProvenance}</p>
+          )}
+        </div>
+      </details>
 
       <div className="tabs">
         <button className={`btn ${tab === "main" ? "btn-primary" : ""}`} onClick={() => setTab("main")}>{RU.tabMain}</button>
@@ -933,14 +1275,38 @@ export default function PatentDetail() {
             )}
           </section>
 
-          {(paper.pdfUrl || paper.pdfLocalPath) && (
+
+          {hasPdf && (
             <section className="article-section">
               <h2 className="article-section-title">{RU.pdfLen}</h2>
-              <iframe
-                title="paper-pdf"
-                src={getPaperPdfUrl(paper.id)}
-                className="article-pdf-frame"
-              />
+              {pdfObjectUrl ? (
+                <iframe
+                  title="paper-pdf"
+                  src={pdfObjectUrl}
+                  className="article-pdf-frame"
+                />
+              ) : pdfLoading ? (
+                <p className="muted">{RU.pdfLoading}</p>
+              ) : hasLocalPdf ? (
+                <p className="error">{pdfError || RU.pdfLoadError}</p>
+              ) : (
+                <div>
+                  <p className="muted">{RU.pdfNotCached}</p>
+                  {isAdmin && (
+                    <div className="regeneration-controls">
+                      <PdfProcessingModeSelect
+                        id="document-pdf-mode-inline"
+                        value={documentPdfMode}
+                        onChange={setDocumentPdfMode}
+                        disabled={actionBusy === "reprocess"}
+                      />
+                      <button className="btn" onClick={onReprocess} disabled={actionBusy === "reprocess"}>
+                        {actionBusy === "reprocess" ? RU.actionInProgress : RU.queuePdfProcessing}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </section>
           )}
 
@@ -996,15 +1362,23 @@ export default function PatentDetail() {
                                   <PartExtractionInfo part={part} compact />
                                 )}
                               </div>
-                              {textViewMode === "ai" && (
-                                <button
-                                  className="btn btn-primary"
-                                  disabled={!getRegenerationKey(part) || regeneratingPartKey === getRegenerationKey(part)}
-                                  onClick={() => onRegeneratePart(part)}
-                                  title={!getRegenerationKey(part) ? "Перегенерация доступна только для сохранённых страниц" : undefined}
-                                >
-                                  {regeneratingPartKey === getRegenerationKey(part) ? RU.regenerating : RU.regenerate}
-                                </button>
+                              {isAdmin && textViewMode === "ai" && (
+                                <div className="regeneration-controls compact">
+                                  <RegenerationModeSelect
+                                    id={`readonly-regeneration-mode-${part.id ?? idx}`}
+                                    value={partRegenerationMode}
+                                    onChange={setPartRegenerationMode}
+                                    disabled={regeneratingPartKey === getRegenerationKey(part)}
+                                  />
+                                  <button
+                                    className="btn btn-primary"
+                                    disabled={!getRegenerationKey(part) || regeneratingPartKey === getRegenerationKey(part)}
+                                    onClick={() => onRegeneratePart(part, partRegenerationMode)}
+                                    title={!getRegenerationKey(part) ? "Перегенерация доступна только для сохранённых страниц" : undefined}
+                                  >
+                                    {regeneratingPartKey === getRegenerationKey(part) ? RU.regenerating : RU.regenerate}
+                                  </button>
+                                </div>
                               )}
                             </div>
                             {textViewMode === "raw" ? (
@@ -1024,11 +1398,21 @@ export default function PatentDetail() {
             </section>
           )}
 
+
           <div className="article-actions-row">
-            <button className="btn" onClick={() => navigate(`/papers/${paper.id}/report`)}>{RU.reportBtn}</button>
-            <button className="btn" onClick={onReprocess} disabled={actionBusy === "reprocess"}>
-              {actionBusy === "reprocess" ? RU.actionInProgress : RU.reprocessBtn}
-            </button>
+            {isAdmin && (
+              <div className="regeneration-controls">
+                <PdfProcessingModeSelect
+                  id="document-pdf-mode-main"
+                  value={documentPdfMode}
+                  onChange={setDocumentPdfMode}
+                  disabled={actionBusy === "reprocess"}
+                />
+                <button className="btn" onClick={onReprocess} disabled={actionBusy === "reprocess"}>
+                  {actionBusy === "reprocess" ? RU.actionInProgress : RU.reprocessBtn}
+                </button>
+              </div>
+            )}
           </div>
         </article>
       )}
@@ -1085,14 +1469,24 @@ export default function PatentDetail() {
                       >
                         {RU.textAfterAi}
                       </button>
-                      <button
-                        className="btn btn-primary"
-                        disabled={!getRegenerationKey(selectedPart) || regeneratingPartKey === getRegenerationKey(selectedPart)}
-                        onClick={() => onRegeneratePart(selectedPart)}
-                        title={!getRegenerationKey(selectedPart) ? "Перегенерация доступна только для сохранённых страниц" : undefined}
-                      >
-                        {regeneratingPartKey === getRegenerationKey(selectedPart) ? RU.regenerating : RU.regenerate}
-                      </button>
+                      {isAdmin && (
+                        <div className="regeneration-controls compact">
+                          <RegenerationModeSelect
+                            id={`selected-regeneration-mode-${selectedPart.id ?? activePartIndex}`}
+                            value={partRegenerationMode}
+                            onChange={setPartRegenerationMode}
+                            disabled={regeneratingPartKey === getRegenerationKey(selectedPart)}
+                          />
+                          <button
+                            className="btn btn-primary"
+                            disabled={!getRegenerationKey(selectedPart) || regeneratingPartKey === getRegenerationKey(selectedPart)}
+                            onClick={() => onRegeneratePart(selectedPart, partRegenerationMode)}
+                            title={!getRegenerationKey(selectedPart) ? "Перегенерация доступна только для сохранённых страниц" : undefined}
+                          >
+                            {regeneratingPartKey === getRegenerationKey(selectedPart) ? RU.regenerating : RU.regenerate}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -1110,16 +1504,6 @@ export default function PatentDetail() {
                   ) : (
                     selectedPart.markdown?.trim() ? <MarkdownText text={selectedPart.markdown} /> : <p className="muted">{RU.aiNotAvailable}</p>
                   )}
-
-                  <hr style={{ border: "none", borderTop: "1px solid #e5e7eb", margin: "14px 0" }} />
-                  <h3 style={{ marginTop: 0 }}>{RU.localMetrics}</h3>
-                  <p className="muted">{RU.localMetricsHint}</p>
-                  {partMetrics && (
-                    <div className="detail-grid" style={{ marginTop: 10 }}>
-                      <p><strong>Top keywords:</strong> {partMetrics.topKeywords.length ? partMetrics.topKeywords.map(([k, v]) => `${k}=${v}`).join(", ") : RU.unknown}</p>
-                      <p><strong>{RU.temps}:</strong> {partMetrics.temps.length ? partMetrics.temps.join(", ") : RU.unknown}</p>
-                    </div>
-                  )}
                 </>
               ) : <p className="muted">{RU.emptyText}</p>}
             </div>
@@ -1128,42 +1512,79 @@ export default function PatentDetail() {
       )}
 
       {tab === "report" && (
-        <article className="panel">
-          <h3>{RU.aiAnalysis}</h3>
-          {paper.analysisRu ? <p style={{ whiteSpace: "pre-wrap" }}>{paper.analysisRu}</p> : <p className="muted">{RU.aiNotReady}</p>}
-
-          <h3 style={{ marginTop: 18 }}>{RU.translation}</h3>
-          {paper.translationRu ? <p style={{ whiteSpace: "pre-wrap" }}>{paper.translationRu}</p> : <p className="muted">{RU.translationNotReady}</p>}
+        <article className="panel article-report-tab">
+          <div className="article-section-head">
+            <h2 className="article-section-title">{RU.reportTitle}</h2>
+            <div className="actions">
+              <button
+                className="btn"
+                onClick={() => void onExportReport("pdf")}
+                disabled={exportingReport === "pdf"}
+              >
+                {exportingReport === "pdf" ? RU.exporting : RU.exportPdf}
+              </button>
+              <button
+                className="btn"
+                onClick={() => void onExportReport("docx")}
+                disabled={exportingReport === "docx"}
+              >
+                {exportingReport === "docx" ? RU.exporting : RU.exportDocx}
+              </button>
+            </div>
+          </div>
 
           {paper.processingError && <p className="error" style={{ marginTop: 12 }}>{RU.processingError}: {paper.processingError}</p>}
+          {reportWarning && <p className="muted">{reportWarning}</p>}
+          {reportLoading && <p className="muted">Загрузка отчёта...</p>}
 
-          {!displayParts.length ? <p className="muted">{RU.noTextForReport}</p> : (
-            <>
-              <h3>{RU.quickOverview}</h3>
-              <div className="markdown-parts-overview">
-                {displayParts.slice(0, 8).map((part, idx) => {
-                  const m = localExtractMetrics(part.markdown);
-                  return (
-                    <article className="panel" key={`${part.id ?? "legacy"}-${idx}`} style={{ boxShadow: "none", padding: 12 }}>
-                      <p className="muted">{part.title}</p>
-                      <p style={{ margin: 0, whiteSpace: "pre-wrap", fontSize: 13 }}>
-                        {(m.topKeywords.length ? m.topKeywords.map(([k, v]) => `${k}:${v}`).join(", ") : "метрики не найдены") + "\n\n"}
-                        {part.markdown.slice(0, 300)}...
-                      </p>
-                    </article>
-                  );
-                })}
-              </div>
-              {displayParts.length > 8 && <p className="muted">Показаны первые 8 частей.</p>}
-            </>
-          )}
+          <div className="kpi-grid article-report-score-grid">
+            <ReportScoreCard title="Качество" value={report?.scores?.quality_score ?? 0} />
+            <ReportScoreCard title="Полнота" value={report?.scores?.completeness_score ?? 0} />
+            <article className="panel kpi-card article-report-score-card">
+              <h3>Аннотация</h3>
+              <p className="kpi">{report?.abstract_length ?? (paper.abstract?.length || 0)}</p>
+              <small>{RU.symbols}</small>
+            </article>
+            <article className="panel kpi-card article-report-score-card">
+              <h3>{RU.fullText}</h3>
+              <p className="kpi">{report?.full_text_length ?? (paper.fullText?.length || 0)}</p>
+              <small>{RU.symbols}</small>
+            </article>
+          </div>
+
+          <section className="article-section">
+            <h3 style={{ marginTop: 0 }}>Рекомендации</h3>
+            {report?.recommendations?.length ? (
+              <ul>
+                {report.recommendations.map((item) => <li key={item}>{item}</li>)}
+              </ul>
+            ) : (
+              <p className="muted">Рекомендаций нет.</p>
+            )}
+          </section>
+
+          <section className="article-section">
+            <h3 style={{ marginTop: 0 }}>Состав данных</h3>
+            <FieldList
+              rows={[
+                [RU.contentPartsCount, String(contentParts.length)],
+                [RU.rawChars, String(rawPartsChars)],
+                [RU.aiChars, String(displayedAiChars || markdownPartsChars)],
+                [RU.embeddingParts, String(embeddingPartsCount)],
+                [RU.keywords, String(report?.keywords_count ?? paper.keywords.length)],
+                ["Сгенерирован", report?.generated_at ? formatDateTime(report.generated_at) : RU.unknown],
+              ]}
+            />
+          </section>
         </article>
       )}
 
       <div className="actions">
-        <button className="btn btn-danger" onClick={onDelete} disabled={actionBusy === "delete"}>
-          {actionBusy === "delete" ? RU.actionInProgress : RU.deletePaper}
-        </button>
+        {isAdmin && (
+          <button className="btn btn-danger" onClick={onDelete} disabled={actionBusy === "delete"}>
+            {actionBusy === "delete" ? RU.actionInProgress : RU.deletePaper}
+          </button>
+        )}
         <button className="btn" onClick={() => void copyGist()}>{RU.copyGist}</button>
         <button className="btn" onClick={() => navigate("/papers")}>{RU.backToList}</button>
       </div>

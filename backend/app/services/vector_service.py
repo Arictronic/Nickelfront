@@ -389,6 +389,53 @@ class ChromaVectorService:
             logger.error(f"Ошибка удаления статьи {paper_id} из ChromaDB: {e}")
             return False
 
+    def get_indexed_paper_ids(self, batch_size: int = 5000) -> set[int]:
+        """Вернуть paper_id, реально присутствующие в Chroma-индексе Vector.
+
+        Важно: считаем только записи с metadata.paper_id или id вида ``paper_<id>``.
+        Старые/ручные записи без привязки к статье не попадают в readiness-метрики.
+        """
+        if not self.collection:
+            return set()
+
+        paper_ids: set[int] = set()
+        offset = 0
+        while True:
+            try:
+                chunk = self.collection.get(
+                    include=["metadatas"],
+                    limit=batch_size,
+                    offset=offset,
+                )
+            except TypeError:
+                chunk = self.collection.get(include=["metadatas"])
+            except Exception as e:
+                logger.error(f"Ошибка чтения paper_id из Vector ChromaDB: {e}")
+                return paper_ids
+
+            ids = chunk.get("ids") or []
+            metadatas = chunk.get("metadatas") or []
+            for index, item_id in enumerate(ids):
+                metadata = metadatas[index] if index < len(metadatas) and isinstance(metadatas[index], dict) else {}
+                raw_paper_id = metadata.get("paper_id") or metadata.get("paperId")
+                if raw_paper_id is None and isinstance(item_id, str) and item_id.startswith("paper_"):
+                    raw_paper_id = item_id.removeprefix("paper_").split("_", 1)[0]
+                try:
+                    parsed = int(raw_paper_id)
+                except (TypeError, ValueError):
+                    continue
+                if parsed > 0:
+                    paper_ids.add(parsed)
+
+            if len(ids) < batch_size or len(ids) == 0:
+                break
+            offset += batch_size
+            if offset > 2_000_000:
+                logger.warning("Остановлено чтение Vector paper_id: превышен safety offset")
+                break
+
+        return paper_ids
+
     def clear(self) -> bool:
         """
         Очищает векторное хранилище (удаляет все документы).
@@ -453,6 +500,18 @@ class ChromaVectorService:
         except Exception as e:
             logger.error(f"Ошибка перестройки индекса: {e}")
             return 0
+
+    def sync_index(self, papers: list[dict[str, Any]]) -> int:
+        """Upsert всех переданных документов без очистки коллекции.
+
+        Используется dashboard-действием «Синхронизировать Vector»: оно должно
+        добавить/обновить все документы из PostgreSQL и не удалять существующий
+        индекс при частичной ошибке.
+        """
+        count, errors = self.add_documents_batch(papers)
+        if errors:
+            logger.warning(f"Vector sync завершён с ошибками: success={count}, errors={errors}")
+        return count
 
     def get_stats(self) -> dict[str, Any]:
         """

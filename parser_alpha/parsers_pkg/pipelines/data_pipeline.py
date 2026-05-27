@@ -134,6 +134,7 @@ class DeduplicationStage(PipelineStage):
 
     async def process(self, context: PipelineContext) -> PipelineContext:
         unique_papers: list[Paper] = []
+        unique_positions: dict[int, int] = {}
         duplicates_count = 0
         merged_count = 0
         stage_errors: list[str] = []
@@ -145,23 +146,20 @@ class DeduplicationStage(PipelineStage):
             if not is_duplicate:
                 unique_papers.append(paper)
                 self.deduplicator.add_paper(paper_dict)
+                unique_positions[id(paper_dict)] = len(unique_papers) - 1
                 continue
 
             duplicates_count += 1
             if self.enable_merge:
-                existing = next(
-                    (
-                        item for item in self.deduplicator.existing_papers
-                        if item.get("doi") == paper_dict.get("doi")
-                        or item.get("source_id") == paper_dict.get("source_id")
-                    ),
-                    None,
-                )
+                existing = self.deduplicator.find_duplicate_record(paper_dict)
                 if existing is not None:
                     merged = self.deduplicator.merge_records(paper_dict, existing)
                     existing.update(merged.record)
                     existing["provenance"] = merged.provenance
                     existing["parse_confidence"] = merged.confidence
+                    position = unique_positions.get(id(existing))
+                    if position is not None:
+                        unique_papers[position] = Paper.model_validate(existing)
                     merged_count += 1
                     continue
 

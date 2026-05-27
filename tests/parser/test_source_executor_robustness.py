@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from parsers_pkg.source_executor import (
     _coerce_raw_list,
@@ -8,8 +9,11 @@ from parsers_pkg.source_executor import (
     _enrich_content_access,
     _quality_candidate_limit,
     _safe_event_dicts,
+    execute_source_search,
 )
 from parsers_pkg.contracts import ParserDiagnostics
+from parsers_pkg.external.parser import ExternalParser
+from parsers_pkg.source_config import SourceRuntimeConfig
 from shared.schemas.paper import Paper
 
 
@@ -54,6 +58,8 @@ class TestSameSourceContentAccessEnrichment(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.item_id, "123")
         self.assertEqual(papers[0].pdf_url, "https://repo.example/paper.pdf")
         self.assertIn("pdf_url_resolved_from_detail", papers[0].quality_flags)
+        self.assertEqual(papers[0].provenance["pdf_url"], "CORE:detail")
+        self.assertGreater(papers[0].parse_confidence or 0, 0)
 
     async def test_detail_text_is_kept_when_pdf_is_unavailable(self):
         paper = Paper(
@@ -72,6 +78,7 @@ class TestSameSourceContentAccessEnrichment(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(papers[0].full_text, body.strip())
         self.assertIn("full_text_extracted_from_detail", papers[0].quality_flags)
+        self.assertEqual(papers[0].provenance["full_text"], "FreePatent:detail")
 
     async def test_article_page_without_pdf_or_text_is_kept_as_metadata(self):
         paper = Paper(
@@ -85,6 +92,7 @@ class TestSameSourceContentAccessEnrichment(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(papers, [paper])
         self.assertIn("content_access_unresolved", paper.quality_flags)
+        self.assertIn("metadata_missing_authors", paper.quality_flags)
 
     async def test_ambiguous_pdf_candidate_must_be_verified(self):
         paper = Paper(
@@ -181,6 +189,34 @@ class TestSameSourceContentAccessEnrichment(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(results), 1)
         self.assertEqual(client.calls, 1)
+
+
+class TestSourceExecutionHealth(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_empty_response_is_reported_as_degraded(self):
+        config = SourceRuntimeConfig(
+            source="arXiv",
+            enabled=True,
+            timeout=30.0,
+            max_retries=1,
+            retry_base_delay=1.0,
+            retry_backoff_base=2.0,
+            retry_jitter_max=0.0,
+            browser_enabled=False,
+            require_api_key=False,
+            headless=True,
+            headers_profile="default",
+        )
+
+        async def fake_execute_source(source, query, limit, runtime_config, artifacts):
+            artifacts.parser = ExternalParser(source=source)
+            return [], []
+
+        with patch("parsers_pkg.source_executor._execute_source", side_effect=fake_execute_source):
+            with patch("parsers_pkg.source_executor.monotonic", side_effect=[0.0, 31.0]):
+                result = await execute_source_search("arXiv", "nickel alloy", 1, config)
+
+        self.assertTrue(result.source_health["degraded"])
+        self.assertEqual(result.diagnostics["degraded_reasons"], ["slow_empty_response"])
 
 
 if __name__ == "__main__":

@@ -139,6 +139,23 @@ def _coerce_text_scalar(value: object, *, default: str | None = None) -> str | N
     return text or default
 
 
+def _normalize_doi_value(value: object) -> str | None:
+    import re
+    from urllib.parse import urlparse
+
+    text = _coerce_text_scalar(value)
+    if not text:
+        return None
+    parsed = urlparse(text.strip())
+    if parsed.scheme in {"http", "https"} and parsed.netloc.lower() in {"doi.org", "dx.doi.org"}:
+        text = parsed.path.lstrip("/")
+    else:
+        text = re.sub(r"^doi:\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", text, flags=re.IGNORECASE)
+    text = text.strip().strip(".;, ")
+    return text.lower() if re.match(r"^10\.\d{4,9}/[-._;()/:A-Za-z0-9]+$", text) else None
+
+
 def _coerce_json_dict(value: object) -> dict:
     """Coerce legacy/NULL metadata values to a dict."""
     import json
@@ -179,6 +196,7 @@ class PaperBase(BaseModel):
     keywords: list[str] = Field(default_factory=list, description="Ключевые слова")
     source: str = Field(..., description="Источник (CORE, arXiv, etc.)")
     source_id: str | None = Field(None, description="ID в источнике")
+    canonical_patent_id: str | None = Field(None, description="Canonical cross-source patent identifier")
     url: str | None = Field(None, description="URL статьи")
     pdf_url: str | None = Field(None, description="URL PDF")
     pdf_local_path: str | None = Field(None, description="Локальный путь к PDF")
@@ -196,11 +214,11 @@ class PaperBase(BaseModel):
     @field_validator(
         "title",
         "journal",
-        "doi",
         "abstract",
         "full_text",
         "source",
         "source_id",
+        "canonical_patent_id",
         "url",
         "pdf_url",
         "pdf_local_path",
@@ -217,6 +235,11 @@ class PaperBase(BaseModel):
         if info.field_name in {"title", "source"} and isinstance(value, str) and value.strip() == "":
             return ""
         return _coerce_text_scalar(value)
+
+    @field_validator("doi", mode="before")
+    @classmethod
+    def _normalize_doi(cls, value):
+        return _normalize_doi_value(value)
 
     @field_validator("authors", "keywords", "quality_flags", mode="before")
     @classmethod

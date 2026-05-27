@@ -55,6 +55,18 @@ class TestGooglePatentsClient(unittest.IsolatedAsyncioTestCase):
         ids = GooglePatentsClient._extract_publication_ids_from_search_html(html)
         self.assertEqual(ids, ["US10597755B2", "WO2020123456A1"])
 
+    def test_extract_publication_ids_from_internal_search_payload(self):
+        payload = {
+            "results": {
+                "cluster": [
+                    {"result": [{"id": "patent/US10597755B2/en"}, {"id": "patent/WO2020123456A1/en"}]}
+                ]
+            }
+        }
+
+        ids = GooglePatentsClient._extract_publication_ids_from_search_payload(payload)
+        self.assertEqual(ids, ["US10597755B2", "WO2020123456A1"])
+
     async def test_search_reads_detail_page_for_publication_number(self):
         client = GooglePatentsClient()
         paths: list[str] = []
@@ -75,35 +87,35 @@ class TestGooglePatentsClient(unittest.IsolatedAsyncioTestCase):
         client = GooglePatentsClient()
         calls: list[tuple[str, dict | None]] = []
 
-        async def fake_request_text(path: str, params=None) -> str:
+        async def fake_request_json(path: str, params=None) -> dict:
             calls.append((path, params))
-            if path == "/":
-                return """
-                <html><body>
-                  <a href="/patent/US10597755B2/en">US</a>
-                  <a href="/patent/WO2020123456A1/en">WO</a>
-                </body></html>
-                """
+            return {
+                "results": {
+                    "cluster": [
+                        {"result": [{"id": "patent/US10597755B2/en"}, {"id": "patent/WO2020123456A1/en"}]}
+                    ]
+                }
+            }
+
+        async def fake_request_text(path: str, params=None) -> str:
             if path == "/patent/US10597755B2/en":
                 return '<meta name="DC.title" content="US patent title">'
             if path == "/patent/WO2020123456A1/en":
                 return '<meta name="DC.title" content="WO patent title">'
             return ""
 
+        client._request_json = fake_request_json
         client._request_text = fake_request_text
         records = await client.search("title:(battery) abstract:(solid-state)", limit=2, offset=0)
 
         self.assertEqual(len(records), 2)
         self.assertEqual(records[0]["source_id"], "US10597755B2")
         self.assertEqual(records[1]["source_id"], "WO2020123456A1")
-        self.assertEqual(calls[0][0], "/")
+        self.assertEqual(calls[0][0], "/xhr/query")
         self.assertEqual(
             calls[0][1],
             {
-                "q": "title:(battery) abstract:(solid-state)",
-                "num": 100,
-                "start": 0,
-                "hl": "en",
+                "url": "q=title%3A%28battery%29+abstract%3A%28solid-state%29&num=100&page=0&hl=en",
             },
         )
 

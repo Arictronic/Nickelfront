@@ -402,10 +402,13 @@ def build_default_source_registry() -> SourceRegistry:
                     retry_backoff_base=2.0,
                     retry_jitter_max=0.5,
                 ),
-                notes="Google Patents detail pages; query must be a publication ID or patent URL.",
+                notes="Google Patents internal JSON search with HTML detail extraction; supports keyword queries and publication IDs.",
                 maturity="beta",
                 access_mode="unofficial",
-                compliance_notes="Reads allowed /patent/ detail pages only; automated search-result crawling is not enabled.",
+                compliance_notes=(
+                    "Uses an internal search endpoint and public detail pages without an official API; "
+                    "keep requests throttled and monitor blocks or markup changes."
+                ),
             ),
             SourceMetadata(
                 name="PATENTSCOPE",

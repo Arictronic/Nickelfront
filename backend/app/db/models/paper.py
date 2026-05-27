@@ -1,6 +1,6 @@
 """Модель научной статьи."""
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, ForeignKey, Index, Float
+from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, ForeignKey, Index, Float, text
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import TSVECTOR
@@ -34,6 +34,7 @@ class Paper(Base):
 
     source = Column(String(50), nullable=False, index=True)
     source_id = Column(String(200), nullable=True, index=True)
+    canonical_patent_id = Column(String(200), nullable=True)
     url = Column(String(1000), nullable=True)
     pdf_url = Column(String(1000), nullable=True)
     pdf_local_path = Column(String(1000), nullable=True)
@@ -70,6 +71,21 @@ class Paper(Base):
     __table_args__ = (
 
         Index('ix_papers_search_vector', 'search_vector', postgresql_using='gin'),
+        Index(
+            "uq_papers_canonical_patent_id_not_null",
+            "canonical_patent_id",
+            unique=True,
+            postgresql_where=text("canonical_patent_id IS NOT NULL"),
+            sqlite_where=text("canonical_patent_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_papers_source_source_id_not_null",
+            "source",
+            "source_id",
+            unique=True,
+            postgresql_where=text("source_id IS NOT NULL"),
+            sqlite_where=text("source_id IS NOT NULL"),
+        ),
     )
 
     def __repr__(self):

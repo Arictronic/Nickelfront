@@ -13,7 +13,8 @@ export const PAPER_SOURCES = [
 ] as const;
 
 export type PaperSource = (typeof PAPER_SOURCES)[number];
-export type PdfProcessingMode = "auto" | "ai";
+export type PdfProcessingMode = "auto" | "ai" | "mypdf";
+export type PaperRegenerationMode = "text" | "image";
 
 export interface Paper {
   id: number;
@@ -27,6 +28,7 @@ export interface Paper {
   keywords: string[];
   source: PaperSource | string;
   sourceId: string | null;
+  canonicalPatentId: string | null;
   url: string | null;
   pdfUrl: string | null;
   pdfLocalPath: string | null;
@@ -100,6 +102,13 @@ export interface PaperContentPart {
   updatedAt: string | null;
 }
 
+export interface PaperProcessingStatusInfo {
+  key: string;
+  label: string;
+  group: "pending" | "processing" | "success" | "warning" | "error" | "unknown" | string;
+  final: boolean;
+}
+
 export interface PaperContentPartRegenerateResponse {
   paper_id: number;
   part_id: number;
@@ -107,6 +116,32 @@ export interface PaperContentPartRegenerateResponse {
   status: string;
   page_start: number;
   page_end: number;
+  mode: PaperRegenerationMode;
+}
+
+export interface PaperReportData {
+  paper_id: number;
+  title: string;
+  authors: string[];
+  journal: string | null;
+  publication_date: string | null;
+  doi: string | null;
+  source: string;
+  abstract_length: number;
+  full_text_length: number;
+  keywords_count: number;
+  scores: {
+    quality_score: number;
+    completeness_score: number;
+  };
+  recommendations: string[];
+  generated_at: string;
+}
+
+export interface PaperDetailResponse {
+  paper: Paper;
+  contentParts: PaperContentPart[];
+  statusInfo: PaperProcessingStatusInfo;
 }
 
 const PROCESSING_STATUS_LABELS: Record<string, string> = {
@@ -170,20 +205,20 @@ const PROCESSING_STATUS_PROGRESS: Record<string, number> = {
   digitizing_file: 52,
   markdown_ready: 72,
   markdown_partial: 72,
-  markdown_ready_without_qwen: 72,
+  markdown_ready_without_qwen: 100,
   markdown_failed: 72,
   markdown_skipped: 72,
   analyzing_ru: 80,
   ru_analysis_ready: 86,
-  ru_analysis_fallback: 86,
-  ru_analysis_skipped: 86,
+  ru_analysis_fallback: 100,
+  ru_analysis_skipped: 100,
   extracting_keywords: 90,
   keywords_ready: 92,
-  keywords_failed: 92,
-  keywords_skipped: 92,
+  keywords_failed: 100,
+  keywords_skipped: 100,
   indexing_vector: 96,
-  embedding_ready: 98,
-  embedding_skipped: 98,
+  embedding_ready: 100,
+  embedding_skipped: 100,
   qwen_auth_failed: 100,
   ready: 100,
   ready_with_fallback: 100,
@@ -197,6 +232,20 @@ const PROCESSING_FINAL_STATUSES = new Set([
   "completed",
   "failed",
   "qwen_auth_failed",
+  "pdf_download_failed",
+  "pdf_unavailable",
+  "pdf_download_skipped",
+  "pdf_text_skipped",
+  "fulltext_unavailable",
+  "markdown_ready_without_qwen",
+  "markdown_failed",
+  "markdown_skipped",
+  "ru_analysis_fallback",
+  "ru_analysis_skipped",
+  "keywords_failed",
+  "keywords_skipped",
+  "embedding_ready",
+  "embedding_skipped",
 ]);
 
 type ParsedProcessingStatus = {

@@ -33,6 +33,31 @@ class TestPipelineAndDryRunSmoke(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(result.papers), 0)
         self.assertIn("parser", result.diagnostics)
 
+    async def test_pipeline_merges_canonical_patent_duplicate_content(self):
+        result = await process_papers(
+            [
+                Paper(
+                    title="Nickel patent",
+                    source="Rospatent",
+                    journal="Rospatent",
+                    source_id="RU123456C1",
+                    url="https://searchplatform.rospatent.gov.ru/doc/RU123456C1",
+                ),
+                Paper(
+                    title="Nickel patent details",
+                    source="FreePatent",
+                    journal="FreePatent",
+                    source_id="patents/123456",
+                    url="https://www.freepatent.ru/patents/123456",
+                    abstract="Useful patent abstract",
+                ),
+            ]
+        )
+
+        self.assertEqual(len(result.papers), 1)
+        self.assertEqual(result.papers[0].abstract, "Useful patent abstract")
+        self.assertEqual(result.stats["merged_count"], 1)
+
     async def test_dry_run_all_sources_have_expected_keys(self):
         registry = build_default_source_registry()
         for source in registry.list_names():

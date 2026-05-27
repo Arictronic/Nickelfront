@@ -85,6 +85,20 @@ class TestCOREParserEdgeCases(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(records[0].url, "https://repo.example/article-page")
         self.assertIsNone(records[0].pdf_url)
 
+    async def test_core_parser_drops_public_api_full_text_placeholder(self):
+        parser = COREParser()
+        records = await parser.parse_search_results(
+            [
+                {
+                    "id": "restricted-1",
+                    "title": "Metadata-only record",
+                    "fullText": "Not available for public API users.",
+                }
+            ]
+        )
+
+        self.assertIsNone(records[0].full_text)
+
 
 if __name__ == "__main__":
     unittest.main()

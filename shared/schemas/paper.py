@@ -138,6 +138,23 @@ def _coerce_text_scalar(value: object, *, default: str | None = None) -> str | N
     return text or default
 
 
+def _normalize_doi_value(value: object) -> str | None:
+    import re
+    from urllib.parse import urlparse
+
+    text = _coerce_text_scalar(value)
+    if not text:
+        return None
+    parsed = urlparse(text.strip())
+    if parsed.scheme in {"http", "https"} and parsed.netloc.lower() in {"doi.org", "dx.doi.org"}:
+        text = parsed.path.lstrip("/")
+    else:
+        text = re.sub(r"^doi:\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", text, flags=re.IGNORECASE)
+    text = text.strip().strip(".;, ")
+    return text.lower() if re.match(r"^10\.\d{4,9}/[-._;()/:A-Za-z0-9]+$", text) else None
+
+
 def _coerce_json_dict(value: object) -> dict:
     """Coerce legacy/NULL metadata values to a dict for response validation."""
     import json
@@ -178,6 +195,7 @@ class PaperBase(BaseModel):
     keywords: list[str] = Field(default_factory=list, description="Ключевые слова")
     source: str = Field(..., description="Источник (CORE, arXiv, etc.)")
     source_id: str | None = Field(None, description="ID в источнике")
+    canonical_patent_id: str | None = Field(None, description="Canonical cross-source patent identifier")
     url: str | None = Field(None, description="URL статьи")
     pdf_url: str | None = Field(None, description="URL PDF")
     pdf_local_path: str | None = Field(None, description="Локальный путь к PDF")
@@ -195,11 +213,11 @@ class PaperBase(BaseModel):
     @field_validator(
         "title",
         "journal",
-        "doi",
         "abstract",
         "full_text",
         "source",
         "source_id",
+        "canonical_patent_id",
         "url",
         "pdf_url",
         "pdf_local_path",
@@ -216,6 +234,11 @@ class PaperBase(BaseModel):
         if info.field_name in {"title", "source"} and isinstance(value, str) and value.strip() == "":
             return ""
         return _coerce_text_scalar(value)
+
+    @field_validator("doi", mode="before")
+    @classmethod
+    def _normalize_doi(cls, value):
+        return _normalize_doi_value(value)
 
     @field_validator("authors", "keywords", "quality_flags", mode="before")
     @classmethod
@@ -266,7 +289,7 @@ class Paper(PaperBase):
 
 
 class PaperListItem(BaseModel):
-    """Лёгкая схема списка статей без полного PDF/full_text payload."""
+    """Лёгкая схема списка статей без тяжёлого PDF/full_text payload."""
 
     id: int
     title: str
@@ -279,6 +302,7 @@ class PaperListItem(BaseModel):
     keywords: list[str] = Field(default_factory=list)
     source: str
     source_id: str | None = None
+    canonical_patent_id: str | None = None
     url: str | None = None
     pdf_url: str | None = None
     pdf_local_path: str | None = None
@@ -294,16 +318,22 @@ class PaperListItem(BaseModel):
     schema_version: str | None = "2.0"
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    has_pdf: bool = False
     has_full_text: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
-    @field_validator("title", "journal", "doi", "abstract", "source", "source_id", "url", "pdf_url", "pdf_local_path", "processing_status", "content_task_id", "processing_error", "summary_ru", "analysis_ru", "translation_ru", "schema_version", mode="before")
+    @field_validator("title", "journal", "abstract", "source", "source_id", "canonical_patent_id", "url", "pdf_url", "pdf_local_path", "processing_status", "content_task_id", "processing_error", "summary_ru", "analysis_ru", "translation_ru", "schema_version", mode="before")
     @classmethod
     def _normalize_scalar_text_fields(cls, value, info: ValidationInfo):
         if info.field_name in {"title", "source"} and isinstance(value, str) and value.strip() == "":
             return ""
         return _coerce_text_scalar(value)
+
+    @field_validator("doi", mode="before")
+    @classmethod
+    def _normalize_doi(cls, value):
+        return _normalize_doi_value(value)
 
     @field_validator("authors", "keywords", "quality_flags", mode="before")
     @classmethod
@@ -314,6 +344,37 @@ class PaperListItem(BaseModel):
     @classmethod
     def _normalize_provenance(cls, value):
         return _coerce_json_dict(value)
+
+
+class PaperListResponse(BaseModel):
+    """Постраничный ответ списка статей с backend-фильтрами."""
+
+    items: list[PaperListItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class PaperProcessingStatusInfo(BaseModel):
+    """Описание статуса обработки для UI-фильтров."""
+
+    key: str
+    label: str
+    group: str = "unknown"
+    final: bool = False
+
+
+class PaperDetailResponse(BaseModel):
+    """Полная карточка статьи для страницы просмотра.
+
+    В отличие от списка статей, этот ответ намеренно содержит весь Paper payload
+    вместе со связанными частями документа: страница статьи должна показывать
+    полный текст, анализ, перевод, диагностику и сохранённые content-parts.
+    """
+
+    paper: Paper
+    content_parts: list["PaperContentPart"] = Field(default_factory=list)
+    status_info: PaperProcessingStatusInfo
 
 
 class PaperContentPart(BaseModel):
@@ -358,6 +419,7 @@ class PaperContentPartRegenerateResponse(BaseModel):
     status: str = "queued"
     page_start: int
     page_end: int
+    mode: str = "text"
 
 
 class PaperSearchRequest(BaseModel):
@@ -409,6 +471,7 @@ class FullTextSearchItem(BaseModel):
     keywords: list[str] = Field(default_factory=list)
     source: str
     source_id: str | None = None
+    canonical_patent_id: str | None = None
     url: str | None = None
     pdf_url: str | None = None
     pdf_local_path: str | None = None

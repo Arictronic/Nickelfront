@@ -57,6 +57,72 @@ class TestPaperService:
         assert paper1.id == paper2.id
 
     @pytest.mark.asyncio
+    async def test_create_paper_normalizes_doi_before_deduplication(self, service):
+        first = PaperCreate(title="DOI first", source="Crossref", doi="DOI: 10.1234/ABC.1")
+        second = PaperCreate(title="DOI second", source="OpenAlex", doi="https://doi.org/10.1234/ABC.1")
+
+        created = await service.create_paper(first)
+        duplicate = await service.create_paper(second)
+
+        assert created.id == duplicate.id
+        assert duplicate.doi == "10.1234/abc.1"
+
+    @pytest.mark.asyncio
+    async def test_create_paper_deduplicates_same_patent_across_sources(self, service):
+        rospatent = PaperCreate(
+            title="Nickel alloy patent",
+            source="Rospatent",
+            source_id="RU123456C1",
+            provenance={"title": "Rospatent"},
+            quality_flags=["metadata_missing_abstract"],
+        )
+        freepatent = PaperCreate(
+            title="Alternative patent title",
+            source="FreePatent",
+            source_id="patents/123456",
+            abstract="Detailed abstract from second source",
+            provenance={"abstract": "FreePatent"},
+            quality_flags=["full_text_available"],
+        )
+
+        original = await service.create_paper(rospatent)
+        duplicate = await service.create_paper(freepatent)
+
+        assert duplicate.id == original.id
+        assert duplicate.canonical_patent_id == "RU123456"
+        assert duplicate.abstract == "Detailed abstract from second source"
+        assert duplicate.provenance["abstract"] == "FreePatent"
+        assert "full_text_available" in duplicate.quality_flags
+
+    @pytest.mark.asyncio
+    async def test_create_paper_recovers_from_concurrent_source_id_duplicate(self, service, monkeypatch):
+        existing = await service.create_paper(
+            PaperCreate(title="Existing", source="OpenAlex", source_id="W-RACE")
+        )
+        original_lookup = service.get_by_source_id
+        lookup_calls = 0
+
+        async def simulate_stale_precheck(source: str, source_id: str):
+            nonlocal lookup_calls
+            lookup_calls += 1
+            if lookup_calls == 1:
+                return None
+            return await original_lookup(source, source_id)
+
+        monkeypatch.setattr(service, "get_by_source_id", simulate_stale_precheck)
+        recovered = await service.create_paper(
+            PaperCreate(
+                title="Concurrent result",
+                source="OpenAlex",
+                source_id="W-RACE",
+                abstract="Metadata received by the concurrent worker",
+            )
+        )
+
+        assert recovered.id == existing.id
+        assert recovered.abstract == "Metadata received by the concurrent worker"
+
+    @pytest.mark.asyncio
     async def test_get_by_id(self, service, sample_paper_create, test_db):
         """Тест получения статьи по ID."""
 

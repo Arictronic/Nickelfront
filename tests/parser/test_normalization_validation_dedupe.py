@@ -98,7 +98,7 @@ class TestNormalizationValidationDedupe(unittest.TestCase):
         )
         self.assertEqual(scalar_values.title, "Nickel scalar title")
         self.assertEqual(scalar_values.journal, "Journal scalar")
-        self.assertEqual(scalar_values.doi, "DOI: 10.1000/SCALAR.1")
+        self.assertEqual(scalar_values.doi, "10.1000/scalar.1")
         self.assertEqual(scalar_values.abstract, "Scalar abstract")
         self.assertEqual(scalar_values.source, "Crossref")
         self.assertEqual(scalar_values.source_id, "10.1000/SCALAR.1")
@@ -131,6 +131,7 @@ class TestNormalizationValidationDedupe(unittest.TestCase):
         deduplicator = Deduplicator(existing)
 
         self.assertEqual(normalize_patent_identifier("patents/123456", source="FreePatent"), "RU123456")
+        self.assertEqual(normalize_patent_identifier("RU123456C1", source="Rospatent"), "RU123456")
         self.assertEqual(
             normalize_patent_identifier(
                 "https://patentscope.wipo.int/search/en/detail.jsf?docId=WO2020123456",

@@ -64,6 +64,12 @@ RUSSIAN_PATENT_SEARCH_QUERIES = [
     "коррозионностойкий никелевый сплав",
 ]
 
+GOOGLE_PATENTS_SEARCH_QUERIES = [
+    "nickel alloy",
+    "nickel-based superalloy",
+    "heat resistant nickel alloy",
+]
+
 EXTERNAL_SEARCH_QUERIES = {
     "OpenAlex": DEFAULT_SEARCH_QUERIES,
     "Crossref": DEFAULT_SEARCH_QUERIES,
@@ -72,7 +78,7 @@ EXTERNAL_SEARCH_QUERIES = {
     "eLibrary": RUSSIAN_SEARCH_QUERIES,
     "Rospatent": RUSSIAN_PATENT_SEARCH_QUERIES,
     "FreePatent": RUSSIAN_PATENT_SEARCH_QUERIES,
-    "GooglePatents": [],
+    "GooglePatents": GOOGLE_PATENTS_SEARCH_QUERIES,
     "PATENTSCOPE": DEFAULT_SEARCH_QUERIES,
 }
 
@@ -132,6 +138,13 @@ def _limit_by_settings(limit: int, parser_settings: dict[str, Any], source: str)
     max_limit = int(parser_settings.get("max_limit") or 100)
     source_limit = int((parser_settings.get("source_limits") or {}).get(source) or max_limit)
     return max(1, min(int(limit or parser_settings.get("default_limit") or 10), max_limit, source_limit))
+
+
+def _candidate_scan_limit(target_new_count: int, parser_settings: dict[str, Any]) -> int:
+    """Read a bounded candidate window so DB duplicates do not consume the user's target."""
+    max_limit = max(1, int(parser_settings.get("max_limit") or 100))
+    return min(max_limit, max(target_new_count, target_new_count * 4))
+
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
@@ -897,6 +910,10 @@ def _parse_queries_for_task(
     total_content_skipped = 0
     total_updated = 0
     total_duplicates = 0
+    total_target_new = 0
+    total_candidate_limit = 0
+    total_examined = 0
+    refill_exhausted = False
 
     for idx, query in enumerate(queries):
         if _is_cancelled(task, task_id):
@@ -936,6 +953,10 @@ def _parse_queries_for_task(
             total_content_skipped += int(result.get("content_skipped_count", 0) or 0)
             total_updated += int(result.get("updated_count", 0) or 0)
             total_duplicates += int(result.get("duplicate_count", 0) or 0)
+            total_target_new += int(result.get("target_new_count", limit_per_query) or limit_per_query)
+            total_candidate_limit += int(result.get("candidate_limit", limit_per_query) or limit_per_query)
+            total_examined += int(result.get("examined_count", 0) or 0)
+            refill_exhausted = refill_exhausted or bool(result.get("refill_exhausted", False))
 
             if result.get("status") == "revoked":
                 break
@@ -963,6 +984,10 @@ def _parse_queries_for_task(
             "updated_count": total_updated,
             "total_duplicates": total_duplicates,
             "duplicate_count": total_duplicates,
+            "target_new_count": total_target_new,
+            "candidate_limit": total_candidate_limit,
+            "examined_count": total_examined,
+            "refill_exhausted": refill_exhausted,
             "status": "Все запросы обработаны",
         },
         task_id=task_id,
@@ -983,6 +1008,10 @@ def _parse_queries_for_task(
         "updated_count": total_updated,
         "total_duplicates": total_duplicates,
         "duplicate_count": total_duplicates,
+        "target_new_count": total_target_new,
+        "candidate_limit": total_candidate_limit,
+        "examined_count": total_examined,
+        "refill_exhausted": refill_exhausted,
     }
 
 
@@ -1005,6 +1034,7 @@ def parse_papers_task(
             clear_cancel_flag(task_id)
 
 
+
 async def _parse_async(
     self,
     query: str,
@@ -1023,11 +1053,15 @@ async def _parse_async(
     if not _is_source_enabled_by_settings(parser_settings, source):
         raise RuntimeError(f"Источник {source} отключён в технических настройках")
     limit = _limit_by_settings(limit, parser_settings, source)
+    candidate_limit = _candidate_scan_limit(limit, parser_settings)
 
     stats = {
         "query": query,
         "source": source,
         "pdf_mode": pdf_mode,
+        "target_new_count": limit,
+        "candidate_limit": candidate_limit,
+        "examined_count": 0,
         "found_count": 0,
         "parsed_count": 0,
         "saved_count": 0,
@@ -1048,13 +1082,16 @@ async def _parse_async(
             "pdf_mode": pdf_mode,
             "current": 0,
             "total": limit,
-            "status": f"Поиск статей по запросу '{query}'...",
+            "target_new_count": limit,
+            "candidate_limit": candidate_limit,
+            "examined_count": 0,
+            "status": f"Поиск кандидатов по запросу '{query}' (цель новых: {limit})...",
         },
         task_id=task_id,
     )
 
     try:
-        report, papers = await _run_parser_alpha(query=query, limit=limit, source=source, task=self, task_id=task_id, parser_settings=parser_settings)
+        report, papers = await _run_parser_alpha(query=query, limit=candidate_limit, source=source, task=self, task_id=task_id, parser_settings=parser_settings)
     except ParserAlphaCancelled:
         return _mark_revoked(self, query=query, source=source, current=0, total=limit, task_id=task_id)
 
@@ -1068,9 +1105,12 @@ async def _parse_async(
             "query": query,
             "source": source,
             "pdf_mode": pdf_mode,
-            "current": len(papers),
+            "current": 0,
             "total": limit,
-            "status": f"Парсинг результатов ({len(papers)} найдено)...",
+            "target_new_count": limit,
+            "candidate_limit": candidate_limit,
+            "examined_count": 0,
+            "status": f"Проверка кандидатов ({len(papers)} найдено, нужно новых: {limit})...",
         },
         task_id=task_id,
     )
@@ -1079,9 +1119,12 @@ async def _parse_async(
         paper_service = PaperService(db)
 
         for idx, paper in enumerate(papers):
+            if stats["saved_count"] >= limit:
+                break
             if _is_cancelled(self, task_id):
                 return _mark_revoked(self, query=query, source=source, current=idx, total=len(papers), task_id=task_id)
             try:
+                stats["examined_count"] += 1
                 if idx % 5 == 0:
                     if _is_cancelled(self, task_id):
                         return _mark_revoked(self, query=query, source=source, current=idx, total=len(papers), task_id=task_id)
@@ -1092,14 +1135,17 @@ async def _parse_async(
                         meta={
                             "query": query,
                             "source": source,
-                            "current": idx,
-                            "total": len(papers),
+                            "current": stats["saved_count"],
+                            "total": limit,
+                            "target_new_count": limit,
+                            "candidate_limit": candidate_limit,
+                            "examined_count": stats["examined_count"],
                             "saved_count": stats["saved_count"],
                             "updated_count": stats["updated_count"],
                             "duplicate_count": stats["duplicate_count"],
                             "content_queued_count": stats["content_queued_count"],
                             "content_skipped_count": stats["content_skipped_count"],
-                            "status": f"Сохранение статей ({idx}/{len(papers)})...",
+                            "status": f"Отбор новых статей: {stats['saved_count']}/{limit} (проверено {stats['examined_count']})...",
                         },
                         task_id=task_id,
                     )
@@ -1127,6 +1173,7 @@ async def _parse_async(
                     keywords=keywords,
                     source=paper_source,
                     source_id=_clean_text(paper.get("source_id")),
+                    canonical_patent_id=_clean_text(paper.get("canonical_patent_id")),
                     url=_clean_text(paper.get("url")),
                     pdf_url=_clean_text(paper.get("pdf_url")),
                     parse_confidence=_normalize_parse_confidence(paper.get("parse_confidence")),
@@ -1197,6 +1244,13 @@ async def _parse_async(
                 stats["errors"].append(error_msg)
                 await db.rollback()
 
+    stats["refill_exhausted"] = stats["saved_count"] < limit
+    stats["status"] = (
+        "Завершено: набрано нужное количество новых записей"
+        if not stats["refill_exhausted"]
+        else "Завершено: новые кандидаты в доступном окне закончились"
+    )
+
     _safe_update_state(
         self,
         state="SUCCESS",
@@ -1204,22 +1258,27 @@ async def _parse_async(
             "query": query,
             "source": source,
             "pdf_mode": pdf_mode,
-            "current": len(papers),
-            "total": len(papers),
+            "current": stats["saved_count"],
+            "total": limit,
+            "target_new_count": limit,
+            "candidate_limit": candidate_limit,
+            "examined_count": stats["examined_count"],
+            "refill_exhausted": stats["refill_exhausted"],
             "saved_count": stats["saved_count"],
             "updated_count": stats["updated_count"],
             "duplicate_count": stats["duplicate_count"],
             "embedded_count": stats["embedded_count"],
             "content_queued_count": stats["content_queued_count"],
             "content_skipped_count": stats["content_skipped_count"],
-            "status": "Завершено",
+            "status": stats["status"],
         },
         task_id=task_id,
     )
 
     logger.info(
         f"Парсинг '{query}' ({source}): найдено={stats['found_count']}, "
-        f"распарсено={stats['parsed_count']}, новых={stats['saved_count']}, "
+        f"распарсено={stats['parsed_count']}, проверено={stats['examined_count']}, "
+        f"цель новых={limit}, новых={stats['saved_count']}, "
         f"обновлено={stats['updated_count']}, дублей={stats['duplicate_count']}, "
         f"в очереди на AI/PDF={stats['content_queued_count']}, "
         f"пропущено AI/PDF={stats['content_skipped_count']}"
@@ -1293,6 +1352,10 @@ def parse_all_sources_task(
                 "duplicate_count": 0,
                 "content_queued_count": 0,
                 "content_skipped_count": 0,
+                "target_new_count": 0,
+                "candidate_limit": 0,
+                "examined_count": 0,
+                "refill_exhausted": False,
                 "error": None,
             }
             for src in selected_sources
@@ -1371,6 +1434,9 @@ def parse_all_sources_task(
             source_duplicates = int(source_result.get("total_duplicates", 0) or source_result.get("duplicate_count", 0) or 0)
             source_queued = int(source_result.get("total_content_queued", 0) or source_result.get("content_queued_count", 0) or 0)
             source_skipped = int(source_result.get("total_content_skipped", 0) or source_result.get("content_skipped_count", 0) or 0)
+            source_target_new = int(source_result.get("target_new_count", 0) or 0)
+            source_candidate_limit = int(source_result.get("candidate_limit", 0) or 0)
+            source_examined = int(source_result.get("examined_count", 0) or 0)
 
             source_statuses[source] = {
                 "status": str(source_result.get("status") or "completed"),
@@ -1379,6 +1445,10 @@ def parse_all_sources_task(
                 "duplicate_count": source_duplicates,
                 "content_queued_count": source_queued,
                 "content_skipped_count": source_skipped,
+                "target_new_count": source_target_new,
+                "candidate_limit": source_candidate_limit,
+                "examined_count": source_examined,
+                "refill_exhausted": bool(source_result.get("refill_exhausted", False)),
                 "error": source_result.get("error"),
             }
 
@@ -1437,4 +1507,3 @@ def parse_all_sources_task(
         task_id = _get_task_id(self)
         if task_id:
             clear_cancel_flag(task_id)
-

@@ -1,11 +1,12 @@
 """API endpoints для парсинга научных статей."""
 
-import asyncio
+import csv
+import io
 import time
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from loguru import logger
@@ -13,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_admin_user
 from app.core.config import settings
 from app.api.v1.endpoints.error_helpers import format_paper_db_error
 from app.db.models.paper import Paper as PaperModel
@@ -26,13 +27,116 @@ from shared.schemas.auth import UserResponse
 from shared.schemas.paper import (
     Paper,
     PaperListItem,
+    PaperListResponse,
+    PaperDetailResponse,
     PaperContentPart,
     PaperContentPartRegenerateResponse,
+    PaperProcessingStatusInfo,
     PaperSearchRequest,
     PaperSearchResponse,
 )
 
 router = APIRouter(prefix="/papers", tags=["papers"])
+
+
+PROCESSING_STATUS_REGISTRY: dict[str, dict[str, object]] = {
+    "pending": {"label": "Ожидает обработки", "group": "pending", "final": False},
+    "queued_for_content_processing": {"label": "В очереди на обработку", "group": "pending", "final": False},
+    "processing_content": {"label": "Обрабатывается", "group": "processing", "final": False},
+    "started": {"label": "Запущено", "group": "processing", "final": False},
+    "pdf_pending": {"label": "Подготовка PDF", "group": "processing", "final": False},
+    "downloading_pdf": {"label": "Загрузка PDF", "group": "processing", "final": False},
+    "pdf_downloaded": {"label": "PDF загружен", "group": "processing", "final": False},
+    "pdf_download_failed": {"label": "PDF не загрузился", "group": "error", "final": True},
+    "pdf_unavailable": {"label": "PDF недоступен", "group": "warning", "final": True},
+    "pdf_download_skipped": {"label": "Загрузка PDF пропущена", "group": "warning", "final": True},
+    "extracting_pdf_text": {"label": "Извлечение текста из PDF", "group": "processing", "final": False},
+    "pdf_parsed": {"label": "Текст PDF извлечён", "group": "processing", "final": False},
+    "pdf_text_skipped": {"label": "Извлечение текста PDF пропущено", "group": "warning", "final": True},
+    "fulltext_fallback_parsed": {"label": "Текст получен из резервного источника", "group": "processing", "final": False},
+    "fulltext_unavailable": {"label": "Полный текст недоступен", "group": "warning", "final": True},
+    "digitizing_file": {"label": "Оцифровка файла", "group": "processing", "final": False},
+    "formatting_markdown": {"label": "Оцифровка файла", "group": "processing", "final": False},
+    "markdown_ready": {"label": "Файл оцифрован", "group": "processing", "final": False},
+    "markdown_partial": {"label": "Файл частично оцифрован", "group": "warning", "final": False},
+    "markdown_ready_without_qwen": {"label": "Текст собран без Qwen", "group": "success", "final": True},
+    "markdown_failed": {"label": "Ошибка оцифровки файла", "group": "error", "final": True},
+    "markdown_skipped": {"label": "Оцифровка пропущена", "group": "warning", "final": True},
+    "analyzing_ru": {"label": "Анализ на русском", "group": "processing", "final": False},
+    "ru_analysis_ready": {"label": "Русский анализ готов", "group": "processing", "final": False},
+    "ru_analysis_fallback": {"label": "Русский анализ в резервном режиме", "group": "warning", "final": True},
+    "ru_analysis_skipped": {"label": "Русский анализ пропущен", "group": "warning", "final": True},
+    "extracting_keywords": {"label": "Выделение ключевых слов", "group": "processing", "final": False},
+    "keywords_ready": {"label": "Ключевые слова готовы", "group": "processing", "final": False},
+    "keywords_failed": {"label": "Ошибка ключевых слов", "group": "error", "final": True},
+    "keywords_skipped": {"label": "Ключевые слова пропущены", "group": "warning", "final": True},
+    "qwen_auth_failed": {"label": "Ошибка авторизации Qwen", "group": "error", "final": True},
+    "indexing_vector": {"label": "Индексация в векторной базе", "group": "processing", "final": False},
+    "embedding_ready": {"label": "Векторный индекс готов", "group": "success", "final": True},
+    "embedding_skipped": {"label": "Векторная индексация пропущена", "group": "warning", "final": True},
+    "ready": {"label": "Готово", "group": "success", "final": True},
+    "ready_with_fallback": {"label": "Готово (резервный режим)", "group": "success", "final": True},
+    "completed": {"label": "Готово", "group": "success", "final": True},
+    "failed": {"label": "Ошибка обработки", "group": "error", "final": True},
+}
+
+
+def _status_info(key: str) -> PaperProcessingStatusInfo:
+    base_key = (key or "").strip().split(":", 1)[0]
+    meta = PROCESSING_STATUS_REGISTRY.get(base_key) or {"label": base_key, "group": "unknown", "final": False}
+    return PaperProcessingStatusInfo(
+        key=base_key,
+        label=str(meta.get("label") or base_key),
+        group=str(meta.get("group") or "unknown"),
+        final=bool(meta.get("final")),
+    )
+
+
+def _format_csv_list(value) -> str:
+    if not value:
+        return ""
+    if isinstance(value, list):
+        return "; ".join(str(item) for item in value if str(item).strip())
+    return str(value)
+
+
+def _papers_csv_response(rows: list[dict]) -> Response:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow([
+        "ID",
+        "Название",
+        "Источник",
+        "Дата публикации",
+        "DOI",
+        "Журнал",
+        "Авторы",
+        "Ключевые слова",
+        "PDF",
+        "Извлечённый полный текст",
+        "Статус",
+    ])
+    for row in rows:
+        publication_date = row.get("publication_date")
+        writer.writerow([
+            row.get("id") or "",
+            row.get("title") or "",
+            row.get("source") or "",
+            publication_date.date().isoformat() if hasattr(publication_date, "date") else (publication_date or ""),
+            row.get("doi") or "",
+            row.get("journal") or "",
+            _format_csv_list(row.get("authors")),
+            _format_csv_list(row.get("keywords")),
+            "Да" if row.get("has_pdf") else "Нет",
+            "Да" if row.get("has_full_text") else "Нет",
+            _status_info(str(row.get("processing_status") or "")).label,
+        ])
+
+    return Response(
+        content="\ufeff" + buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="articles.csv"'},
+    )
 
 
 class _LazyTaskProxy:
@@ -80,15 +184,8 @@ def _get_regenerate_markdown_part_task():
     return regenerate_markdown_part_task
 
 
-def _get_save_pdf_locally():
-    """Lazy import PDF helper to avoid PDFParser initialization during API startup."""
-    from app.services.paper_content_service import save_pdf_locally
-
-    return save_pdf_locally
-
 _PAPERS_COUNT_TTL_SECONDS = 5.0
 _papers_count_cache: dict[str, tuple[int, float]] = {}
-_PDF_PROXY_TIMEOUT = httpx.Timeout(connect=4.0, read=45.0, write=10.0, pool=4.0)
 
 def _count_cache_key(source: str | None) -> str:
     return source or "__all__"
@@ -190,6 +287,7 @@ def _record_parse_job(
 @router.post("/search", response_model=PaperSearchResponse)
 async def search_papers(
     request: PaperSearchRequest,
+    _current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Поиск статей в локальной базе данных."""
@@ -213,26 +311,48 @@ async def search_papers(
     )
 
 
-@router.get("", response_model=list[Paper])
+@router.get("", response_model=PaperListResponse)
 async def get_papers(
     limit: int = Query(default=10, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     source: str | None = Query(None, description="Фильтр по источнику"),
+    query: str | None = Query(None, description="Поиск по названию, аннотации, авторам, журналу, DOI и ключевым словам"),
+    date_from: date | None = Query(None, description="Дата публикации с"),
+    date_to: date | None = Query(None, description="Дата публикации по"),
+    processing_status: str | None = Query(None, description="Фильтр по статусу обработки"),
+    full_text_only: bool = Query(False, description="Только записи с извлечённым полным текстом"),
+    sort_by: Literal["id", "authors", "created_at", "publication_date"] = Query("created_at"),
+    sort_dir: Literal["asc", "desc"] = Query("desc"),
+    _current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Получить список всех статей."""
+    """Лёгкий список статей с backend-фильтрами, сортировкой и total."""
     paper_service = PaperService(db)
     try:
-        return await paper_service.get_all(limit=limit, offset=offset, source=source)
+        items, total = await paper_service.list_filtered_lightweight(
+            limit=limit,
+            offset=offset,
+            source=source,
+            query=query,
+            date_from=date_from,
+            date_to=date_to,
+            processing_status=processing_status,
+            full_text_only=full_text_only,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+        )
     except Exception as exc:
         logger.exception("Failed to list papers")
         raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
+
+    return PaperListResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.get("/recent", response_model=list[PaperListItem])
 async def get_recent_papers(
     limit: int = Query(default=20, ge=1, le=100),
     source: str | None = Query(None, description="Фильтр по источнику"),
+    _current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Лёгкий список последних статей для dashboard без full_text."""
@@ -247,6 +367,7 @@ async def get_recent_papers(
 @router.get("/count")
 async def get_papers_count(
     source: str | None = Query(None),
+    _current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Получить общее количество статей."""
@@ -277,12 +398,68 @@ async def get_papers_count(
     return {"total": total, "cached": False, "stale": False}
 
 
+@router.get("/statuses", response_model=list[PaperProcessingStatusInfo])
+async def get_paper_processing_statuses(
+    _current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Единый словарь статусов обработки для UI-фильтров."""
+    paper_service = PaperService(db)
+    try:
+        observed = await paper_service.list_processing_status_keys()
+    except Exception as exc:
+        logger.warning("Failed to load observed paper statuses: {}", exc)
+        observed = []
+
+    keys = sorted(
+        set(PROCESSING_STATUS_REGISTRY.keys()) | set(observed),
+        key=lambda key: (_status_info(key).label, key),
+    )
+    return [_status_info(key) for key in keys]
+
+
+@router.get("/export.csv")
+async def export_papers_csv(
+    source: str | None = Query(None, description="Фильтр по источнику"),
+    query: str | None = Query(None, description="Поиск по статьям"),
+    date_from: date | None = Query(None, description="Дата публикации с"),
+    date_to: date | None = Query(None, description="Дата публикации по"),
+    processing_status: str | None = Query(None, description="Фильтр по статусу обработки"),
+    full_text_only: bool = Query(False, description="Только записи с извлечённым полным текстом"),
+    sort_by: Literal["id", "authors", "created_at", "publication_date"] = Query("created_at"),
+    sort_dir: Literal["asc", "desc"] = Query("desc"),
+    max_rows: int = Query(default=10000, ge=1, le=50000),
+    _current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """CSV-экспорт всех найденных статей без загрузки full_text."""
+    paper_service = PaperService(db)
+    try:
+        rows, _total = await paper_service.list_filtered_lightweight(
+            limit=max_rows,
+            offset=0,
+            source=source,
+            query=query,
+            date_from=date_from,
+            date_to=date_to,
+            processing_status=processing_status,
+            full_text_only=full_text_only,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+        )
+    except Exception as exc:
+        logger.exception("Failed to export papers CSV")
+        raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
+
+    return _papers_csv_response(rows)
+
+
 @router.post("/parse")
 async def start_parsing(
     query: str = Query(..., description="Поисковый запрос"),
     limit: int | None = Query(default=None, ge=1, le=5000, description="Макс. количество результатов"),
     source: str = Query(default="CORE", description="Источник"),
-    pdf_mode: Literal["auto", "ai"] = Query(default="auto", description="Режим обработки PDF: auto или ai"),
+    pdf_mode: Literal["auto", "ai", "mypdf"] = Query(default="auto", description="Режим обработки PDF: auto, ai или mypdf"),
     _current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -338,7 +515,7 @@ async def start_parsing_all(
     limit_per_query: int | None = Query(default=None, ge=1, le=5000),
     source: str = Query(default="all", description="Источник (или all)"),
     query: str = Query(..., description="Пользовательский запрос для всех источников"),
-    pdf_mode: Literal["auto", "ai"] = Query(default="auto", description="Режим обработки PDF: auto или ai"),
+    pdf_mode: Literal["auto", "ai", "mypdf"] = Query(default="auto", description="Режим обработки PDF: auto, ai или mypdf"),
     _current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -429,7 +606,11 @@ async def start_parsing_all(
 
 
 @router.get("/id/{paper_id}", response_model=Paper)
-async def get_paper(paper_id: int, db: AsyncSession = Depends(get_db)):
+async def get_paper(
+    paper_id: int,
+    _current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Получить статью по ID."""
     paper_service = PaperService(db)
     try:
@@ -444,8 +625,42 @@ async def get_paper(paper_id: int, db: AsyncSession = Depends(get_db)):
     return paper
 
 
+@router.get("/id/{paper_id}/details", response_model=PaperDetailResponse)
+async def get_paper_details(
+    paper_id: int,
+    _current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Полная карточка статьи для страницы просмотра.
+
+    Список /papers остаётся лёгким, но при открытии конкретной статьи UI должен
+    получить весь Paper payload и связанные content-parts одним запросом.
+    """
+    paper_service = PaperService(db)
+    try:
+        paper = await paper_service.get_by_id(paper_id)
+        if not paper:
+            raise HTTPException(status_code=404, detail="Статья не найдена")
+        content_parts = await PaperContentPartService(db).list_parts(paper_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to load full paper details {}", paper_id)
+        raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
+
+    return PaperDetailResponse(
+        paper=paper,
+        content_parts=content_parts,
+        status_info=_status_info(paper.processing_status),
+    )
+
+
 @router.get("/id/{paper_id}/content-parts", response_model=list[PaperContentPart])
-async def get_paper_content_parts(paper_id: int, db: AsyncSession = Depends(get_db)):
+async def get_paper_content_parts(
+    paper_id: int,
+    _current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Получить сохранённые части PDF/raw text + Qwen Markdown по статье."""
     paper = await PaperService(db).get_by_id(paper_id)
     if not paper:
@@ -457,7 +672,8 @@ async def get_paper_content_parts(paper_id: int, db: AsyncSession = Depends(get_
 async def regenerate_paper_content_part(
     paper_id: int,
     part_id: int,
-    _current_user: UserResponse = Depends(get_current_user),
+    mode: Literal["text", "image"] = Query("text", description="Режим перегенерации: text — из сохранённого текста, image — по изображению страницы PDF"),
+    _current_user: UserResponse = Depends(require_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Перегенерировать Markdown только для одной сохранённой части."""
@@ -469,15 +685,17 @@ async def regenerate_paper_content_part(
     part = await part_service.get_part(paper_id, part_id)
     if not part:
         raise HTTPException(status_code=404, detail="Часть статьи не найдена")
-    if not (part.raw_text or "").strip():
-        raise HTTPException(status_code=400, detail="У части нет сохранённого сырого PDF-текста")
+    if mode == "text" and not (part.raw_text or "").strip():
+        raise HTTPException(status_code=400, detail="У части нет сохранённого исходного текста")
+    if mode == "image" and not (paper.pdf_local_path or "").strip():
+        raise HTTPException(status_code=400, detail="Для режима по фото нужен локально сохранённый PDF")
 
     qwen_settings = await SystemSettingsService(db).get_qwen_settings()
     if not qwen_settings.get("markdown_enabled", True):
         raise HTTPException(status_code=409, detail="Markdown-оцифровка Qwen выключена в технических настройках")
 
     task = _get_regenerate_markdown_part_task().apply_async(
-        args=[paper_id, part_id],
+        args=[paper_id, part_id, mode],
         queue=settings.QWEN_QUEUE_NAME,
     )
     total_parts = len(await part_service.list_parts(paper_id)) or max(1, part.part_index)
@@ -494,6 +712,7 @@ async def regenerate_paper_content_part(
         status="queued",
         page_start=part.page_start,
         page_end=part.page_end,
+        mode=mode,
     )
 
 
@@ -502,7 +721,8 @@ async def regenerate_paper_markdown_pages(
     paper_id: int,
     page_start: int = Query(..., ge=1),
     page_end: int = Query(..., ge=1),
-    _current_user: UserResponse = Depends(get_current_user),
+    mode: Literal["text", "image"] = Query("text", description="Режим перегенерации: text — из сохранённого текста, image — по изображению страницы PDF"),
+    _current_user: UserResponse = Depends(require_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Совместимый endpoint: найти часть по диапазону страниц и перегенерировать её."""
@@ -517,13 +737,17 @@ async def regenerate_paper_markdown_pages(
     part = await part_service.get_part_by_pages(paper_id, page_start, page_end)
     if not part:
         raise HTTPException(status_code=404, detail="Часть с указанными страницами не найдена")
+    if mode == "text" and not (part.raw_text or "").strip():
+        raise HTTPException(status_code=400, detail="У части нет сохранённого исходного текста")
+    if mode == "image" and not (paper.pdf_local_path or "").strip():
+        raise HTTPException(status_code=400, detail="Для режима по фото нужен локально сохранённый PDF")
 
     qwen_settings = await SystemSettingsService(db).get_qwen_settings()
     if not qwen_settings.get("markdown_enabled", True):
         raise HTTPException(status_code=409, detail="Markdown-оцифровка Qwen выключена в технических настройках")
 
     task = _get_regenerate_markdown_part_task().apply_async(
-        args=[paper_id, part.id],
+        args=[paper_id, part.id, mode],
         queue=settings.QWEN_QUEUE_NAME,
     )
     total_parts = len(await part_service.list_parts(paper_id)) or max(1, part.part_index)
@@ -540,11 +764,16 @@ async def regenerate_paper_markdown_pages(
         status="queued",
         page_start=part.page_start,
         page_end=part.page_end,
+        mode=mode,
     )
 
 
 @router.get("/id/{paper_id}/pdf")
-async def get_paper_pdf(paper_id: int, db: AsyncSession = Depends(get_db)):
+async def get_paper_pdf(
+    paper_id: int,
+    _current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Получить PDF статьи: локальный файл или редирект на внешний URL."""
     try:
         paper = await PaperService(db).get_by_id(paper_id)
@@ -565,42 +794,13 @@ async def get_paper_pdf(paper_id: int, db: AsyncSession = Depends(get_db)):
             )
 
     if paper.pdf_url:
-        try:
-            from app.services.paper_content_service import prepare_pdf_request
-
-            request_url, request_headers = prepare_pdf_request(paper.pdf_url)
-            async with httpx.AsyncClient(timeout=_PDF_PROXY_TIMEOUT, follow_redirects=True) as client:
-                remote = await client.get(
-                    request_url,
-                    headers=request_headers,
-                )
-                remote.raise_for_status()
-                pdf_bytes = remote.content or b""
-
-            if not pdf_bytes:
-                raise HTTPException(status_code=404, detail="PDF пустой")
-
-            content_type = (remote.headers.get("content-type") or "").lower()
-            if "pdf" not in content_type and not pdf_bytes.startswith(b"%PDF"):
-                raise HTTPException(status_code=404, detail="Удалённый ресурс не является PDF")
-
-            try:
-                save_pdf_locally = _get_save_pdf_locally()
-                cached_path = await asyncio.to_thread(save_pdf_locally, paper_id, pdf_bytes)
-                await PaperService(db).update_paper(paper_id, pdf_local_path=cached_path)
-            except Exception as cache_exc:
-                logger.warning("PDF cache save failed for paper {}: {}", paper_id, cache_exc)
-
-            return Response(
-                content=pdf_bytes,
-                media_type="application/pdf",
-                headers={"Content-Disposition": f'inline; filename=\"paper_{paper_id}.pdf\"'},
-            )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.warning("Failed to proxy PDF for paper {}: {}", paper_id, type(exc).__name__)
-            raise HTTPException(status_code=502, detail="Не удалось получить PDF")
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "PDF есть только как внешняя ссылка и ещё не сохранён локально. "
+                "Запустите обработку документа, чтобы скачать PDF через Celery."
+            ),
+        )
 
     raise HTTPException(status_code=404, detail="PDF не найден")
 
@@ -608,7 +808,8 @@ async def get_paper_pdf(paper_id: int, db: AsyncSession = Depends(get_db)):
 @router.post("/id/{paper_id}/reprocess")
 async def reprocess_paper_content(
     paper_id: int,
-    _current_user: UserResponse = Depends(get_current_user),
+    pdf_mode: Literal["auto", "ai", "mypdf"] = Query("auto", description="Режим обработки PDF: auto — обычные алгоритмы, ai — по изображениям страниц, mypdf — быстрый текстовый слой без OCR/таблиц"),
+    _current_user: UserResponse = Depends(require_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Поставить статью в очередь на повторную PDF+AI обработку."""
@@ -626,7 +827,7 @@ async def reprocess_paper_content(
 
     process_paper_content_task = _get_content_task()
     task = process_paper_content_task.apply_async(
-        args=[paper_id],
+        args=[paper_id, pdf_mode],
         queue=settings.CONTENT_QUEUE_NAME,
     )
     await paper_service.update_paper(
@@ -640,22 +841,23 @@ async def reprocess_paper_content(
         translation_ru=None,
         embedding=None,
     )
-    return {"paper_id": paper_id, "task_id": task.id, "status": "queued", "cleared_content_parts": cleared_parts}
+    return {"paper_id": paper_id, "task_id": task.id, "status": "queued", "pdf_mode": pdf_mode, "cleared_content_parts": cleared_parts}
 
 
 @router.post("/reprocess-all")
 async def reprocess_all_papers(
     limit: int = Query(default=500, ge=1, le=5000),
     source: str | None = Query(default=None, description="Фильтр по источнику"),
-    _current_user: UserResponse = Depends(get_current_user),
+    pdf_mode: Literal["auto", "ai", "mypdf"] = Query("auto", description="Режим обработки PDF: auto, ai или mypdf"),
+    _current_user: UserResponse = Depends(require_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Поставить в очередь постобработку набора существующих статей."""
     paper_service = PaperService(db)
     try:
-        papers = await paper_service.get_all(limit=limit, offset=0, source=source)
+        paper_ids = await paper_service.list_ids_for_reprocess(limit=limit, source=source)
     except Exception as exc:
-        logger.exception("Failed to load papers for reprocess-all")
+        logger.exception("Failed to load paper ids for reprocess-all")
         raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
 
     process_paper_content_task = _get_content_task()
@@ -663,28 +865,33 @@ async def reprocess_all_papers(
     queued = 0
     cleared_total = 0
     task_ids: list[str] = []
-    for paper in papers:
-        cleared_total += await part_service.clear_parts(paper.id)
+    for paper_id in paper_ids:
+        cleared_total += await part_service.clear_parts(paper_id)
         task = process_paper_content_task.apply_async(
-            args=[paper.id],
+            args=[paper_id, pdf_mode],
             queue=settings.CONTENT_QUEUE_NAME,
         )
         await paper_service.update_paper(
-            paper.id,
+            paper_id,
             processing_status="queued_for_content_processing",
             content_task_id=task.id,
             processing_error=None,
+            full_text=None,
+            summary_ru=None,
+            analysis_ru=None,
+            translation_ru=None,
+            embedding=None,
         )
         task_ids.append(task.id)
         queued += 1
 
-    return {"queued": queued, "task_ids": task_ids, "cleared_content_parts": cleared_total}
+    return {"queued": queued, "task_ids": task_ids, "cleared_content_parts": cleared_total, "pdf_mode": pdf_mode}
 
 
 @router.delete("/id/{paper_id}")
 async def delete_paper(
     paper_id: int,
-    _current_user: UserResponse = Depends(get_current_user),
+    _current_user: UserResponse = Depends(require_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Удалить статью."""

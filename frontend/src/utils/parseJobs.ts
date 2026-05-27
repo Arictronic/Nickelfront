@@ -55,11 +55,14 @@ export function clearParseJobStorage() {
   localStorage.removeItem(PARSE_JOBS_LS_KEY);
 }
 
+function isPlaceholderJobId(jobId: string): boolean {
+  return /^(test|mock|demo|sample)[-_]/i.test(jobId.trim());
+}
+
 function isValidParseJob(job: unknown): job is Partial<ParseJob> {
   const maybeJob = job as Partial<ParseJob> | null | undefined;
-  return (
-    typeof maybeJob?.jobId === "string" && maybeJob.jobId.trim().length > 0
-  );
+  const jobId = typeof maybeJob?.jobId === "string" ? maybeJob.jobId.trim() : "";
+  return jobId.length > 0 && !isPlaceholderJobId(jobId);
 }
 
 function toFiniteNumber(value: unknown, fallback = 0): number {
@@ -304,13 +307,13 @@ export function getParseJobStatusText(job: ParseJob): string {
   if (celeryStatus.status === "FAILURE")
     return stateText ? `✕ ${stateText}` : "✕ Ошибка";
   if (celeryStatus.status === "REVOKED") return "Отменено";
-  if (celeryStatus.status === "PENDING") return "Ожидание...";
-  if (celeryStatus.status === "RETRY") return "Повтор...";
+  if (celeryStatus.status === "PENDING") return "Ожидание…";
+  if (celeryStatus.status === "RETRY") return "Повтор…";
   if (celeryStatus.status === "UNKNOWN") return "Статус неизвестен";
   if (celeryStatus.status === "RECEIVED")
-    return stateText || "Получено worker-ом...";
+    return stateText || "Получено worker-ом…";
   if (celeryStatus.status === "STARTED" || celeryStatus.status === "PROGRESS")
-    return stateText || "В процессе...";
+    return stateText || "В процессе…";
 
   return stateText || "В обработке";
 }

@@ -52,6 +52,96 @@ def _qwen_input_text_for_part(part: Any) -> str:
     return get_qwen_projection_text_for_part(part)
 
 
+def _normalize_regeneration_mode(value: Any) -> str:
+    mode = str(value or "text").strip().lower()
+    return mode if mode in {"text", "image"} else "text"
+
+
+def _build_image_regeneration_options(
+    *,
+    qwen_settings: dict[str, Any],
+    pdf_markdown_settings: dict[str, Any],
+    timeout: float,
+) -> dict[str, Any]:
+    return {
+        "parser_mode": "ai",
+        "force_strategy": "ai",
+        "extraction_strategy": "ai",
+        "selected_strategy": "ai",
+        "ai_mode": "force",
+        "ai_enabled": True,
+        "ai_provider": str(pdf_markdown_settings.get("ai_provider") or "qwen"),
+        "ai_model": str(pdf_markdown_settings.get("ai_model") or qwen_settings.get("model") or settings.QWEN_MODEL),
+        "ai_render_dpi": int(pdf_markdown_settings.get("ai_render_dpi") or 220),
+        "ai_page_image_format": str(pdf_markdown_settings.get("ai_page_image_format") or "png"),
+        "ai_timeout_sec": float(timeout or pdf_markdown_settings.get("ai_timeout_sec") or settings.QWEN_QUEUE_TIMEOUT),
+        "ai_delete_temp_images": bool(pdf_markdown_settings.get("ai_delete_temp_images", True)),
+    }
+
+
+def _recognize_part_pdf_pages_as_text(
+    *,
+    pdf_path: str,
+    paper_id: int,
+    part_id: int,
+    page_start: int,
+    page_end: int,
+    options: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    path = Path(str(pdf_path or ""))
+    if not path.exists() or not path.is_file():
+        raise RuntimeError("pdf_file_not_found")
+
+    try:
+        from app.services.pdf_parser.ai import AIPageRecognitionService
+    except Exception as exc:
+        raise RuntimeError(f"ai_page_recognition_unavailable:{type(exc).__name__}:{exc}") from exc
+
+    pdf_bytes = path.read_bytes()
+    service = AIPageRecognitionService()
+    service.reset_document_session()
+
+    pages: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    text_blocks: list[str] = []
+    for page_number in range(int(page_start), int(page_end) + 1):
+        result = service.recognize_page(
+            file_bytes=pdf_bytes,
+            page_number=page_number,
+            opts=options,
+        )
+        page_text = str(result.text or "").strip()
+        pages.append(
+            {
+                "page_number": page_number,
+                "chars": len(page_text),
+                "status": result.status,
+                "reason": result.reason,
+                "confidence": float(result.confidence or 0.0),
+                "provider": result.provider,
+                "model": result.model,
+                "warnings": list(result.warnings or []),
+            }
+        )
+        warnings.extend(str(item) for item in (result.warnings or []) if item)
+        if page_text:
+            text_blocks.append(f"[Страница {page_number}]\n{page_text}")
+
+    text = "\n\n".join(text_blocks).strip()
+    return text, {
+        "regeneration_mode": "image",
+        "paper_id": paper_id,
+        "part_id": part_id,
+        "pdf_path": str(path),
+        "page_start": page_start,
+        "page_end": page_end,
+        "pages": pages,
+        "text_chars": len(text),
+        "warnings": sorted(set(warnings)),
+        "ai_session_id": service.session_id or "",
+    }
+
+
 def _fresh_markdown_input_available(previous: dict[str, Any]) -> bool:
     """Return whether this chain produced fresh text safe for Qwen markdown.
 
@@ -873,13 +963,14 @@ async def _qwen_keywords_async(
     soft_time_limit=int(max(60, settings.QWEN_QUEUE_TIMEOUT + 30)),
     time_limit=int(max(90, settings.QWEN_QUEUE_TIMEOUT + 90)),
 )
-def regenerate_markdown_part_task(self, paper_id: int, part_id: int) -> dict[str, Any]:
+def regenerate_markdown_part_task(self, paper_id: int, part_id: int, mode: str = "text") -> dict[str, Any]:
     """Regenerate Markdown only for one stored PDF/content part."""
     task_id = _task_id(self)
+    mode = _normalize_regeneration_mode(mode)
     try:
-        return run_async(_regenerate_markdown_part_async(self, paper_id, part_id, task_id=task_id))
+        return run_async(_regenerate_markdown_part_async(self, paper_id, part_id, mode=mode, task_id=task_id))
     except Exception as exc:
-        logger.exception("Qwen markdown part regeneration failed: paper_id={}, part_id={}, error={}", paper_id, part_id, exc)
+        logger.exception("Qwen markdown part regeneration failed: paper_id={}, part_id={}, mode={}, error={}", paper_id, part_id, mode, exc)
         raise
 
 
@@ -887,13 +978,21 @@ async def _regenerate_markdown_part_async(
     self,
     paper_id: int,
     part_id: int,
+    mode: str = "text",
     task_id: str | None = None,
 ) -> dict[str, Any]:
+    mode = _normalize_regeneration_mode(mode)
     _safe_update_state(
         self,
         task_id,
         "STARTED",
-        {"paper_id": paper_id, "part_id": part_id, "stage": "regenerating_markdown_part", "stage_label": "Повторная оцифровка части"},
+        {
+            "paper_id": paper_id,
+            "part_id": part_id,
+            "mode": mode,
+            "stage": "regenerating_markdown_part",
+            "stage_label": "Повторная оцифровка части" if mode == "text" else "Повторная оцифровка части по фото",
+        },
     )
 
     async with async_session_maker() as db:
@@ -917,7 +1016,7 @@ async def _regenerate_markdown_part_async(
         normalize_math = bool(pdf_markdown_settings.get("normalize_math", True))
         qwen_timeout = float(qwen_settings.get("request_timeout_seconds") or settings.QWEN_QUEUE_TIMEOUT)
 
-        if not should_qwen_markdown_content_type(getattr(part, "content_type", "body")):
+        if mode == "text" and not should_qwen_markdown_content_type(getattr(part, "content_type", "body")):
             await part_service.set_part_ready_without_markdown(part)
             full_text = await part_service.assemble_markdown(paper_id)
             await paper_service.update_paper(
@@ -931,6 +1030,7 @@ async def _regenerate_markdown_part_async(
                 "status": "ok",
                 "paper_id": paper_id,
                 "part_id": part_id,
+                "mode": mode,
                 "page_start": part.page_start,
                 "page_end": part.page_end,
                 "markdown_text_chars": 0,
@@ -939,7 +1039,45 @@ async def _regenerate_markdown_part_async(
                 "content_type": getattr(part, "content_type", "body"),
             }
 
-        raw_text = _qwen_input_text_for_part(part)
+        image_regeneration_metadata: dict[str, Any] = {}
+        if mode == "image":
+            image_options = _build_image_regeneration_options(
+                qwen_settings=qwen_settings,
+                pdf_markdown_settings=pdf_markdown_settings,
+                timeout=qwen_timeout,
+            )
+            try:
+                raw_text, image_regeneration_metadata = await asyncio.to_thread(
+                    _recognize_part_pdf_pages_as_text,
+                    pdf_path=str(getattr(paper, "pdf_local_path", "") or ""),
+                    paper_id=paper_id,
+                    part_id=part_id,
+                    page_start=int(part.page_start or 1),
+                    page_end=int(part.page_end or part.page_start or 1),
+                    options=image_options,
+                )
+            except Exception as exc:
+                error_text = str(exc)
+                await part_service.set_part_failed(part, error_text)
+                await paper_service.update_paper(paper_id, processing_status="markdown_failed", content_task_id=task_id, processing_error=error_text)
+                return {"status": "error", "paper_id": paper_id, "part_id": part_id, "mode": mode, "error": error_text}
+
+            if raw_text:
+                metadata = dict(getattr(part, "extraction_metadata", None) or {})
+                warnings = set(str(item) for item in (getattr(part, "extraction_warnings", None) or []) if item)
+                warnings.update(str(item) for item in image_regeneration_metadata.get("warnings", []) if item)
+                metadata["regeneration_mode"] = "image"
+                metadata["ai_page_image_regeneration"] = image_regeneration_metadata
+                part.raw_text = raw_text
+                part.raw_text_chars = len(raw_text)
+                part.extraction_method = "ai_page_image_regenerate"
+                part.extraction_quality_score = None
+                part.extraction_warnings = sorted(warnings)
+                part.extraction_metadata = metadata
+                await db.commit()
+                await db.refresh(part)
+        else:
+            raw_text = _qwen_input_text_for_part(part)
         if not raw_text:
             await part_service.set_part_ready_without_markdown(part)
             full_text = await part_service.assemble_markdown(paper_id)
@@ -950,7 +1088,7 @@ async def _regenerate_markdown_part_async(
                 content_task_id=task_id,
                 processing_error=None,
             )
-            return {"status": "ok", "paper_id": paper_id, "part_id": part_id, "markdown_skipped": True, "error": "empty_qwen_projection"}
+            return {"status": "ok", "paper_id": paper_id, "part_id": part_id, "mode": mode, "markdown_skipped": True, "error": "empty_qwen_projection"}
 
         await part_service.set_part_processing(part)
         total_parts = len(await part_service.list_parts(paper_id)) or max(1, part.part_index)
@@ -1000,7 +1138,7 @@ async def _regenerate_markdown_part_async(
             part,
             markdown_text,
             qwen_model=str(qwen_settings.get("model") or settings.QWEN_MODEL),
-            prompt_version=PDF_MARKDOWN_PROMPT_VERSION,
+            prompt_version=f"{PDF_MARKDOWN_PROMPT_VERSION}:{mode}",
             increment_regeneration=True,
         )
         full_text = await part_service.assemble_markdown(paper_id)
@@ -1015,8 +1153,10 @@ async def _regenerate_markdown_part_async(
             "status": "ok",
             "paper_id": paper_id,
             "part_id": part_id,
+            "mode": mode,
             "page_start": part.page_start,
             "page_end": part.page_end,
             "markdown_text_chars": len(markdown_text),
             "regeneration_count": int(part.regeneration_count or 0),
+            "image_regeneration": image_regeneration_metadata if mode == "image" else None,
         }

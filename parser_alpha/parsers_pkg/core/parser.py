@@ -55,6 +55,16 @@ def _is_http_url(value: str | None) -> bool:
     return bool(value and value.lower().startswith(("http://", "https://")))
 
 
+def _is_unavailable_full_text(value: str | None) -> bool:
+    if not value:
+        return False
+    normalized = " ".join(value.casefold().split()).rstrip(".")
+    return normalized in {
+        "not available for public api users",
+        "full text is not available for public api users",
+    }
+
+
 class COREParser(BaseParser):
     """Parser for CORE papers."""
 
@@ -113,7 +123,11 @@ class COREParser(BaseParser):
 
             pdf_url = _first_text(data.get("downloadUrl"))
             full_text_value = _first_text(data.get("fullText"))
-            full_text = None if _is_http_url(full_text_value) else full_text_value
+            full_text = (
+                None
+                if _is_http_url(full_text_value) or _is_unavailable_full_text(full_text_value)
+                else full_text_value
+            )
 
             url = _first_text(data.get("source_fulltext_url"))
             source_urls = _coerce_text_list(data.get("sourceFulltextUrls"))

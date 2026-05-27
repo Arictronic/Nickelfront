@@ -250,24 +250,31 @@ def sanitize_section(section: str, value: Mapping[str, Any]) -> dict[str, Any]:
             merged.get("show_extraction_diagnostics"), True
         )
         parser_mode = str(merged.get("parser_mode") or "auto").strip().lower()
-        merged["parser_mode"] = parser_mode if parser_mode in {"auto", "ai"} else "auto"
+        merged["parser_mode"] = parser_mode if parser_mode in {"auto", "ai", "mypdf"} else "auto"
 
         ocr_mode = str(merged.get("ocr_mode") or "auto").strip().lower()
         merged["ocr_mode"] = ocr_mode if ocr_mode in {"auto", "force", "off"} else "auto"
 
         ai_mode = str(merged.get("ai_mode") or ("force" if merged["parser_mode"] == "ai" else "off")).strip().lower()
         merged["ai_mode"] = ai_mode if ai_mode in {"off", "auto", "force"} else ("force" if merged["parser_mode"] == "ai" else "off")
+        if merged["parser_mode"] == "mypdf":
+            merged["ai_mode"] = "off"
+            merged["ocr_mode"] = "off"
 
         force_strategy = str(merged.get("force_strategy") or "").strip().lower()
-        merged["force_strategy"] = force_strategy if force_strategy in {"", "simple", "layout", "columns", "ocr", "ai"} else ""
+        merged["force_strategy"] = force_strategy if force_strategy in {"", "simple", "layout", "columns", "ocr", "ai", "mypdf"} else ""
 
         mode = str(merged.get("extraction_mode") or "auto").strip().lower()
-        merged["extraction_mode"] = mode if mode in {"auto", "layout", "columns", "simple", "ocr", "ai"} else "auto"
-        if merged["extraction_mode"] in {"layout", "columns", "simple", "ocr", "ai"} and not merged["force_strategy"]:
+        merged["extraction_mode"] = mode if mode in {"auto", "layout", "columns", "simple", "ocr", "ai", "mypdf"} else "auto"
+        if merged["extraction_mode"] in {"layout", "columns", "simple", "ocr", "ai", "mypdf"} and not merged["force_strategy"]:
             merged["force_strategy"] = merged["extraction_mode"]
         if merged["force_strategy"] == "ai":
             merged["parser_mode"] = "ai"
             merged["ai_mode"] = "force"
+        if merged["force_strategy"] == "mypdf":
+            merged["parser_mode"] = "mypdf"
+            merged["ai_mode"] = "off"
+            merged["ocr_mode"] = "off"
         if merged["force_strategy"] == "ocr":
             merged["ocr_mode"] = "force"
 

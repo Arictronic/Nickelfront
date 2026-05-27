@@ -14,6 +14,7 @@ from parsers_pkg.base.normalization import (
     normalize_url,
 )
 from parsers_pkg.base.validation import split_issues, validate_paper_fields
+from parsers_pkg.base.deduplication import is_patent_record, normalize_patent_identifier
 from parsers_pkg.contracts import ParserDiagnostics
 from shared.schemas.paper import Paper
 
@@ -67,6 +68,11 @@ class BaseParser(ABC):
         paper.journal = clean_text(paper.journal)
         paper.source = clean_text(paper.source) or self.source
         paper.source_id = clean_text(paper.source_id)
+        if is_patent_record({"source": paper.source, "journal": paper.journal}):
+            paper.canonical_patent_id = normalize_patent_identifier(
+                paper.source_id or paper.url,
+                source=paper.source,
+            )
         paper.url = derive_article_url(
             source=paper.source,
             url=paper.url,
@@ -77,6 +83,25 @@ class BaseParser(ABC):
         paper.pdf_url = normalize_url(paper.pdf_url)
         paper.doi = normalize_doi(paper.doi)
         paper.publication_date = normalize_datetime(paper.publication_date)
+
+        provenance = dict(paper.provenance or {})
+        for field_name in (
+            "title",
+            "authors",
+            "publication_date",
+            "journal",
+            "doi",
+            "abstract",
+            "full_text",
+            "keywords",
+            "source_id",
+            "canonical_patent_id",
+            "url",
+            "pdf_url",
+        ):
+            if getattr(paper, field_name, None) not in (None, "", [], {}):
+                provenance.setdefault(field_name, paper.source)
+        paper.provenance = provenance
 
         if paper.schema_version is None:
             paper.schema_version = "2.0"

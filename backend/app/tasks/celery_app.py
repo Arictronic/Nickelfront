@@ -60,6 +60,7 @@ else:
         "app.tasks.tasks",
         "app.tasks.parse_tasks",
         "app.tasks.content_tasks",
+        "app.tasks.dashboard_actions",
         "app.tasks.alloy_analysis_tasks",
         "app.tasks.qwen_tasks",
 
@@ -115,6 +116,12 @@ celery_app.conf.update(
         "app.tasks.content_tasks.extract_pdf_text_task": {"queue": settings.CONTENT_QUEUE_NAME},
         "app.tasks.content_tasks.build_embedding_task": {"queue": settings.CONTENT_QUEUE_NAME},
         "app.tasks.content_tasks.finalize_paper_processing_task": {"queue": settings.CONTENT_QUEUE_NAME},
+        "app.tasks.dashboard.process_pdf_backlog": {"queue": settings.CONTENT_QUEUE_NAME},
+        "app.tasks.dashboard.retry_failed_content": {"queue": settings.CONTENT_QUEUE_NAME},
+        "app.tasks.dashboard.rebuild_embeddings": {"queue": settings.CONTENT_QUEUE_NAME},
+        "app.tasks.dashboard.reindex_vector_store": {"queue": settings.CONTENT_QUEUE_NAME},
+        "app.tasks.dashboard.rebuild_vector_store_full": {"queue": settings.CONTENT_QUEUE_NAME},
+        "app.tasks.dashboard.rebuild_rag_index": {"queue": settings.CONTENT_QUEUE_NAME},
     },
 )
 

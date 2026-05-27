@@ -74,6 +74,8 @@ def normalize_patent_identifier(value: Any, source: str | None = None) -> str | 
     normalized_source = (source or "").strip().lower()
     if raw.isdigit() and normalized_source in {"freepatent", "rospatent"} and len(raw) >= 5:
         return f"RU{raw}"
+    if raw.startswith("RU"):
+        raw = re.sub(r"^(RU\d{5,})[A-Z]\d?$", r"\1", raw)
     return raw
 
 

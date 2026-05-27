@@ -1738,12 +1738,7 @@ class FreePatentClient(_RetryingClient):
 
 
 class GooglePatentsClient(_RetryingClient):
-    """Google Patents detail-page reader for publication IDs or patent URLs.
-
-    Google Patents allows patent detail pages in robots.txt, while automated
-    query/result routes are disallowed. This source therefore resolves known
-    publication identifiers rather than crawling keyword-search results.
-    """
+    """Google Patents internal-search reader with HTML detail extraction."""
 
     BASE_URL = "https://patents.google.com"
     SOURCE_NAME = "GooglePatents"
@@ -1799,6 +1794,23 @@ class GooglePatentsClient(_RetryingClient):
             seen.add(publication_id)
             publication_ids.append(publication_id)
 
+        return publication_ids
+
+    @classmethod
+    def _extract_publication_ids_from_search_payload(cls, payload: dict[str, Any]) -> list[str]:
+        publication_ids: list[str] = []
+        seen: set[str] = set()
+        results = payload.get("results") if isinstance(payload, dict) else {}
+        clusters = results.get("cluster", []) if isinstance(results, dict) else []
+        for cluster in clusters if isinstance(clusters, list) else []:
+            records = cluster.get("result", []) if isinstance(cluster, dict) else []
+            for record in records if isinstance(records, list) else []:
+                raw_id = _first_text(record.get("id")) if isinstance(record, dict) else None
+                match = cls._DETAIL_URL_RE.search(f"/{raw_id.lstrip('/')}" if raw_id else "")
+                publication_id = unquote(match.group(1)).upper() if match else None
+                if publication_id and publication_id not in seen:
+                    seen.add(publication_id)
+                    publication_ids.append(publication_id)
         return publication_ids
 
     @classmethod
@@ -1859,16 +1871,17 @@ class GooglePatentsClient(_RetryingClient):
         page_size = self.SEARCH_PAGE_SIZE
 
         while len(results) < limit and start <= self.MAX_SEARCH_START:
-            search_html = await self._request_text(
-                "/",
-                params={
-                    "q": normalized_query,
-                    "num": page_size,
-                    "start": start,
-                    "hl": "en",
+            page = start // page_size
+            search_payload = await self._request_json(
+                "/xhr/query",
+                {
+                    "url": (
+                        f"q={quote_plus(normalized_query)}"
+                        f"&num={page_size}&page={page}&hl=en"
+                    )
                 },
             )
-            publication_ids = self._extract_publication_ids_from_search_html(search_html)
+            publication_ids = self._extract_publication_ids_from_search_payload(search_payload)
             if not publication_ids:
                 break
 
