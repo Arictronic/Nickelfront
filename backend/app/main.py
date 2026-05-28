@@ -86,6 +86,50 @@ def _redact_url(value: str | None) -> str:
         return "***"
 
 
+async def _verify_database_schema_ready() -> None:
+    """Fail fast when backend points to a database without core tables.
+
+    This catches the dangerous state where Alembic was run against one
+    connection but the API starts with another DATABASE_URL. Without this guard
+    the first login request fails later with a noisy UndefinedTableError.
+    """
+    required_tables = (
+        "papers",
+        "users",
+        "refresh_tokens",
+        "patent_tasks",
+        "paper_content_parts",
+        "system_settings",
+    )
+    missing: list[str] = []
+
+    async with async_session_maker() as session:
+        for table_name in required_tables:
+            result = await session.execute(
+                text("SELECT to_regclass(:table_name)"),
+                {"table_name": table_name},
+            )
+            if result.scalar_one_or_none() is None:
+                missing.append(table_name)
+
+        version_result = await session.execute(
+            text("SELECT to_regclass('alembic_version')")
+        )
+        has_alembic_version = version_result.scalar_one_or_none() is not None
+
+    if missing or not has_alembic_version:
+        details = []
+        if not has_alembic_version:
+            details.append("alembic_version")
+        details.extend(missing)
+        raise RuntimeError(
+            "Database schema is not ready for Nickelfront. Missing table(s): "
+            + ", ".join(details)
+            + ". Run: .venv\\Scripts\\python.exe backend\\apply_migrations.py. "
+            + f"DATABASE_URL={_redact_url(settings.DATABASE_URL)}"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
@@ -105,6 +149,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(f"Redis URL: {_redact_url(settings.REDIS_URL)}")
     logger.info(f"CORS origins: {settings.get_cors_origins()}")
 
+    await _verify_database_schema_ready()
+    logger.info("Database schema check: OK")
 
     logger.info(f"ChromaDB path: {settings.CHROMA_DB_PATH}")
     logger.info(f"Embedding model: {settings.EMBEDDING_MODEL}")

@@ -1,4 +1,5 @@
 import json
+import os
 import secrets
 from pathlib import Path
 from typing import ClassVar
@@ -8,6 +9,30 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
+
+
+def _load_project_env() -> None:
+    """Load project .env consistently for Windows batch launches.
+
+    Nickelfront local scripts often start several cmd windows. A stale parent
+    DATABASE_URL/REDIS_URL can otherwise override .env in one process while
+    another process uses the file value. By default the project .env wins for
+    local launches; set NICKELFRONT_DISABLE_ENV_OVERRIDE=1 to keep external
+    environment priority.
+    """
+    if os.getenv("NICKELFRONT_DISABLE_ENV_OVERRIDE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+    env_file = BASE_DIR / ".env"
+    if not env_file.exists():
+        return
+    try:
+        from dotenv import load_dotenv
+    except Exception:
+        return
+    load_dotenv(env_file, override=True)
+
+
+_load_project_env()
 
 
 def _strip_wrapping_quotes(value):
@@ -219,18 +244,30 @@ class Settings(BaseSettings):
         if value is None:
             return default
         if isinstance(value, list):
-            return value
+            return [str(item).strip() for item in value if str(item).strip()]
         if isinstance(value, str):
-            raw = value.strip()
+            raw = _strip_wrapping_quotes(value)
+            raw = raw.strip()
             if not raw:
                 return default
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, list):
-                    return [str(item).strip() for item in parsed if str(item).strip()]
-            except json.JSONDecodeError:
-                pass
-            return [item.strip() for item in raw.split(",") if item.strip()]
+
+            # Windows cmd SET syntax may double inner quotes when loading JSON
+            # arrays from .env, for example [""*""] instead of ["*"].
+            # Normalize this before JSON parsing, but keep the original as a
+            # fallback for plain CSV values.
+            json_candidates = [raw]
+            if '""' in raw:
+                json_candidates.append(raw.replace('""', '"'))
+
+            for candidate in json_candidates:
+                try:
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed if str(item).strip()]
+                except json.JSONDecodeError:
+                    pass
+
+            return [item.strip().strip('\"').strip("'") for item in raw.split(",") if item.strip()]
         return default
 
     def get_secret_key(self) -> str:

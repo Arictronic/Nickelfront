@@ -1,32 +1,27 @@
-
-
 """
 archive_project.py
 
-Создаёт zip-архив проекта в папке archives/.
+Создаёт zip-архив проекта Nickelfront в папке archives/.
 
-Что делает:
-- архивы складываются в ./archives;
-- папка archives не попадает внутрь архива;
-- backend/app/db/models попадает в архив, даже если в .gitignore есть models/;
-- requirements.txt, pyproject.toml, package.json, alembic, frontend/src и код проекта сохраняются;
-- из markdown-документов в архив попадают только:
-    - README.md в корне проекта;
-    - все .md/.mdx/.markdown файлы внутри docs/;
-- .env в корне проекта попадает в архив;
-- .env.local, .env.production, ключи, pem, service-account.json и прочие секреты НЕ попадают;
-- исключает мусор: .git, __pycache__, node_modules, venv, build/dist, кеши, логи, большие ML-веса;
-- поддерживает dry-run и verbose.
+Цель скрипта:
+- собрать компактный архив кода для анализа человеком/нейросетью;
+- сохранить важные исходники, конфиги, миграции, frontend/src, backend, parser/rag/qwen;
+- намеренно включить КОРНЕВОЙ .env, потому что для этого проекта он нужен в AI-аудите;
+- не тащить runtime-мусор, кеши, node_modules, venv, ChromaDB, дампы, логи, PDF/DOCX и большие ML-веса.
+
+Важно по .env:
+- .env в корне проекта включается всегда;
+- вложенные backend/.env, frontend/.env, qwen_service/.env и т.п. по умолчанию НЕ включаются;
+- если нужно включить все вложенные .env, используй --include-nested-env.
 
 Примеры:
 
     python archive_project.py
-
     python archive_project.py --dry-run --verbose
-
+    python archive_project.py --llm-mode
     python archive_project.py --output archives/Nickelfront.zip
-
     python archive_project.py --max-file-size-mb 25
+    python archive_project.py --include-nested-env
 """
 
 from __future__ import annotations
@@ -42,14 +37,11 @@ from pathlib import Path
 from typing import Iterable
 
 
-
-
-
-
 DEFAULT_OUTPUT_PREFIX = "project_archive"
 DEFAULT_MAX_FILE_SIZE_MB = 50
 
-
+# Директории с таким именем выкидываются на любом уровне проекта.
+# ВАЖНО: не добавлять сюда обычное имя "models" — в проекте это может быть исходный код.
 DEFAULT_EXCLUDE_DIR_NAMES = {
     ".git",
     ".hg",
@@ -58,19 +50,20 @@ DEFAULT_EXCLUDE_DIR_NAMES = {
     ".vscode",
     ".nickelfront_setup_state",
     ".tmp_wheels",
-
+    ".parcel-cache",
+    ".ipynb_checkpoints",
     "archives",
     "chroma_db",
-
     "__pycache__",
     ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
+    ".pyre",
+    ".pytype",
+    ".hypothesis",
     ".tox",
     ".nox",
-    ".coverage",
     "htmlcov",
-
     "node_modules",
     ".next",
     ".nuxt",
@@ -78,13 +71,11 @@ DEFAULT_EXCLUDE_DIR_NAMES = {
     "dist",
     "build",
     "coverage",
-
     ".venv",
     "venv",
     "env",
     "ENV",
     "runtime",
-
     ".cache",
     "cache",
     "tmp",
@@ -93,202 +84,11 @@ DEFAULT_EXCLUDE_DIR_NAMES = {
     "log",
     "redis",
     "ml",
-    "models",
-
-    ".DS_Store",
+    "ml_models",
+    "models_cache",
 }
 
-
-DEFAULT_EXCLUDE_FILE_NAMES = {
-    ".DS_Store",
-    "Thumbs.db",
-    "desktop.ini",
-
-    ".coverage",
-    "coverage.xml",
-
-
-    "debug_pdf_extract.txt",
-    "debug_pdf_extract_meta.json",
-
-    ".env.local",
-    ".env.development.local",
-    ".env.test.local",
-    ".env.production.local",
-}
-
-
-DEFAULT_EXCLUDE_PATTERNS = {
-
-    "*.pyc",
-    "*.pyo",
-    "*.pyd",
-    "*.so",
-    "*.egg-info",
-    "*.egg",
-
-
-    "*.tsbuildinfo",
-
-
-    "*.log",
-    "*.tmp",
-    "*.temp",
-    "*.bak",
-    "*.bak_*",
-    "*.swp",
-    "*.swo",
-    "*.orig",
-
-
-    "*.sqlite",
-    "*.sqlite3",
-    "*.db",
-
-
-    "*.zip",
-    "*.tar",
-    "*.tar.gz",
-    "*.tgz",
-    "*.rar",
-    "*.7z",
-
-
-    "*.pth",
-    "*.pt",
-    "*.onnx",
-    "*.ckpt",
-    "*.safetensors",
-    "*.bin",
-
-
-    "*.mp4",
-    "*.mov",
-    "*.avi",
-    "*.mkv",
-    "*.mp3",
-    "*.wav",
-    "*.flac",
-
-
-    "*.pdf",
-    "*.doc",
-    "*.docx",
-    "*.odt",
-}
-
-
-
-ALWAYS_INCLUDE_FILE_PATTERNS = {
-
-    "README.md",
-    "readme.md",
-
-
-    ".env",
-
-    "LICENSE",
-    "LICENSE.*",
-
-    "requirements.txt",
-    "requirements-*.txt",
-    "**/requirements.txt",
-    "**/requirements-*.txt",
-
-    "pyproject.toml",
-    "setup.py",
-    "setup.cfg",
-    "poetry.lock",
-    "uv.lock",
-    "Pipfile",
-    "Pipfile.lock",
-
-    "package.json",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-
-    "tsconfig.json",
-    "tsconfig.*.json",
-    "vite.config.js",
-    "vite.config.ts",
-    "webpack.config.js",
-
-    "Dockerfile",
-    "Dockerfile.*",
-    "docker-compose.yml",
-    "docker-compose.yaml",
-    "compose.yml",
-    "compose.yaml",
-
-    ".env.example",
-    ".env.template",
-    "example.env",
-
-    "alembic.ini",
-    "**/alembic.ini",
-
-
-    "docs/**/*.md",
-    "docs/**/*.mdx",
-    "docs/**/*.markdown",
-    "docs/*.md",
-    "docs/*.mdx",
-    "docs/*.markdown",
-}
-
-
-
-ALWAYS_INCLUDE_DIR_PATTERNS = {
-    "backend/app/db/models",
-    "backend/app/db/models/**",
-
-    "backend/alembic",
-    "backend/alembic/**",
-    "alembic",
-    "alembic/**",
-
-    ".github",
-    ".github/**",
-
-
-    "docs",
-    "docs/**",
-
-    "tests",
-    "tests/**",
-    "backend/tests",
-    "backend/tests/**",
-
-    "frontend/src",
-    "frontend/src/**",
-}
-
-
-
-EXCLUDE_DIR_PATTERNS = {
-    "**/__pycache__",
-    "**/.pytest_cache",
-    "**/.mypy_cache",
-    "**/.ruff_cache",
-    "**/node_modules",
-    "**/.venv",
-    "**/venv",
-    "**/dist",
-    "**/build",
-    "**/coverage",
-    "**/htmlcov",
-    "**/.next",
-    "**/.nuxt",
-
-    "archives",
-    "archives/**",
-
-    "parser_alpha/data",
-    "parser_alpha/data/**",
-}
-
-
+# Только директории верхнего уровня.
 ROOT_EXCLUDE_DIR_NAMES = {
     "archives",
     "data",
@@ -303,28 +103,116 @@ ROOT_EXCLUDE_DIR_NAMES = {
     "redis",
     "runtime",
     "ml",
-    "models",
     ".nickelfront_setup_state",
 }
-
 
 ROOT_EXCLUDE_DIR_GLOBS = {
     "venv_broken*",
 }
 
+DEFAULT_EXCLUDE_FILE_NAMES = {
+    ".DS_Store",
+    "Thumbs.db",
+    "desktop.ini",
+    ".coverage",
+    "coverage.xml",
+    "debug_pdf_extract.txt",
+    "debug_pdf_extract_meta.json",
+    "celerybeat-schedule",
+    "celerybeat-schedule.db",
+    "npm-debug.log",
+    "yarn-debug.log",
+    "yarn-error.log",
+    "pnpm-debug.log",
+}
 
+DEFAULT_EXCLUDE_PATTERNS = {
+    # Python/native artifacts
+    "*.pyc",
+    "*.pyc.*",
+    "*.pyo",
+    "*.pyd",
+    "*.py[cod]",
+    "*$py.class",
+    "*.so",
+    "*.dll",
+    "*.dylib",
+    "*.egg-info",
+    "*.egg",
+    # Frontend artifacts
+    "*.tsbuildinfo",
+    "npm-debug.log*",
+    "yarn-debug.log*",
+    "yarn-error.log*",
+    "pnpm-debug.log*",
+    # Temporary/backup files
+    "*.log",
+    "*.tmp",
+    "*.temp",
+    "*.bak",
+    "*.bak_*",
+    "*.swp",
+    "*.swo",
+    "*.orig",
+    "*.old",
+    "*.rej",
+    # Local DB / dumps / captures / generated datasets
+    "*.sqlite",
+    "*.sqlite3",
+    "*.db",
+    "*.db-journal",
+    "*.db-wal",
+    "*.db-shm",
+    "*.sqlite-journal",
+    "*.sqlite-wal",
+    "*.sqlite-shm",
+    "*.mdb",
+    "*.accdb",
+    "*.sql",
+    "*.dump",
+    "*.rdb",
+    "*.har",
+    "*.csv",
+    "*.parquet",
+    "*.jsonl",
+    # Archives
+    "*.zip",
+    "*.tar",
+    "*.tar.gz",
+    "*.tgz",
+    "*.rar",
+    "*.7z",
+    # ML weights / large runtime models
+    "*.pth",
+    "*.pt",
+    "*.onnx",
+    "*.ckpt",
+    "*.safetensors",
+    "*.bin",
+    # Media / office docs / papers
+    "*.mp4",
+    "*.mov",
+    "*.avi",
+    "*.mkv",
+    "*.mp3",
+    "*.wav",
+    "*.flac",
+    "*.pdf",
+    "*.doc",
+    "*.docx",
+    "*.odt",
+}
 
-
+# Секретные/локальные файлы, кроме корневого .env.
 SECRET_FILE_PATTERNS = {
     ".env.*",
     "**/.env.*",
-
+    "**/.env",
     "*.pem",
     "*.key",
     "*.crt",
     "*.p12",
     "*.pfx",
-
     "id_rsa",
     "id_dsa",
     "id_ecdsa",
@@ -333,32 +221,167 @@ SECRET_FILE_PATTERNS = {
     "**/id_dsa",
     "**/id_ecdsa",
     "**/id_ed25519",
-
     "secrets.json",
     "**/secrets.json",
     "service-account.json",
     "**/service-account.json",
 }
 
-
 MARKDOWN_EXTENSIONS = {
     ".md",
     ".mdx",
     ".markdown",
+    ".rst",
 }
 
+ALWAYS_INCLUDE_FILE_PATTERNS = {
+    "README.md",
+    "readme.md",
+    ".env",
+    "LICENSE",
+    "LICENSE.*",
+    "requirements.txt",
+    "requirements-*.txt",
+    "**/requirements.txt",
+    "**/requirements-*.txt",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "poetry.lock",
+    "uv.lock",
+    "Pipfile",
+    "Pipfile.lock",
+    "package.json",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "tsconfig.json",
+    "tsconfig.*.json",
+    "vite.config.js",
+    "vite.config.ts",
+    "webpack.config.js",
+    "Dockerfile",
+    "Dockerfile.*",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
+    ".env.example",
+    ".env.template",
+    "example.env",
+    "alembic.ini",
+    "**/alembic.ini",
+    "docs/**/*.md",
+    "docs/**/*.mdx",
+    "docs/**/*.markdown",
+    "docs/**/*.rst",
+    "docs/*.md",
+    "docs/*.mdx",
+    "docs/*.markdown",
+    "docs/*.rst",
+}
 
+ALWAYS_INCLUDE_DIR_PATTERNS = {
+    "backend/app/db/models",
+    "backend/app/db/models/**",
+    "backend/alembic",
+    "backend/alembic/**",
+    "alembic",
+    "alembic/**",
+    ".github",
+    ".github/**",
+    "docs",
+    "docs/**",
+    "tests",
+    "tests/**",
+    "backend/tests",
+    "backend/tests/**",
+    "frontend/src",
+    "frontend/src/**",
+}
+
+EXCLUDE_DIR_PATTERNS = {
+    "**/__pycache__",
+    "**/.pytest_cache",
+    "**/.mypy_cache",
+    "**/.ruff_cache",
+    "**/.pyre",
+    "**/.pytype",
+    "**/.hypothesis",
+    "**/.tox",
+    "**/.nox",
+    "**/node_modules",
+    "**/.venv",
+    "**/venv",
+    "**/env",
+    "**/dist",
+    "**/build",
+    "**/coverage",
+    "**/htmlcov",
+    "**/.next",
+    "**/.nuxt",
+    "**/.svelte-kit",
+    "archives",
+    "archives/**",
+    "parser_alpha/data",
+    "parser_alpha/data/**",
+}
+
+# В llm-mode не режем код по расширениям слишком агрессивно,
+# но дополнительно запрещаем типичные локальные/бинарные артефакты.
 LLM_EXCLUDE_FILE_PATTERNS = {
     "*.har",
     "*.csv",
     "*.parquet",
     "*.rdb",
     "*.ipynb",
+    "PATCH_NOTES.txt",
+    "*_notes.txt",
+    "*_session.txt",
+    "*_debug.txt",
+    "export_*.txt",
+    "export_*.json",
+    "debug_*.txt",
+    "debug_*.json",
 }
 
+IMPORTANT_CHECKS = [
+    ".env",
+    "README.md",
+    "docs",
+    "backend/app/db/models",
+    "requirements.txt",
+    "pyproject.toml",
+    "frontend/package.json",
+    "frontend/tsconfig.json",
+    "frontend/vite.config.js",
+    ".github/workflows",
+    "tests/backend/conftest.py",
+    "rag/app/main.py",
+    "run_all.bat",
+    "scripts/run_backend.bat",
+    "scripts/run_worker.bat",
+    "scripts/run_qwen_worker.bat",
+    "scripts/run_frontend.bat",
+    "parser_alpha/run_parser.py",
+    "qwen_service/service.py",
+    "rag/app",
+    "backend/alembic",
+    "backend/alembic.ini",
+]
 
-
-
+OPTIONAL_CHECKS = {
+    "README.md",
+    "docs",
+    "frontend/tsconfig.json",
+    "frontend/vite.config.js",
+    ".github/workflows",
+    "tests/backend/conftest.py",
+    "scripts/run_backend.bat",
+    "scripts/run_worker.bat",
+    "scripts/run_qwen_worker.bat",
+    "scripts/run_frontend.bat",
+}
 
 
 @dataclass(frozen=True)
@@ -370,8 +393,32 @@ class IgnoreRule:
     source: str
 
 
+@dataclass
+class ArchiveStats:
+    included_files: int = 0
+    skipped_files: int = 0
+    skipped_dirs: int = 0
+    included_bytes: int = 0
+
+
+@dataclass
+class ArchiveOptions:
+    max_file_size_bytes: int
+    no_markdown: bool
+    llm_mode: bool
+    include_nested_env: bool
+
+
 def normalize_rel(path: Path | str) -> str:
-    return str(path).replace(os.sep, "/").strip("/")
+    """Нормализует относительный путь под zip/.gitignore matching.
+
+    В старой версии Path('.') превращался в '.', из-за чего корневой .gitignore
+    применялся как будто он лежит в подпапке '.'. Это ломало правила вида *.txt.
+    """
+    value = str(path).replace(os.sep, "/").strip("/")
+    if value in {"", "."}:
+        return ""
+    return value
 
 
 def parse_gitignore_file(path: Path, root: Path) -> list[IgnoreRule]:
@@ -386,7 +433,10 @@ def parse_gitignore_file(path: Path, root: Path) -> list[IgnoreRule]:
         return rules
 
     base_dir = path.parent
-    base_dir_rel = normalize_rel(base_dir.relative_to(root))
+    if base_dir.resolve() == root.resolve():
+        base_dir_rel = ""
+    else:
+        base_dir_rel = normalize_rel(base_dir.relative_to(root))
 
     for raw_line in lines:
         line = raw_line.strip()
@@ -424,24 +474,15 @@ def parse_gitignore_file(path: Path, root: Path) -> list[IgnoreRule]:
     return rules
 
 
-def _load_root_gitignore_rules(root: Path) -> list[IgnoreRule]:
-    """
-    Загружает только корневой .gitignore.
-    """
-    return parse_gitignore_file(root / ".gitignore", root)
-
-
 def load_gitignore_rules(root: Path) -> list[IgnoreRule]:
-    """
-    Загружает все .gitignore внутри проекта, кроме жёстко исключённых директорий.
-    """
+    """Загружает все .gitignore внутри проекта, кроме жёстко исключённых директорий."""
     rules: list[IgnoreRule] = []
 
     for current_root, dir_names, file_names in os.walk(root):
         current_path = Path(current_root)
 
         kept_dirs: list[str] = []
-        for dir_name in dir_names:
+        for dir_name in sorted(dir_names):
             abs_dir = current_path / dir_name
             rel_dir = normalize_rel(abs_dir.relative_to(root))
 
@@ -462,7 +503,7 @@ def path_matches_pattern(rel_path: str, pattern: str) -> bool:
     rel_path = normalize_rel(rel_path)
     pattern = normalize_rel(pattern)
 
-    if not rel_path:
+    if not rel_path or not pattern:
         return False
 
     candidates = {
@@ -474,16 +515,13 @@ def path_matches_pattern(rel_path: str, pattern: str) -> bool:
         if fnmatch.fnmatch(candidate, pattern):
             return True
 
-
     if "/" not in pattern:
         parts = rel_path.split("/")
         if any(fnmatch.fnmatch(part, pattern) for part in parts):
             return True
 
-
     if rel_path == pattern or rel_path.startswith(pattern.rstrip("/") + "/"):
         return True
-
 
     if fnmatch.fnmatch(rel_path, pattern):
         return True
@@ -520,7 +558,11 @@ def match_gitignore_rule(rel_path: str, is_dir: bool, rule: IgnoreRule) -> bool:
         matched = path_matches_pattern(scoped_path, pattern)
 
     if matched:
-        return True
+        if rule.directory_only and not is_dir:
+            # Для файла проверяем его родителей ниже.
+            pass
+        else:
+            return True
 
     if not rule.directory_only:
         return False
@@ -531,7 +573,7 @@ def match_gitignore_rule(rel_path: str, is_dir: bool, rule: IgnoreRule) -> bool:
 
     for parent in parent_candidates:
         parent_str = normalize_rel(parent)
-        if not parent_str or parent_str == ".":
+        if not parent_str:
             continue
 
         if rule.anchored:
@@ -559,6 +601,11 @@ def is_root_env_file(rel_path: str) -> bool:
     return normalize_rel(rel_path) == ".env"
 
 
+def is_nested_env_file(rel_path: str) -> bool:
+    rel_path = normalize_rel(rel_path)
+    return rel_path.endswith("/.env") and not is_root_env_file(rel_path)
+
+
 def is_always_include_file(rel_path: str) -> bool:
     return matches_any(rel_path, ALWAYS_INCLUDE_FILE_PATTERNS)
 
@@ -568,16 +615,6 @@ def is_always_include_dir(rel_path: str) -> bool:
 
 
 def is_inside_always_include_dir(rel_path: str) -> bool:
-    """
-    Проверяет, лежит ли файл/путь внутри важной директории.
-
-    Нужно, чтобы правило .gitignore вроде:
-        models/
-
-    не выкинуло файлы:
-        backend/app/db/models/user.py
-        backend/app/db/models/paper.py
-    """
     rel_path = normalize_rel(rel_path)
 
     if not rel_path:
@@ -597,15 +634,11 @@ def is_docs_markdown_file(rel_path: str) -> bool:
     rel_path = normalize_rel(rel_path)
     path = Path(rel_path)
 
-    return (
-        rel_path.startswith("docs/")
-        and path.suffix.lower() in MARKDOWN_EXTENSIONS
-    )
+    return rel_path.startswith("docs/") and path.suffix.lower() in MARKDOWN_EXTENSIONS
 
 
 def is_root_readme_file(rel_path: str) -> bool:
-    rel_path = normalize_rel(rel_path)
-    return rel_path.lower() == "readme.md"
+    return normalize_rel(rel_path).lower() == "readme.md"
 
 
 def is_markdown_file(rel_path: str) -> bool:
@@ -613,11 +646,6 @@ def is_markdown_file(rel_path: str) -> bool:
 
 
 def is_disallowed_markdown_file(rel_path: str, no_markdown: bool = False) -> bool:
-    """
-    В архиве из markdown должны остаться только:
-    - README.md в корне;
-    - .md/.mdx/.markdown внутри docs/.
-    """
     if not is_markdown_file(rel_path):
         return False
 
@@ -633,67 +661,19 @@ def is_disallowed_markdown_file(rel_path: str, no_markdown: bool = False) -> boo
     return True
 
 
-def is_secret_file(rel_path: str) -> bool:
+def is_secret_file(rel_path: str, include_nested_env: bool = False) -> bool:
     rel_path = normalize_rel(rel_path)
 
-
     if is_root_env_file(rel_path):
+        return False
+
+    if include_nested_env and is_nested_env_file(rel_path):
         return False
 
     return matches_any(rel_path, SECRET_FILE_PATTERNS)
 
 
-def is_inside_hard_excluded_dir(rel_path: str) -> bool:
-    """Дополнительная защита: не включать файлы из мусорных директорий.
-
-    os.walk обычно отсекает такие директории до обхода файлов, но эта проверка
-    страхует архиватор от ошибок в allowlist/.gitignore и старых локальных артефактов.
-    """
-    rel_path = normalize_rel(rel_path)
-    if not rel_path:
-        return False
-
-    parts = rel_path.split("/")
-    for index, part in enumerate(parts[:-1]):
-        parent = "/".join(parts[: index + 1])
-        if is_always_include_dir(parent):
-            continue
-
-        if is_hard_excluded_dir(parent, part):
-            return True
-
-    return False
-
-
 def is_hard_excluded_dir(rel_path: str, name: str) -> bool:
-    nested_excluded_names = {
-        "__pycache__",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".ruff_cache",
-        ".tox",
-        ".nox",
-        ".coverage",
-        "htmlcov",
-        "node_modules",
-        ".next",
-        ".nuxt",
-        ".svelte-kit",
-        "dist",
-        "build",
-        "coverage",
-        ".venv",
-        "venv",
-        "env",
-        "ENV",
-        ".cache",
-        "cache",
-        "tmp",
-        "temp",
-        "logs",
-        "log",
-    }
-
     if name in DEFAULT_EXCLUDE_DIR_NAMES:
         return True
 
@@ -701,26 +681,49 @@ def is_hard_excluded_dir(rel_path: str, name: str) -> bool:
         return True
 
     normalized_rel_path = normalize_rel(rel_path)
+    if not normalized_rel_path:
+        return False
+
     parts = normalized_rel_path.split("/")
 
     if parts and parts[0] in ROOT_EXCLUDE_DIR_NAMES:
         return True
 
-    if any(part in nested_excluded_names for part in parts):
+    if any(part in DEFAULT_EXCLUDE_DIR_NAMES for part in parts):
         return True
 
     return matches_any(normalized_rel_path, EXCLUDE_DIR_PATTERNS)
 
 
-def is_hard_excluded_file(rel_path: str, name: str) -> bool:
+def is_inside_hard_excluded_dir(rel_path: str) -> bool:
+    """Защита от always-include: мусорные директории нельзя протащить внутрь архива."""
+    rel_path = normalize_rel(rel_path)
+    if not rel_path:
+        return False
+
+    parts = rel_path.split("/")
+    for index, part in enumerate(parts[:-1]):
+        parent = "/".join(parts[: index + 1])
+        if is_hard_excluded_dir(parent, part):
+            return True
+
+    return False
+
+
+def is_hard_excluded_file(
+    rel_path: str,
+    name: str,
+    *,
+    no_markdown: bool,
+    include_nested_env: bool,
+) -> bool:
     if name in DEFAULT_EXCLUDE_FILE_NAMES:
         return True
 
-    if is_secret_file(rel_path):
+    if is_secret_file(rel_path, include_nested_env=include_nested_env):
         return True
 
-
-    if is_disallowed_markdown_file(rel_path):
+    if is_disallowed_markdown_file(rel_path, no_markdown=no_markdown):
         return True
 
     if matches_any(rel_path, DEFAULT_EXCLUDE_PATTERNS):
@@ -734,31 +737,15 @@ def is_llm_excluded_file(rel_path: str) -> bool:
 
 
 def is_ignored_by_gitignore(rel_path: str, is_dir: bool, rules: list[IgnoreRule]) -> bool:
-    """
-    Упрощённая, но практичная обработка .gitignore.
-    """
     rel_path = normalize_rel(rel_path)
     ignored = False
 
     for rule in rules:
         matched = match_gitignore_rule(rel_path, is_dir=is_dir, rule=rule)
-
         if matched:
             ignored = not rule.negated
 
     return ignored
-
-
-
-
-
-
-@dataclass
-class ArchiveStats:
-    included_files: int = 0
-    skipped_files: int = 0
-    skipped_dirs: int = 0
-    included_bytes: int = 0
 
 
 def should_include_dir(
@@ -771,14 +758,13 @@ def should_include_dir(
     if not rel_dir:
         return True, "root"
 
-    if is_always_include_dir(rel_dir):
-        return True, "always-include-dir"
-
-
-
+    # Hard-exclude должен быть сильнее always-include.
+    # Иначе tests/** мог протащить tests/**/__pycache__.
     if is_hard_excluded_dir(rel_dir, dir_name):
         return False, "hard-excluded-dir"
 
+    if is_always_include_dir(rel_dir):
+        return True, "always-include-dir"
 
     if is_inside_always_include_dir(rel_dir):
         return True, "inside-always-include-dir"
@@ -794,56 +780,45 @@ def should_include_file(
     file_name: str,
     gitignore_rules: list[IgnoreRule],
     file_size: int,
-    max_file_size_bytes: int,
-    no_markdown: bool,
-    llm_mode: bool,
+    options: ArchiveOptions,
 ) -> tuple[bool, str]:
     rel_file = normalize_rel(rel_file)
 
-
+    # Жёсткое требование проекта: корневой .env всегда включается.
     if is_root_env_file(rel_file):
         return True, "root-env"
 
     if is_inside_hard_excluded_dir(rel_file):
         return False, "inside-hard-excluded-dir"
 
-
-    if is_secret_file(rel_file):
+    if is_secret_file(rel_file, include_nested_env=options.include_nested_env):
         return False, "secret"
 
-
-    if is_hard_excluded_file(rel_file, file_name):
+    if is_hard_excluded_file(
+        rel_file,
+        file_name,
+        no_markdown=options.no_markdown,
+        include_nested_env=options.include_nested_env,
+    ):
         return False, "hard-excluded-file"
 
-    if is_disallowed_markdown_file(rel_file, no_markdown=no_markdown):
-        return False, "disallowed-markdown"
-
-    if llm_mode and is_llm_excluded_file(rel_file):
+    if options.llm_mode and is_llm_excluded_file(rel_file):
         return False, "llm-excluded-file"
-
 
     if is_always_include_file(rel_file):
         return True, "always-include-file"
 
-
     if is_inside_always_include_dir(rel_file):
-
-
-        if is_disallowed_markdown_file(rel_file, no_markdown=no_markdown):
-            return False, "disallowed-markdown"
-
-
         if rel_file.startswith("docs/"):
-            if no_markdown:
+            if options.no_markdown:
                 return False, "markdown-disabled"
-
             if not is_docs_markdown_file(rel_file):
                 return False, "docs-non-markdown"
 
         return True, "inside-always-include-dir"
 
-    if file_size > max_file_size_bytes:
-        return False, f"too-large>{max_file_size_bytes}B"
+    if file_size > options.max_file_size_bytes:
+        return False, f"too-large>{options.max_file_size_bytes}B"
 
     if is_ignored_by_gitignore(rel_file, is_dir=False, rules=gitignore_rules):
         return False, "gitignore"
@@ -854,9 +829,7 @@ def should_include_file(
 def iter_project_files(
     root: Path,
     gitignore_rules: list[IgnoreRule],
-    max_file_size_bytes: int,
-    no_markdown: bool,
-    llm_mode: bool,
+    options: ArchiveOptions,
     verbose: bool = False,
 ) -> tuple[list[Path], ArchiveStats]:
     stats = ArchiveStats()
@@ -866,7 +839,6 @@ def iter_project_files(
         current_path = Path(current_root)
 
         kept_dirs: list[str] = []
-
         for dir_name in sorted(dir_names):
             abs_dir = current_path / dir_name
             rel_dir = normalize_rel(abs_dir.relative_to(root))
@@ -899,9 +871,7 @@ def iter_project_files(
                 file_name=file_name,
                 gitignore_rules=gitignore_rules,
                 file_size=file_size,
-                max_file_size_bytes=max_file_size_bytes,
-                no_markdown=no_markdown,
-                llm_mode=llm_mode,
+                options=options,
             )
 
             if include:
@@ -948,7 +918,7 @@ def default_output_name(root: Path) -> str:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Создать безопасный zip-архив проекта в папке archives/."
+        description="Создать zip-архив проекта Nickelfront в папке archives/."
     )
 
     parser.add_argument(
@@ -963,16 +933,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--output",
         type=Path,
         default=None,
-        help=(
-            "Путь к выходному zip-файлу. "
-            "Если не указан, архив будет создан в ./archives/."
-        ),
+        help="Путь к выходному zip-файлу. Если не указан, архив будет создан в ./archives/.",
     )
 
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Ничего не архивировать, только показать список файлов.",
+        help="Ничего не архивировать, только показать сводку и проверки.",
     )
 
     parser.add_argument(
@@ -991,19 +958,25 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--ignore-gitignore",
         action="store_true",
-        help="Не учитывать .gitignore вообще. Жёсткие exclude/secret правила всё равно работают.",
+        help="Не учитывать .gitignore. Hard-exclude и secret-exclude всё равно работают.",
     )
 
     parser.add_argument(
         "--no-markdown",
         action="store_true",
-        help="Не включать в архив никакие markdown-файлы, включая README.md и docs/*.",
+        help="Не включать markdown/rst-файлы, включая README.md и docs/*.",
     )
 
     parser.add_argument(
         "--llm-mode",
         action="store_true",
-        help="Архив для нейросети: только основной код и конфиги, без markdown и локальных артефактов, но с корневым .env.",
+        help="Архив для нейросети: без markdown и локальных артефактов, но с корневым .env.",
+    )
+
+    parser.add_argument(
+        "--include-nested-env",
+        action="store_true",
+        help="Дополнительно включить вложенные */.env. По умолчанию включается только корневой .env.",
     )
 
     return parser.parse_args(argv)
@@ -1017,12 +990,8 @@ def get_output_path(root: Path, output_arg: Path | None) -> Path:
 
     output_path = output_arg
 
-
-
-
     if not output_path.is_absolute() and output_path.parent == Path("."):
         return archives_dir / output_path.name
-
 
     return output_path.resolve()
 
@@ -1035,8 +1004,7 @@ def collect_existing_dirs(root: Path, files: list[Path]) -> set[str]:
 
         for parent in rel.parents:
             parent_str = normalize_rel(parent)
-
-            if parent_str and parent_str != ".":
+            if parent_str:
                 existing_dirs.add(parent_str)
 
     return existing_dirs
@@ -1044,6 +1012,9 @@ def collect_existing_dirs(root: Path, files: list[Path]) -> set[str]:
 
 def is_expected_missing_in_mode(check: str, llm_mode: bool, no_markdown: bool) -> bool:
     if (llm_mode or no_markdown) and check in {"README.md", "docs"}:
+        return True
+
+    if check in OPTIONAL_CHECKS:
         return True
 
     return False
@@ -1065,7 +1036,7 @@ def prompt_archive_mode() -> str:
     print("1. Обычный режим")
     print("   Основной код и конфиги, корневой .env включается, README.md и docs/*.md остаются.")
     print("2. Без markdown")
-    print("   То же самое, но без всех markdown-файлов, включая README.md и docs/*.")
+    print("   То же самое, но без всех markdown/rst-файлов, включая README.md и docs/*.")
     print("3. Режим для нейросети")
     print("   Только основной код и конфиги, без markdown и лишних локальных артефактов, но с корневым .env.")
     print()
@@ -1077,6 +1048,96 @@ def prompt_archive_mode() -> str:
             return choice
 
         print("Неверный выбор. Пожалуйста, введите 1, 2 или 3.")
+
+
+def filter_output_and_archives(root: Path, output_path: Path, files: list[Path]) -> list[Path]:
+    output_path_resolved = output_path.resolve()
+    filtered_files: list[Path] = []
+
+    for file in files:
+        try:
+            rel_parts = file.relative_to(root).parts
+        except ValueError:
+            continue
+
+        if file.resolve() == output_path_resolved:
+            continue
+
+        if rel_parts and rel_parts[0] == "archives":
+            continue
+
+        filtered_files.append(file)
+
+    return filtered_files
+
+
+def print_summary(
+    *,
+    root: Path,
+    output_path: Path,
+    dry_run: bool,
+    llm_mode: bool,
+    no_markdown: bool,
+    ignore_gitignore: bool,
+    include_nested_env: bool,
+    files: list[Path],
+    stats: ArchiveStats,
+) -> None:
+    total_input_size = sum(file.stat().st_size for file in files if file.exists())
+
+    print()
+    print("Archive summary")
+    print("---------------")
+    print(f"Root:           {root}")
+    print(f"Output:         {output_path}")
+    print(f"Dry run:        {dry_run}")
+    print(f"Mode:           {'llm' if llm_mode else 'default'}")
+    print(f"Gitignore:      {'ignored' if ignore_gitignore else 'used'}")
+    print(f"Markdown:       {'excluded' if no_markdown else 'allowed (README/docs only)'}")
+    print(f"Root .env:      included")
+    print(f"Nested .env:    {'included' if include_nested_env else 'excluded'}")
+    print(f"Files included: {len(files)}")
+    print(f"Files skipped:  {stats.skipped_files}")
+    print(f"Dirs skipped:   {stats.skipped_dirs}")
+    print(f"Input size:     {format_size(total_input_size)}")
+    print()
+
+
+def print_important_checks(root: Path, files: list[Path], llm_mode: bool, no_markdown: bool) -> None:
+    existing_rel_paths = {normalize_rel(file.relative_to(root)) for file in files}
+    existing_dirs = collect_existing_dirs(root=root, files=files)
+
+    print("Important paths check")
+    print("---------------------")
+
+    for check in IMPORTANT_CHECKS:
+        exists = check in existing_rel_paths or check in existing_dirs
+        if exists:
+            marker = "OK  "
+        elif is_expected_missing_in_mode(check, llm_mode=llm_mode, no_markdown=no_markdown):
+            marker = "SKIP"
+        else:
+            marker = "MISS"
+        print(f"{marker} {check}")
+
+    accidental_artifacts = [
+        rel_path
+        for rel_path in sorted(existing_rel_paths)
+        if "__pycache__/" in rel_path
+        or rel_path.endswith(".pyc")
+        or ".pyc." in rel_path
+        or rel_path.endswith(".pyo")
+    ]
+
+    if accidental_artifacts:
+        print()
+        print("WARNING: Python cache artifacts would be archived:")
+        for rel_path in accidental_artifacts[:20]:
+            print(f"WARN {rel_path}")
+        if len(accidental_artifacts) > 20:
+            print(f"WARN ... and {len(accidental_artifacts) - 20} more")
+
+    print()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1100,130 +1161,52 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     output_path = get_output_path(root=root, output_arg=args.output)
-    archives_dir = root / "archives"
-
     max_file_size_bytes = args.max_file_size_mb * 1024 * 1024
 
     gitignore_rules: list[IgnoreRule] = []
-
     if not args.ignore_gitignore:
         gitignore_rules = load_gitignore_rules(root)
+
+    options = ArchiveOptions(
+        max_file_size_bytes=max_file_size_bytes,
+        no_markdown=effective_no_markdown,
+        llm_mode=llm_mode,
+        include_nested_env=args.include_nested_env,
+    )
 
     files, stats = iter_project_files(
         root=root,
         gitignore_rules=gitignore_rules,
-        max_file_size_bytes=max_file_size_bytes,
-        no_markdown=effective_no_markdown,
-        llm_mode=llm_mode,
+        options=options,
         verbose=args.verbose,
     )
 
-    output_path_resolved = output_path.resolve()
+    files = filter_output_and_archives(root=root, output_path=output_path, files=files)
 
+    print_summary(
+        root=root,
+        output_path=output_path,
+        dry_run=args.dry_run,
+        llm_mode=llm_mode,
+        no_markdown=effective_no_markdown,
+        ignore_gitignore=args.ignore_gitignore,
+        include_nested_env=args.include_nested_env,
+        files=files,
+        stats=stats,
+    )
 
-
-
-    filtered_files: list[Path] = []
-
-    for file in files:
-        try:
-            rel_parts = file.relative_to(root).parts
-        except ValueError:
-            continue
-
-        if file.resolve() == output_path_resolved:
-            continue
-
-        if rel_parts and rel_parts[0] == "archives":
-            continue
-
-        filtered_files.append(file)
-
-    files = filtered_files
-
-    total_input_size = sum(file.stat().st_size for file in files if file.exists())
-
-    print()
-    print("Archive summary")
-    print("---------------")
-    print(f"Root:           {root}")
-    print(f"Output:         {output_path}")
-    print(f"Dry run:        {args.dry_run}")
-    print(f"Mode:           {'llm' if llm_mode else 'default'}")
-    print(f"Gitignore:      {'ignored' if args.ignore_gitignore else 'used'}")
-    print(f"Markdown:       {'excluded' if effective_no_markdown else 'allowed (README/docs only)'}")
-    print(f"Files included: {len(files)}")
-    print(f"Files skipped:  {stats.skipped_files}")
-    print(f"Dirs skipped:   {stats.skipped_dirs}")
-    print(f"Input size:     {format_size(total_input_size)}")
-    print()
-
-    important_checks = [
-        ".env",
-        "README.md",
-        "docs",
-        "backend/app/db/models",
-        "requirements.txt",
-        "backend/requirements.txt",
-        "pyproject.toml",
-        "frontend/package.json",
-        "frontend/tsconfig.json",
-        "frontend/vite.config.js",
-        ".github/workflows",
-        "scripts/nf-server.ps1",
-        "tests/backend/conftest.py",
-        "rag/app/main.py",
-        "run_all.bat",
-        "scripts/run_backend.bat",
-        "scripts/run_worker.bat",
-        "scripts/run_qwen_worker.bat",
-        "scripts/run_frontend.bat",
-        "parser_alpha/run_parser.py",
-        "qwen_service/service.py",
-        "rag/app",
-        "alembic",
-        "backend/alembic",
-    ]
-
-    existing_rel_paths = {normalize_rel(file.relative_to(root)) for file in files}
-    existing_dirs = collect_existing_dirs(root=root, files=files)
-
-    print("Important paths check")
-    print("---------------------")
-
-    for check in important_checks:
-        exists = check in existing_rel_paths or check in existing_dirs
-        if exists:
-            marker = "OK "
-        elif is_expected_missing_in_mode(check, llm_mode=llm_mode, no_markdown=effective_no_markdown):
-            marker = "SKIP"
-        else:
-            marker = "MISS"
-        print(f"{marker} {check}")
-
-    accidental_artifacts = [
-        rel_path
-        for rel_path in sorted(existing_rel_paths)
-        if "__pycache__/" in rel_path
-        or rel_path.endswith(".pyc")
-        or rel_path.endswith(".pyo")
-    ]
-    if accidental_artifacts:
-        print()
-        print("WARNING: Python cache artifacts would be archived:")
-        for rel_path in accidental_artifacts[:20]:
-            print(f"WARN {rel_path}")
-        if len(accidental_artifacts) > 20:
-            print(f"WARN ... and {len(accidental_artifacts) - 20} more")
-
-    print()
+    print_important_checks(
+        root=root,
+        files=files,
+        llm_mode=llm_mode,
+        no_markdown=effective_no_markdown,
+    )
 
     if args.dry_run:
         print("Dry-run finished. Archive was not created.")
         return 0
 
     try:
-        archives_dir.mkdir(parents=True, exist_ok=True)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         make_zip(root=root, output_path=output_path, files=files)
     except OSError as exc:

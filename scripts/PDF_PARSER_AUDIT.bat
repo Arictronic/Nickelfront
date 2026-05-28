@@ -4,6 +4,10 @@ setlocal
 set "PROJECT_ROOT=%~dp0.."
 for %%I in ("%PROJECT_ROOT%") do set "PROJECT_ROOT=%%~fI"
 
+if exist "%PROJECT_ROOT%\scripts\load_env.bat" (
+  call "%PROJECT_ROOT%\scripts\load_env.bat" "%PROJECT_ROOT%\.env"
+)
+
 set "PY=%PROJECT_ROOT%\.venv\Scripts\python.exe"
 set "AUDIT=%PROJECT_ROOT%\backend\scripts\pdf_parser_batch_audit.py"
 set "VERIFY=%PROJECT_ROOT%\backend\scripts\verify_pdf_parser_patch.py"

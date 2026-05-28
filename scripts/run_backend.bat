@@ -1,7 +1,22 @@
 @echo off
-setlocal
+chcp 65001 >nul
+setlocal EnableExtensions
 set "ROOT=%~dp0.."
+for %%I in ("%ROOT%") do set "ROOT=%%~fI"
 cd /d "%ROOT%"
+set "NF_CONSOLE_STARTED_AT=%DATE% %TIME%"
+title Nickelfront Backend
+
+echo ============================================================
+echo Nickelfront Backend console
+echo Console started at: %NF_CONSOLE_STARTED_AT%
+echo Project root: %ROOT%
+echo ============================================================
+
+if exist "%ROOT%\scripts\load_env.bat" (
+  call "%ROOT%\scripts\load_env.bat" "%ROOT%\.env"
+  if errorlevel 1 exit /b 1
+)
 
 if exist .venv\Scripts\activate.bat (
   call .venv\Scripts\activate.bat
@@ -9,35 +24,24 @@ if exist .venv\Scripts\activate.bat (
   call venv\Scripts\activate.bat
 ) else (
   echo Python virtual environment not found.
-  echo Create it from project root:
-  echo   python -m venv .venv
-  echo   .venv\Scripts\activate
-  echo   pip install -r requirements.txt
   exit /b 1
 )
 
-rem Fast local startup: by default do not use uvicorn --reload.
-rem --reload starts an extra WatchFiles reloader process and imports backend in a
-rem child process, which is slow on Windows. If you need auto-reload, run:
-rem   set NICKELFRONT_BACKEND_RELOAD=1
-rem   scripts\run_backend.bat
-if not defined NICKELFRONT_BACKEND_RELOAD set "NICKELFRONT_BACKEND_RELOAD=0"
-
 if /I not "%SKIP_BACKEND_MIGRATIONS%"=="1" (
   echo Applying Alembic migrations...
+  echo Migrations started at: %DATE% %TIME%
   python backend\apply_migrations.py
   if errorlevel 1 (
     echo Alembic migrations failed. Backend will not start.
     exit /b 1
   )
-)
-
-if exist "%ROOT%\scripts\load_env.bat" (
-  call "%ROOT%\scripts\load_env.bat" "%ROOT%\.env"
+  echo Migrations finished at: %DATE% %TIME%
 )
 
 set "NICKELFRONT_SERVICE_NAME=backend_api"
 if not defined BACKEND_API_LOG_FILE if defined LOG_FILE set "BACKEND_API_LOG_FILE=%LOG_FILE%"
 if defined BACKEND_API_LOG_FILE echo Logs: %BACKEND_API_LOG_FILE%
+echo Backend server command started at: %DATE% %TIME%
+echo ============================================================
 python backend\start_server.py
 endlocal

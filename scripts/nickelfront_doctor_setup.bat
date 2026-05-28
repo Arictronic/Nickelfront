@@ -2,11 +2,11 @@
 chcp 65001 >nul
 setlocal EnableExtensions EnableDelayedExpansion
 
-title Nickelfront Doctor + Setup FIXED v21
+title Nickelfront Doctor + Setup FIXED v23
 
 rem ============================================================================
 rem Nickelfront Doctor + Setup
-rem VERSION: 2026-05-22.23-BACKEND-RAG-NPM-CMD
+rem VERSION: 2026-05-28.02-INSTALL-ORCHESTRATION-FIX
 rem
 rem Главное в этой версии:
 rem   1) Читает реальные DATABASE_URL и REDIS_URL из .env.
@@ -15,10 +15,12 @@ rem   3) Для миграций использует backend\apply_migrations.p
 rem   4) По умолчанию работает с .venv, как run_backend.bat/run_worker.bat/run_migrations.bat.
 rem   5) RAG обслуживается backend; legacy standalone rag\requirements.txt не ставится и не используется.
 rem   6) Не закрывает окно при ошибке/раннем выходе, пишет логи в logs\run.
+rem   7) v22: убраны хрупкие inline python/node команды, которые ломались в cmd.exe.
+rem   8) v23: единый env-loader, constraints, Redis helper, frontend full-check, health-gated run_all.
 rem
 rem ============================================================================
 
-set "SCRIPT_VERSION=2026-05-22.23-BACKEND-RAG-NPM-CMD"
+set "SCRIPT_VERSION=2026-05-28.02-INSTALL-ORCHESTRATION-FIX"
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "PROJECT_ROOT="
@@ -38,6 +40,7 @@ set "VENV_PY="
 set "AUTO_YES=1"
 set "SKIP_INSTALL=0"
 set "RUN_FRONTEND_BUILD=0"
+set "FULL_CHECK=0"
 set "START_APP=1"
 set "FORCE_INSTALL=0"
 set "RECREATE_VENV=0"
@@ -49,18 +52,7 @@ set "LATEST_LOG_FILE="
 set "LATEST_ERROR_FILE="
 set "UNLOCK_RUN=0"
 
-for %%A in (%*) do (
-    if /I "%%~A"=="--yes" set "AUTO_YES=1"
-    if /I "%%~A"=="-y" set "AUTO_YES=1"
-    if /I "%%~A"=="--check-only" set "SKIP_INSTALL=1"
-    if /I "%%~A"=="--ask" set "AUTO_YES=0"
-    if /I "%%~A"=="--frontend-build" set "RUN_FRONTEND_BUILD=1"
-    if /I "%%~A"=="--no-start-app" set "START_APP=0"
-    if /I "%%~A"=="--no-run-all" set "START_APP=0"
-    if /I "%%~A"=="--force-install" set "FORCE_INSTALL=1"
-    if /I "%%~A"=="--recreate-venv" set "RECREATE_VENV=1"
-    if /I "%%~A"=="--unlock" set "UNLOCK_RUN=1"
-)
+call :parse_args %*
 
 call :detect_project_root
 if not defined PROJECT_ROOT (
@@ -140,6 +132,25 @@ call :setup_project
 if "%FATAL%"=="1" goto finish_error
 
 goto finish_ok
+
+:parse_args
+rem Разбор аргументов через SHIFT безопаснее, чем FOR %%A IN (%*):
+rem FOR ломается, если в аргументах/путях случайно есть спецсимволы cmd.
+if "%~1"=="" exit /b 0
+if /I "%~1"=="--yes" set "AUTO_YES=1"
+if /I "%~1"=="-y" set "AUTO_YES=1"
+if /I "%~1"=="--check-only" set "SKIP_INSTALL=1"
+if /I "%~1"=="--ask" set "AUTO_YES=0"
+if /I "%~1"=="--frontend-build" set "RUN_FRONTEND_BUILD=1"
+if /I "%~1"=="--full-check" set "FULL_CHECK=1"
+if /I "%~1"=="--full-check" set "RUN_FRONTEND_BUILD=1"
+if /I "%~1"=="--no-start-app" set "START_APP=0"
+if /I "%~1"=="--no-run-all" set "START_APP=0"
+if /I "%~1"=="--force-install" set "FORCE_INSTALL=1"
+if /I "%~1"=="--recreate-venv" set "RECREATE_VENV=1"
+if /I "%~1"=="--unlock" set "UNLOCK_RUN=1"
+shift
+goto parse_args
 
 :banner
 echo ==============================================================================
@@ -309,7 +320,7 @@ if %BEST_PY_MINOR% LSS 10 (
     call :warn "Python %BEST_PY_VERSION% староват. Для проекта лучше 3.13/3.12/3.11/3.10."
 )
 if "%PY13_PROJECT%"=="1" if not "%BEST_PY_MINOR%"=="13" (
-    call :warn "requirements.txt подписан как Python 3.13+. Выбран %BEST_PY_VERSION%; если pip упадёт, поставь Python 3.13."
+    call :warn "requirements.txt подписан как Python 3.13+. Выбран %BEST_PY_VERSION%. Python 3.14 допускается, если зависимости ставятся и проект запускается; базовый рекомендуемый вариант остаётся Python 3.13."
 )
 exit /b 0
 
@@ -318,7 +329,18 @@ set "CAND_CMD=%~1"
 set "CAND_KIND=%~2"
 set "CAND_SCORE=%~3"
 set "PYINFO="
-for /f "usebackq delims=" %%A in (`%CAND_CMD% -c "import sys,platform;print(str(sys.version_info.major)+'.'+str(sys.version_info.minor)+'.'+str(sys.version_info.micro)+';'+sys.executable+';'+platform.architecture()[0])" 2^>nul`) do set "PYINFO=%%A"
+set "PYINFO_FILE=%TEMP%\nf_pyinfo_%RANDOM%_%RANDOM%.txt"
+set "PYPROBE_FILE=%TEMP%\nf_pyprobe_%RANDOM%_%RANDOM%.py"
+call :write_python_probe "%PYPROBE_FILE%"
+%CAND_CMD% "%PYPROBE_FILE%" >"%PYINFO_FILE%" 2>nul
+if errorlevel 1 (
+    del "%PYINFO_FILE%" >nul 2>nul
+    del "%PYPROBE_FILE%" >nul 2>nul
+    exit /b 0
+)
+set /p PYINFO=<"%PYINFO_FILE%"
+del "%PYINFO_FILE%" >nul 2>nul
+del "%PYPROBE_FILE%" >nul 2>nul
 if not defined PYINFO exit /b 0
 call :register_python "%CAND_CMD%" "%CAND_KIND%" "%CAND_SCORE%" "%PYINFO%"
 exit /b 0
@@ -329,9 +351,26 @@ set "CAND_KIND=%~2"
 set "CAND_SCORE=%~3"
 if not exist "%CAND_PATH%" exit /b 0
 set "PYINFO="
-for /f "usebackq delims=" %%A in (`"%CAND_PATH%" -c "import sys,platform;print(str(sys.version_info.major)+'.'+str(sys.version_info.minor)+'.'+str(sys.version_info.micro)+';'+sys.executable+';'+platform.architecture()[0])" 2^>nul`) do set "PYINFO=%%A"
+set "PYINFO_FILE=%TEMP%\nf_pyinfo_%RANDOM%_%RANDOM%.txt"
+set "PYPROBE_FILE=%TEMP%\nf_pyprobe_%RANDOM%_%RANDOM%.py"
+call :write_python_probe "%PYPROBE_FILE%"
+"%CAND_PATH%" "%PYPROBE_FILE%" >"%PYINFO_FILE%" 2>nul
+if errorlevel 1 (
+    del "%PYINFO_FILE%" >nul 2>nul
+    del "%PYPROBE_FILE%" >nul 2>nul
+    exit /b 0
+)
+set /p PYINFO=<"%PYINFO_FILE%"
+del "%PYINFO_FILE%" >nul 2>nul
+del "%PYPROBE_FILE%" >nul 2>nul
 if not defined PYINFO exit /b 0
 call :register_python "%CAND_PATH%" "%CAND_KIND%" "%CAND_SCORE%" "%PYINFO%" "PATH"
+exit /b 0
+
+:write_python_probe
+set "OUT_PY=%~1"
+>"%OUT_PY%" echo import sys, platform
+>>"%OUT_PY%" echo print(str(sys.version_info.major) + "." + str(sys.version_info.minor) + "." + str(sys.version_info.micro) + ";" + sys.executable + ";" + platform.architecture()[0])
 exit /b 0
 
 :register_python
@@ -399,7 +438,11 @@ exit /b 0
 :check_project_files
 if exist "requirements.txt" (call :ok "requirements.txt найден.") else call :bad "requirements.txt не найден."
 if exist "pyproject.toml" (call :ok "pyproject.toml найден.") else call :warn "pyproject.toml не найден."
-if exist "parser_alpha\requirements.txt" (call :ok "parser_alpha\requirements.txt найден.") else call :warn "parser_alpha\requirements.txt не найден. Пропущу parser_alpha зависимости."
+if exist "parser_alpha\requirements.txt" (
+    call :warn "parser_alpha\requirements.txt найден, но отдельная установка parser-зависимостей отключена: зависимости объединены в корневой requirements.txt."
+) else (
+    call :ok "parser_alpha зависимости объединены в корневой requirements.txt; отдельный parser_alpha\requirements.txt не нужен."
+)
 if exist "rag\requirements.txt" (
     call :info "Backend-only RAG: legacy rag\requirements.txt найден, но не используется и не ставится."
 ) else (
@@ -609,14 +652,17 @@ exit /b 0
 if not exist "frontend\package.json" exit /b 0
 if exist "frontend\node_modules" (call :ok "frontend\node_modules найден.") else call :warn "frontend\node_modules не найден. Нужен npm install/npm ci."
 
+call :write_frontend_deps_check_js "%TEMP%\nf_frontend_deps_check_%RANDOM%_%RANDOM%.js" "FRONT_CHECK_JS"
 pushd frontend >nul
-node -e "const fs=require('fs'), path=require('path'); const p=require('./package.json'); if (p.scripts === undefined) process.exit(2); const deps=Object.assign({}, p.dependencies||{}, p.devDependencies||{}); const miss=Object.keys(deps).filter(n=>fs.existsSync(path.join(process.cwd(),'node_modules',...n.split('/'),'package.json'))===false); if(miss.length){console.error('missing frontend deps: '+miss.join(', ')); process.exit(3)}; console.log('package.json/deps ok: '+Object.keys(deps).length)" >>"%LOG_FILE%" 2>>&1
-if errorlevel 1 (
+node "%FRONT_CHECK_JS%" >>"%LOG_FILE%" 2>>&1
+set "FRONT_CHECK_RC=%ERRORLEVEL%"
+popd >nul
+del "%FRONT_CHECK_JS%" >nul 2>nul
+if not "%FRONT_CHECK_RC%"=="0" (
     call :warn "frontend зависимости не полностью проверены или часть отсутствует. Установка попробует исправить. Детали в логе: %LOG_FILE%."
 ) else (
     call :ok "frontend\package.json и прямые зависимости быстро проверены."
 )
-popd >nul
 exit /b 0
 
 :check_services
@@ -666,6 +712,7 @@ exit /b %ERRORLEVEL%
 if exist "requirements.txt" (
     findstr /I /C:"torch" "requirements.txt" >nul 2>nul && call :info "В requirements есть torch: setuptools держим ниже 82, чтобы не повторять конфликт старых сборок."
     findstr /I /C:"chromadb" "requirements.txt" >nul 2>nul && call :ok "Корневой requirements содержит chromadb для backend-RAG."
+    if exist "requirements-constraints.txt" (call :ok "requirements-constraints.txt найден: установка будет использовать стабильные верхние границы зависимостей.") else call :warn "requirements-constraints.txt не найден: pip может подтянуть слишком новые зависимости."
 )
 if exist "rag\requirements.txt" (
     call :info "Backend-only RAG: legacy rag\requirements.txt не ставится и не нужен для обычного запуска."
@@ -784,6 +831,45 @@ if errorlevel 1 (
 call :ok "%TARGET_VENV% создан и проверен."
 exit /b 0
 
+
+:capture_python_version
+set "CPV_OUT=%~1"
+set "%CPV_OUT%="
+if not exist "%VENV_PY%" exit /b 1
+if not exist "%RUN_ROOT%\tmp" mkdir "%RUN_ROOT%\tmp" >nul 2>nul
+set "CPV_FILE=%RUN_ROOT%\tmp\nf_py_version_%RUN_ID%_%RANDOM%.txt"
+"%VENV_PY%" -c "import sys; print(str(sys.version_info.major)+'.'+str(sys.version_info.minor)+'.'+str(sys.version_info.micro))" >"%CPV_FILE%" 2>>"%LOG_FILE%"
+if errorlevel 1 (
+    del "%CPV_FILE%" >nul 2>nul
+    exit /b 1
+)
+set /p CPV_VALUE=<"%CPV_FILE%"
+del "%CPV_FILE%" >nul 2>nul
+if defined CPV_VALUE set "%CPV_OUT%=%CPV_VALUE%"
+set "CPV_FILE="
+set "CPV_VALUE="
+exit /b 0
+
+:capture_python_module_version
+set "CPMV_MODULE=%~1"
+set "CPMV_OUT=%~2"
+set "%CPMV_OUT%="
+if not exist "%VENV_PY%" exit /b 1
+if not exist "%RUN_ROOT%\tmp" mkdir "%RUN_ROOT%\tmp" >nul 2>nul
+set "CPMV_FILE=%RUN_ROOT%\tmp\nf_py_module_%RUN_ID%_%RANDOM%.txt"
+"%VENV_PY%" -c "import importlib.metadata as m, sys; print(m.version(sys.argv[1]))" "%CPMV_MODULE%" >"%CPMV_FILE%" 2>>"%LOG_FILE%"
+if errorlevel 1 (
+    del "%CPMV_FILE%" >nul 2>nul
+    exit /b 1
+)
+set /p CPMV_VALUE=<"%CPMV_FILE%"
+del "%CPMV_FILE%" >nul 2>nul
+if defined CPMV_VALUE set "%CPMV_OUT%=%CPMV_VALUE%"
+set "CPMV_FILE="
+set "CPMV_VALUE="
+set "CPMV_MODULE="
+exit /b 0
+
 :install_python_deps
 if not exist "%VENV_PY%" (
     call :bad "Python внутри venv не найден: %VENV_PY%"
@@ -799,10 +885,11 @@ if not "%FORCE_INSTALL%"=="1" (
     )
 )
 
-call :info "Обновляю pip/wheel и фиксирую setuptools ниже 82..."
+call :info "Обновляю pip/wheel и применяю constraints для стабильной установки..."
 if not exist "%RUN_ROOT%\tmp" mkdir "%RUN_ROOT%\tmp" >nul 2>nul
 set "NF_PIP_CONSTRAINTS=%RUN_ROOT%\tmp\pip_constraints_setuptools_lt82.txt"
 >"%NF_PIP_CONSTRAINTS%" echo setuptools^<82
+if exist "requirements-constraints.txt" set "NF_PIP_CONSTRAINTS=requirements-constraints.txt"
 call :run_logged "%VENV_PY%" -m pip install --upgrade pip wheel setuptools -c "%NF_PIP_CONSTRAINTS%"
 if errorlevel 1 (
     call :bad "Ошибка обновления pip/wheel/setuptools."
@@ -813,7 +900,7 @@ if errorlevel 1 (
 
 if exist "requirements.txt" (
     call :info "Ставлю корневые Python-зависимости из requirements.txt..."
-    call :run_logged "%VENV_PY%" -m pip install --prefer-binary -r requirements.txt
+    call :run_logged "%VENV_PY%" -m pip install --prefer-binary -r requirements.txt -c "%NF_PIP_CONSTRAINTS%"
     if errorlevel 1 (
         call :bad "Ошибка установки requirements.txt. Подробности в текущем логе и файле последней ошибки: %LOG_FILE% / %ERROR_FILE%."
         call :save_last_error "Ошибка установки requirements.txt"
@@ -822,16 +909,7 @@ if exist "requirements.txt" (
     ) else call :ok "requirements.txt установлен/проверен."
 )
 
-if exist "parser_alpha\requirements.txt" (
-    call :info "Ставлю parser_alpha\requirements.txt..."
-    call :run_logged "%VENV_PY%" -m pip install --prefer-binary -r parser_alpha\requirements.txt
-    if errorlevel 1 (
-        call :bad "Ошибка установки parser_alpha\requirements.txt."
-        call :save_last_error "Ошибка установки parser_alpha requirements"
-        set "FATAL=1"
-        exit /b 1
-    ) else call :ok "parser_alpha зависимости установлены/проверены."
-)
+call :info "parser_alpha\requirements.txt не устанавливается отдельно: parser-зависимости объединены в корневой requirements.txt."
 
 if exist "qwen_service\service.py" (
     call :info "Проверяю импорт qwen_service..."
@@ -853,19 +931,18 @@ if not exist "%STATE_DIR%" mkdir "%STATE_DIR%" >nul 2>nul
 
 call :hash_file "requirements.txt" "ROOT_REQ_HASH"
 if errorlevel 1 set "ROOT_REQ_HASH=NO_REQUIREMENTS"
-call :hash_file "parser_alpha\requirements.txt" "PARSER_REQ_HASH"
-if errorlevel 1 set "PARSER_REQ_HASH=NO_PARSER_REQUIREMENTS"
+call :hash_file "requirements-constraints.txt" "CONSTRAINTS_HASH"
+if errorlevel 1 set "CONSTRAINTS_HASH=NO_CONSTRAINTS"
 
-set "CURRENT_PY_ID="
-for /f "delims=" %%A in ('"%VENV_PY%" -c "import sys; print(str(sys.version_info.major)+'.'+str(sys.version_info.minor)+'.'+str(sys.version_info.micro))" 2^>nul') do set "CURRENT_PY_ID=%%A"
+call :capture_python_version "CURRENT_PY_ID"
 if not defined CURRENT_PY_ID exit /b 1
 
 call :read_marker "%STATE_DIR%\python_version.txt" "MARK_PY_ID"
 call :read_marker "%STATE_DIR%\requirements.sha256" "MARK_ROOT_REQ_HASH"
-call :read_marker "%STATE_DIR%\parser_alpha_requirements.sha256" "MARK_PARSER_REQ_HASH"
+call :read_marker "%STATE_DIR%\requirements_constraints.sha256" "MARK_CONSTRAINTS_HASH"
 
 set "NO_PY_MARKERS=0"
-if not exist "%STATE_DIR%\python_version.txt" if not exist "%STATE_DIR%\requirements.sha256" if not exist "%STATE_DIR%\parser_alpha_requirements.sha256" set "NO_PY_MARKERS=1"
+if not exist "%STATE_DIR%\python_version.txt" if not exist "%STATE_DIR%\requirements.sha256" if not exist "%STATE_DIR%\requirements_constraints.sha256" set "NO_PY_MARKERS=1"
 
 "%VENV_PY%" -c "import fastapi,uvicorn,sqlalchemy,alembic,pydantic,redis,celery,asyncpg; print('python imports ok')" >>"%LOG_FILE%" 2>>&1
 if errorlevel 1 exit /b 1
@@ -879,20 +956,20 @@ if "%NO_PY_MARKERS%"=="1" (
 
 if not "%MARK_PY_ID%"=="%CURRENT_PY_ID%" exit /b 1
 if not "%MARK_ROOT_REQ_HASH%"=="%ROOT_REQ_HASH%" exit /b 1
-if not "%MARK_PARSER_REQ_HASH%"=="%PARSER_REQ_HASH%" exit /b 1
+if not "%MARK_CONSTRAINTS_HASH%"=="%CONSTRAINTS_HASH%" exit /b 1
 exit /b 0
 
 :mark_python_deps_current
 if not exist "%STATE_DIR%" mkdir "%STATE_DIR%" >nul 2>nul
 call :hash_file "requirements.txt" "ROOT_REQ_HASH"
 if errorlevel 1 set "ROOT_REQ_HASH=NO_REQUIREMENTS"
-call :hash_file "parser_alpha\requirements.txt" "PARSER_REQ_HASH"
-if errorlevel 1 set "PARSER_REQ_HASH=NO_PARSER_REQUIREMENTS"
-set "CURRENT_PY_ID="
-for /f "delims=" %%A in ('"%VENV_PY%" -c "import sys; print(str(sys.version_info.major)+'.'+str(sys.version_info.minor)+'.'+str(sys.version_info.micro))" 2^>nul') do set "CURRENT_PY_ID=%%A"
+call :hash_file "requirements-constraints.txt" "CONSTRAINTS_HASH"
+if errorlevel 1 set "CONSTRAINTS_HASH=NO_CONSTRAINTS"
+call :capture_python_version "CURRENT_PY_ID"
+if not defined CURRENT_PY_ID set "CURRENT_PY_ID=UNKNOWN"
 >"%STATE_DIR%\python_version.txt" echo %CURRENT_PY_ID%
 >"%STATE_DIR%\requirements.sha256" echo %ROOT_REQ_HASH%
->"%STATE_DIR%\parser_alpha_requirements.sha256" echo %PARSER_REQ_HASH%
+>"%STATE_DIR%\requirements_constraints.sha256" echo %CONSTRAINTS_HASH%
 exit /b 0
 
 :install_playwright_browsers
@@ -900,8 +977,7 @@ if not exist "%VENV_PY%" exit /b 0
 "%VENV_PY%" -c "import playwright" >nul 2>nul
 if errorlevel 1 exit /b 0
 
-set "CURRENT_PLAYWRIGHT_VER="
-for /f "delims=" %%A in ('"%VENV_PY%" -c "import importlib.metadata as m; print(m.version('playwright'))" 2^>nul') do set "CURRENT_PLAYWRIGHT_VER=%%A"
+call :capture_python_module_version "playwright" "CURRENT_PLAYWRIGHT_VER"
 call :read_marker "%STATE_DIR%\playwright_chromium_version.txt" "MARK_PLAYWRIGHT_VER"
 if not "%FORCE_INSTALL%"=="1" if defined CURRENT_PLAYWRIGHT_VER if "%MARK_PLAYWRIGHT_VER%"=="%CURRENT_PLAYWRIGHT_VER%" (
     call :ok "Playwright chromium уже был установлен для playwright %CURRENT_PLAYWRIGHT_VER%. Повторная проверка пропущена."
@@ -958,7 +1034,7 @@ if exist "package-lock.json" (
 )
 
 if "%RUN_FRONTEND_BUILD%"=="1" (
-    call :info "Запускаю npm run build по флагу --frontend-build..."
+    call :info "Запускаю npm run build по флагу --frontend-build/--full-check..."
     call :run_logged npm run build
     if errorlevel 1 (
         popd >nul
@@ -969,6 +1045,7 @@ if "%RUN_FRONTEND_BUILD%"=="1" (
 )
 popd >nul
 call :mark_frontend_deps_current
+if not "%RUN_FRONTEND_BUILD%"=="1" call :info "Frontend build не запускался. Для полной проверки используй --frontend-build или --full-check."
 call :ok "Frontend зависимости установлены/проверены."
 exit /b 0
 
@@ -981,10 +1058,12 @@ if errorlevel 1 set "FRONT_LOCK_HASH=NO_PACKAGE_LOCK"
 call :read_marker "%STATE_DIR%\frontend_package.sha256" "MARK_FRONT_PKG_HASH"
 call :read_marker "%STATE_DIR%\frontend_lock.sha256" "MARK_FRONT_LOCK_HASH"
 
+call :write_frontend_deps_check_js "%TEMP%\nf_frontend_deps_check_%RANDOM%_%RANDOM%.js" "FRONT_CHECK_JS"
 pushd frontend >nul
-node -e "const fs=require('fs'), path=require('path'); const p=require('./package.json'); const deps=Object.assign({}, p.dependencies||{}, p.devDependencies||{}); const miss=Object.keys(deps).filter(n=>fs.existsSync(path.join(process.cwd(),'node_modules',...n.split('/'),'package.json'))===false); if(miss.length){console.error('missing frontend deps: '+miss.join(', ')); process.exit(1)}; console.log('frontend direct deps ok: '+Object.keys(deps).length)" >>"%LOG_FILE%" 2>>&1
+node "%FRONT_CHECK_JS%" >>"%LOG_FILE%" 2>>&1
 set "FRONT_NODE_RC=%ERRORLEVEL%"
 popd >nul
+del "%FRONT_CHECK_JS%" >nul 2>nul
 if not "%FRONT_NODE_RC%"=="0" exit /b 1
 
 if not exist "%STATE_DIR%\frontend_package.sha256" if not exist "%STATE_DIR%\frontend_lock.sha256" (
@@ -994,6 +1073,18 @@ if not exist "%STATE_DIR%\frontend_package.sha256" if not exist "%STATE_DIR%\fro
 
 if not "%MARK_FRONT_PKG_HASH%"=="%FRONT_PKG_HASH%" exit /b 1
 if not "%MARK_FRONT_LOCK_HASH%"=="%FRONT_LOCK_HASH%" exit /b 1
+exit /b 0
+
+:write_frontend_deps_check_js
+set "OUT_JS=%~1"
+set "%~2=%OUT_JS%"
+>"%OUT_JS%" echo const fs = require('fs');
+>>"%OUT_JS%" echo const path = require('path');
+>>"%OUT_JS%" echo const p = require(path.join(process.cwd(), 'package.json'));
+>>"%OUT_JS%" echo const deps = Object.assign({}, p.dependencies ^|^| {}, p.devDependencies ^|^| {});
+>>"%OUT_JS%" echo const miss = Object.keys(deps).filter((n) =^> !fs.existsSync(path.join(process.cwd(), 'node_modules', ...n.split('/'), 'package.json')));
+>>"%OUT_JS%" echo if (miss.length) { console.error('missing frontend deps: ' + miss.join(', ')); process.exit(1); }
+>>"%OUT_JS%" echo console.log('frontend direct deps ok: ' + Object.keys(deps).length);
 exit /b 0
 
 :mark_frontend_deps_current
@@ -1007,53 +1098,43 @@ if errorlevel 1 set "FRONT_LOCK_HASH=NO_PACKAGE_LOCK"
 exit /b 0
 
 :ensure_redis_launcher
-if exist "run_redis.bat" exit /b 0
-if exist "redis\redis-server.exe" exit /b 0
-call :warn "run_redis.bat не найден. Создаю локальный запускатор Redis с автоскачиванием portable Redis."
->"run_redis.bat" echo @echo off
->>"run_redis.bat" echo setlocal
->>"run_redis.bat" echo cd /d %%~dp0
->>"run_redis.bat" echo set "REDIS_PORT=%REDIS_PORT%"
->>"run_redis.bat" echo if exist ".env" ^(
->>"run_redis.bat" echo   for /f "usebackq tokens=1,* delims==" %%%%A in ^(`findstr /b /c:"REDIS_URL=" ".env"`^) do set "REDIS_URL=%%%%B"
->>"run_redis.bat" echo ^)
->>"run_redis.bat" echo if defined REDIS_URL ^(
->>"run_redis.bat" echo   for /f "tokens=3 delims=:/ " %%%%A in ^("%%REDIS_URL%%"^) do set "REDIS_PORT=%%%%A"
->>"run_redis.bat" echo ^)
->>"run_redis.bat" echo set "REDIS_EXE=%%~dp0redis\redis-server.exe"
->>"run_redis.bat" echo if not exist "%%REDIS_EXE%%" ^(
->>"run_redis.bat" echo   echo Redis server not found. Downloading into %%~dp0redis\ ...
->>"run_redis.bat" echo   powershell -NoProfile -ExecutionPolicy Bypass -Command "^& { $ErrorActionPreference = 'Stop'; $root = $PWD.Path; $zip = Join-Path $root 'redis.zip'; $dest = Join-Path $root 'redis'; $url = 'https://github.com/tporadowski/redis/releases/download/v5.0.14.1/Redis-x64-5.0.14.1.zip'; if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest ^| Out-Null }; Invoke-WebRequest -Uri $url -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dest -Force; Remove-Item $zip -Force }"
->>"run_redis.bat" echo   if not exist "%%REDIS_EXE%%" ^(
->>"run_redis.bat" echo     echo Failed to download Redis. Check network or URL.
->>"run_redis.bat" echo     pause
->>"run_redis.bat" echo     exit /b 1
->>"run_redis.bat" echo   ^)
->>"run_redis.bat" echo ^)
->>"run_redis.bat" echo "%%REDIS_EXE%%" --port %%REDIS_PORT%% --dir "%%~dp0redis" --bind 127.0.0.1
->>"run_redis.bat" echo endlocal
-if exist "run_redis.bat" (call :ok "run_redis.bat создан.") else call :warn "Не удалось создать run_redis.bat. Redis нужно будет запускать вручную."
+if exist "run_redis.bat" (
+    call :ok "run_redis.bat найден."
+) else (
+    call :warn "run_redis.bat не найден. Создаю wrapper на scripts\run_redis.bat."
+    >"run_redis.bat" echo @echo off
+    >>"run_redis.bat" echo setlocal EnableExtensions
+    >>"run_redis.bat" echo cd /d %%~dp0
+    >>"run_redis.bat" echo if exist "scripts\run_redis.bat" ^(
+    >>"run_redis.bat" echo   call "scripts\run_redis.bat" %%*
+    >>"run_redis.bat" echo   exit /b %%ERRORLEVEL%%
+    >>"run_redis.bat" echo ^)
+    >>"run_redis.bat" echo echo [ERROR] scripts\run_redis.bat was not found.
+    >>"run_redis.bat" echo exit /b 1
+)
+if exist "scripts\run_redis.bat" (call :ok "scripts\run_redis.bat найден.") else call :warn "scripts\run_redis.bat не найден. Redis нужно будет запускать вручную."
+if exist "scripts\download_redis.ps1" (call :ok "Redis download helper найден.") else call :warn "scripts\download_redis.ps1 не найден. Автоскачивание Redis будет недоступно."
 exit /b 0
 
 :start_redis_if_possible
 call :check_tcp "%REDIS_HOST%" "%REDIS_PORT%" "Redis"
 if not errorlevel 1 exit /b 0
+if exist "scripts\run_redis.bat" (
+    call :info "Пробую запустить Redis через scripts\run_redis.bat на порту из .env..."
+    start "Nickelfront Redis" /min cmd /c "cd /d ""%PROJECT_ROOT%"" && call scripts\run_redis.bat"
+    timeout /t 4 >nul
+    call :check_tcp "%REDIS_HOST%" "%REDIS_PORT%" "Redis"
+    if errorlevel 1 (call :warn "Redis не запустился автоматически. Проверь scripts\run_redis.bat и порт %REDIS_PORT%.") else call :ok "Redis запущен/отвечает."
+    exit /b 0
+)
 if exist "run_redis.bat" (
-    call :info "Пробую запустить Redis через run_redis.bat на порту из .env..."
+    call :info "Пробую запустить Redis через run_redis.bat..."
     start "Nickelfront Redis" /min cmd /c "cd /d ""%PROJECT_ROOT%"" && call run_redis.bat"
     timeout /t 4 >nul
     call :check_tcp "%REDIS_HOST%" "%REDIS_PORT%" "Redis"
-    if errorlevel 1 (call :warn "Redis не запустился автоматически. Запусти run_redis.bat вручную и проверь порт %REDIS_PORT%.") else call :ok "Redis запущен/отвечает."
-    exit /b 0
-)
-if exist "redis\redis-server.exe" (
-    call :info "Пробую запустить локальный Redis на порту %REDIS_PORT%..."
-    start "Nickelfront Redis" /min "redis\redis-server.exe" --port %REDIS_PORT% --dir "%PROJECT_ROOT%\redis" --bind 127.0.0.1
-    timeout /t 2 >nul
-    call :check_tcp "%REDIS_HOST%" "%REDIS_PORT%" "Redis"
-    if errorlevel 1 (call :warn "Redis не запустился автоматически. Запусти redis\redis-server.exe вручную.") else call :ok "Redis запущен."
+    if errorlevel 1 (call :warn "Redis не запустился автоматически. Запусти run_redis.bat вручную.") else call :ok "Redis запущен."
 ) else (
-    call :warn "redis\redis-server.exe и run_redis.bat не найдены. Автозапуск Redis невозможен."
+    call :warn "Redis launcher не найден. Автозапуск Redis невозможен."
 )
 exit /b 0
 
@@ -1117,6 +1198,11 @@ if not exist "%VENV_PY%" exit /b 0
 call :check_tcp "%POSTGRES_HOST%" "%POSTGRES_PORT%" "PostgreSQL"
 if errorlevel 1 (
     call :warn "Миграции пропущены: PostgreSQL недоступен на %POSTGRES_HOST%:%POSTGRES_PORT%."
+    if "%START_APP%"=="1" (
+        call :bad "PostgreSQL нужен для автозапуска backend. Запусти PostgreSQL или используй --no-start-app."
+        set "FATAL=1"
+        exit /b 1
+    )
     exit /b 0
 )
 
@@ -1124,7 +1210,7 @@ if exist "backend\apply_migrations.py" (
     call :info "Запускаю backend\apply_migrations.py..."
     "%VENV_PY%" backend\apply_migrations.py >>"%LOG_FILE%" 2>>&1
     if errorlevel 1 (
-        call :warn "backend\apply_migrations.py завершился с ошибкой. Смотри лог: %LOG_FILE%."
+        call :warn "backend\apply_migrations.py завершился с ошибкой. Пробую fallback Alembic. Смотри лог: %LOG_FILE%."
         call :save_last_error "Ошибка backend/apply_migrations.py"
     ) else (
         call :ok "Миграции выполнены через backend\apply_migrations.py."
@@ -1133,14 +1219,34 @@ if exist "backend\apply_migrations.py" (
 )
 
 if exist "backend\alembic.ini" (
-    call :info "Пробую fallback: alembic -c backend\alembic.ini upgrade head..."
-    "%VENV_PY%" -m alembic -c backend\alembic.ini upgrade head >>"%LOG_FILE%" 2>>&1
-    if errorlevel 1 (
-        call :warn "Fallback Alembic завершился с ошибкой. Смотри лог."
+    call :info "Пробую fallback: alembic -c alembic.ini upgrade head из папки backend..."
+    pushd backend >nul
+    "%VENV_PY%" -m alembic -c alembic.ini upgrade head >>"%LOG_FILE%" 2>>&1
+    set "ALEMBIC_FALLBACK_RC=%ERRORLEVEL%"
+    popd >nul
+    if not "%ALEMBIC_FALLBACK_RC%"=="0" (
+        call :bad "Fallback Alembic завершился с ошибкой. Backend запускать нельзя, смотри лог."
         call :save_last_error "Ошибка alembic fallback"
-    ) else call :ok "Fallback Alembic upgrade head выполнен."
+        set "FATAL=1"
+        exit /b 1
+    )
+    call :ok "Fallback Alembic upgrade head выполнен."
+
+    if exist "backend\apply_migrations.py" (
+        call :info "Контрольная проверка backend\apply_migrations.py после fallback..."
+        "%VENV_PY%" backend\apply_migrations.py >>"%LOG_FILE%" 2>>&1
+        if errorlevel 1 (
+            call :bad "После fallback backend\apply_migrations.py всё ещё падает. Backend запускать нельзя."
+            call :save_last_error "backend/apply_migrations.py падает после fallback"
+            set "FATAL=1"
+            exit /b 1
+        )
+        call :ok "Контрольная проверка миграций через backend\apply_migrations.py: OK."
+    )
 ) else (
-    call :warn "backend\alembic.ini не найден. Миграции пропущены."
+    call :bad "backend\alembic.ini не найден. Миграции выполнить невозможно."
+    set "FATAL=1"
+    exit /b 1
 )
 exit /b 0
 
@@ -1171,8 +1277,8 @@ if not "%START_APP%"=="1" (
 )
 call :section "Автозапуск сервисов проекта"
 if exist "run_all.bat" (
-    call :info "Запускаю run_all.bat в отдельном окне. PostgreSQL должен быть уже запущен."
-    start "Nickelfront run_all" cmd /k "cd /d ""%PROJECT_ROOT%"" && call run_all.bat"
+    call :info "Запускаю run_all.bat в отдельном окне. Миграции уже выполнены установщиком."
+    start "Nickelfront run_all" cmd /k "cd /d ""%PROJECT_ROOT%"" && set SKIP_BACKEND_MIGRATIONS=1&& call run_all.bat"
 ) else (
     call :warn "run_all.bat не найден. Пробую запускать основные сервисы по отдельности."
     if exist "run_redis.bat" start "Nickelfront Redis" cmd /k "cd /d ""%PROJECT_ROOT%"" && call run_redis.bat"
@@ -1180,7 +1286,7 @@ if exist "run_all.bat" (
     if exist "run_backend.bat" start "Nickelfront Backend" cmd /k "cd /d ""%PROJECT_ROOT%"" && set SKIP_BACKEND_MIGRATIONS=1&& call run_backend.bat"
     if exist "run_frontend.bat" start "Nickelfront Frontend" cmd /k "cd /d ""%PROJECT_ROOT%"" && call run_frontend.bat"
 )
-call :info "Жду старта сервисов и проверяю порты из .env. Таймауты заданы внутри doctor/setup; Backend ждём до %BACKEND_WAIT_SECONDS% секунд."
+call :info "Жду старта сервисов и проверяю порты из .env. run_all дополнительно ждёт backend /health перед worker-процессами."
 
 call :wait_tcp "%REDIS_HOST%" "%REDIS_PORT%" "Redis" "%REDIS_WAIT_SECONDS%"
 if errorlevel 1 (call :warn "Redis не отвечает на %REDIS_HOST%:%REDIS_PORT% после ожидания %REDIS_WAIT_SECONDS%s. Смотри окно Redis/run_all.") else call :ok "Redis отвечает после автозапуска."

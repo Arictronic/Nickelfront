@@ -1,32 +1,23 @@
 @echo off
+chcp 65001 >nul
 setlocal EnableExtensions
 cd /d "%~dp0"
-
 set "ROOT=%~dp0"
-
-rem ------------------------------------------------------------------------------
-rem Nickelfront: main local startup script
-rem
-rem Startup order:
-rem 1. Redis
-rem 2. Qwen service
-rem 3. Backend
-rem 4. Frontend
-rem 5. Heavy services later: qwen workers, content workers, regular workers, Flower
-rem
-rem Notes:
-rem - PostgreSQL must already be running separately.
-rem - RAG is served through backend; no standalone RAG service is started here.
-rem ------------------------------------------------------------------------------
+set "RUN_ALL_STARTED_AT=%DATE% %TIME%"
 
 call :load_env
 call :apply_defaults
+call :normalize_urls
 call :print_summary
 
-call :start_base_services
-call :start_frontend_early_if_needed
-call :start_heavy_services_or_defer
-call :start_frontend_late_if_needed
+call :start_core_services_parallel
+if errorlevel 1 goto startup_failed
+
+call :wait_core_services
+if errorlevel 1 goto startup_failed
+
+call :start_frontend
+call :start_heavy_services
 call :print_done
 
 endlocal
@@ -35,6 +26,10 @@ exit /b 0
 :load_env
 if exist "%ROOT%scripts\load_env.bat" (
   call "%ROOT%scripts\load_env.bat" "%ROOT%.env"
+  if errorlevel 1 (
+    echo [ERROR] Failed to load .env.
+    exit /b 1
+  )
 )
 goto :eof
 
@@ -47,17 +42,14 @@ call :set_default CELERY_WORKERS 1
 call :set_default WORKER_CONCURRENCY 5
 call :set_default WORKER_POOL threads
 call :set_default WORKER_QUEUES celery
-
 call :set_default QWEN_QUEUE_WORKERS 1
 call :set_default QWEN_QUEUE_NAME qwen
 call :set_default QWEN_WORKER_CONCURRENCY 5
 call :set_default QWEN_WORKER_POOL threads
-
 call :set_default CONTENT_WORKERS 1
 call :set_default CONTENT_QUEUE_NAME content
 call :set_default CONTENT_WORKER_CONCURRENCY 5
 call :set_default CONTENT_WORKER_POOL threads
-
 call :set_default START_REDIS 1
 call :set_default START_QWEN_SERVICE 1
 call :set_default START_BACKEND 1
@@ -66,33 +58,40 @@ call :set_default START_CONTENT_WORKERS 1
 call :set_default START_WORKERS 1
 call :set_default START_FLOWER 1
 call :set_default START_FRONTEND 1
+call :set_default REDIS_HOST localhost
+call :set_default REDIS_PORT 6380
+call :set_default API_HOST 0.0.0.0
+call :set_default API_PORT 8001
+call :set_default QWEN_SERVICE_HOST 127.0.0.1
+call :set_default QWEN_SERVICE_PORT 8767
+call :set_default FRONTEND_PORT 5173
+call :set_default FLOWER_PORT 5555
+call :set_default REDIS_WAIT_SECONDS 45
+call :set_default BACKEND_WAIT_SECONDS 180
+call :set_default QWEN_WAIT_SECONDS 90
+call :set_default DEFER_HEAVY_SERVICES_SECONDS 0
+call :set_default REQUIRE_QWEN_FOR_QWEN_WORKERS 0
+goto :eof
 
-call :set_default FAST_UI_STARTUP 1
-call :set_default DEFER_HEAVY_SERVICES 1
-call :set_default DEFER_HEAVY_SERVICES_SECONDS 35
-call :set_default FRONTEND_START_DELAY_SECONDS 2
-call :set_default REDIS_START_DELAY_SECONDS 2
+:normalize_urls
+set "API_HEALTH_HOST=127.0.0.1"
+if defined API_HOST if /I not "%API_HOST%"=="0.0.0.0" if /I not "%API_HOST%"=="::" set "API_HEALTH_HOST=%API_HOST%"
+set "API_HEALTH_URL=http://%API_HEALTH_HOST%:%API_PORT%/health"
+set "QWEN_HEALTH_URL=http://%QWEN_SERVICE_HOST%:%QWEN_SERVICE_PORT%/health"
 goto :eof
 
 :print_summary
 echo.
 echo ============================================================
 echo Nickelfront local startup
+echo Started at:   %RUN_ALL_STARTED_AT%
+echo Mode:         parallel core startup
 echo ============================================================
-echo Base services:
-echo   Redis=%START_REDIS%  QwenService=%START_QWEN_SERVICE%  Backend=%START_BACKEND%  Frontend=%START_FRONTEND%
-echo Workers:
-echo   QwenWorkers=%START_QWEN_WORKERS% x %QWEN_QUEUE_WORKERS%
-echo   ContentWorkers=%START_CONTENT_WORKERS% x %CONTENT_WORKERS%
-echo   RegularWorkers=%START_WORKERS% x %CELERY_WORKERS%
-echo   Flower=%START_FLOWER%
-echo Mode:
-echo   FastUIStartup=%FAST_UI_STARTUP%  DeferHeavy=%DEFER_HEAVY_SERVICES%  Delay=%DEFER_HEAVY_SERVICES_SECONDS%s
-echo Queues:
-echo   Qwen=%QWEN_QUEUE_NAME%  Content=%CONTENT_QUEUE_NAME%  Regular=%WORKER_QUEUES%
-echo Note:
-echo   PostgreSQL must already be running.
-echo   RAG works through backend and is not started separately.
+echo Redis:        %START_REDIS%  %REDIS_HOST%:%REDIS_PORT%
+echo Qwen service: %START_QWEN_SERVICE%  %QWEN_SERVICE_HOST%:%QWEN_SERVICE_PORT%
+echo Backend:      %START_BACKEND%  %API_HEALTH_URL%
+echo Frontend:     %START_FRONTEND%  port=%FRONTEND_PORT%
+echo Workers:      qwen=%START_QWEN_WORKERS%, content=%START_CONTENT_WORKERS%, regular=%START_WORKERS%, flower=%START_FLOWER%
 echo ============================================================
 echo.
 goto :eof
@@ -103,12 +102,11 @@ set "WINDOW_TITLE=%~1"
 set "SCRIPT_PATH=%~2"
 set "WARN_NAME=%~3"
 set "SCRIPT_ARGS=%~4"
-
 if exist "%SCRIPT_PATH%" (
   if defined SCRIPT_ARGS (
-    start "%WINDOW_TITLE%" cmd /k ""%SCRIPT_PATH%" %SCRIPT_ARGS%"
+    start "%WINDOW_TITLE%" cmd /k call "%SCRIPT_PATH%" %SCRIPT_ARGS%
   ) else (
-    start "%WINDOW_TITLE%" cmd /k ""%SCRIPT_PATH%""
+    start "%WINDOW_TITLE%" cmd /k call "%SCRIPT_PATH%"
   )
 ) else (
   echo [WARN] %WARN_NAME% was not started because "%SCRIPT_PATH%" was not found.
@@ -116,115 +114,117 @@ if exist "%SCRIPT_PATH%" (
 endlocal
 goto :eof
 
-:start_base_services
+:wait_tcp
+setlocal
+set "WT_HOST=%~1"
+set "WT_PORT=%~2"
+set "WT_NAME=%~3"
+set "WT_SECONDS=%~4"
+if not defined WT_SECONDS set "WT_SECONDS=60"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\wait_tcp.ps1" -HostName "%WT_HOST%" -Port %WT_PORT% -TimeoutSeconds %WT_SECONDS% -Name "%WT_NAME%"
+set "WT_RC=%ERRORLEVEL%"
+endlocal & exit /b %WT_RC%
+
+:wait_http
+setlocal
+set "WH_URL=%~1"
+set "WH_NAME=%~2"
+set "WH_SECONDS=%~3"
+if not defined WH_SECONDS set "WH_SECONDS=120"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\wait_http.ps1" -Url "%WH_URL%" -TimeoutSeconds %WH_SECONDS% -Name "%WH_NAME%"
+set "WH_RC=%ERRORLEVEL%"
+endlocal & exit /b %WH_RC%
+
+:start_core_services_parallel
+echo [STEP] Starting Redis, Qwen service and Backend in parallel...
+
 if "%START_REDIS%"=="1" (
-  echo [STEP] Starting Redis...
-  call :start_script_window "Redis" "%ROOT%scripts\run_redis.bat" "Redis"
-  timeout /t %REDIS_START_DELAY_SECONDS% /nobreak >nul
+  call :wait_tcp "%REDIS_HOST%" "%REDIS_PORT%" "Redis" 2
+  if errorlevel 1 (
+    call :start_script_window "Redis" "%ROOT%scripts\run_redis.bat" "Redis"
+  ) else (
+    echo [OK] Redis is already running.
+  )
 )
 
 if "%START_QWEN_SERVICE%"=="1" (
-  echo [STEP] Starting Qwen service...
-  call :start_script_window "Qwen Service" "%ROOT%scripts\run_qwen_service.bat" "Qwen service"
+  call :wait_tcp "%QWEN_SERVICE_HOST%" "%QWEN_SERVICE_PORT%" "Qwen service" 2
+  if errorlevel 1 (
+    call :start_script_window "Qwen Service" "%ROOT%scripts\run_qwen_service.bat" "Qwen service"
+  ) else (
+    echo [OK] Qwen service is already running.
+  )
 )
 
 if "%START_BACKEND%"=="1" (
-  echo [STEP] Starting backend...
-  call :start_script_window "Backend" "%ROOT%scripts\run_backend.bat" "Backend"
+  call :wait_http "%API_HEALTH_URL%" "Backend API" 2
+  if errorlevel 1 (
+    call :start_script_window "Backend" "%ROOT%scripts\run_backend.bat" "Backend"
+  ) else (
+    echo [OK] Backend API is already healthy.
+  )
 )
-goto :eof
 
-:start_frontend_early_if_needed
-if not "%FAST_UI_STARTUP%"=="1" goto :eof
+exit /b 0
+
+:wait_core_services
+echo [STEP] Waiting for required core services...
+
+if "%START_REDIS%"=="1" (
+  call :wait_tcp "%REDIS_HOST%" "%REDIS_PORT%" "Redis" "%REDIS_WAIT_SECONDS%"
+  if errorlevel 1 (
+    echo [ERROR] Redis did not become ready.
+    exit /b 1
+  )
+)
+
+if "%START_BACKEND%"=="1" (
+  call :wait_http "%API_HEALTH_URL%" "Backend API" "%BACKEND_WAIT_SECONDS%"
+  if errorlevel 1 (
+    echo [ERROR] Backend API is not healthy. Heavy services will not be started.
+    exit /b 1
+  )
+)
+
+if "%START_QWEN_SERVICE%"=="1" (
+  call :wait_tcp "%QWEN_SERVICE_HOST%" "%QWEN_SERVICE_PORT%" "Qwen service" "%QWEN_WAIT_SECONDS%"
+  if errorlevel 1 (
+    echo [WARN] Qwen service did not become ready. Backend can still work, Qwen workers may be skipped.
+  )
+)
+
+exit /b 0
+
+:start_frontend
 if not "%START_FRONTEND%"=="1" goto :eof
-
-echo [STEP] Starting frontend early...
-timeout /t %FRONTEND_START_DELAY_SECONDS% /nobreak >nul
+echo [STEP] Frontend
 call :start_script_window "Frontend" "%ROOT%scripts\run_frontend.bat" "Frontend"
-goto :eof
+exit /b 0
 
-:start_heavy_services_or_defer
-if not "%DEFER_HEAVY_SERVICES%"=="1" goto :start_heavy_now
-
-if exist "%ROOT%scripts\run_deferred_workers.bat" (
-  echo [STEP] Scheduling heavy services with delay...
-  start "Deferred Workers" cmd /c ""%ROOT%scripts\run_deferred_workers.bat" "%DEFER_HEAVY_SERVICES_SECONDS%""
-  goto :eof
-)
-
-echo [WARN] Deferred workers script was not found. Heavy services will start immediately.
+:start_heavy_services
+if "%DEFER_HEAVY_SERVICES_SECONDS%"=="0" goto start_heavy_now
+echo [STEP] Deferred workers after %DEFER_HEAVY_SERVICES_SECONDS%s
+start "Deferred Workers" cmd /c call "%ROOT%scripts\run_deferred_workers.bat" "%DEFER_HEAVY_SERVICES_SECONDS%"
+exit /b 0
 
 :start_heavy_now
-call :start_qwen_workers
-call :start_content_workers
-call :start_regular_workers
-call :start_flower
-goto :eof
+call "%ROOT%scripts\run_deferred_workers.bat" 0
+exit /b %ERRORLEVEL%
 
-:start_qwen_workers
-if not "%START_QWEN_WORKERS%"=="1" goto :eof
-if not exist "%ROOT%scripts\run_qwen_worker.bat" (
-  echo [WARN] Qwen workers were not started because "%ROOT%scripts\run_qwen_worker.bat" was not found.
-  goto :eof
-)
-
-echo [STEP] Starting Qwen workers...
-for /L %%I in (1,1,%QWEN_QUEUE_WORKERS%) do (
-  start "Qwen Gateway %%I" cmd /k ""%ROOT%scripts\run_qwen_worker.bat" "%%I" "%QWEN_QUEUE_NAME%" "%QWEN_WORKER_POOL%" "%QWEN_WORKER_CONCURRENCY%""
-)
-goto :eof
-
-:start_content_workers
-if not "%START_CONTENT_WORKERS%"=="1" goto :eof
-if not exist "%ROOT%scripts\run_worker.bat" (
-  echo [WARN] Content workers were not started because "%ROOT%scripts\run_worker.bat" was not found.
-  goto :eof
-)
-
-echo [STEP] Starting content workers...
-for /L %%I in (1,1,%CONTENT_WORKERS%) do (
-  start "Content Worker %%I" cmd /k ""%ROOT%scripts\run_worker.bat" "content-%%I" "%CONTENT_WORKER_CONCURRENCY%" "%CONTENT_WORKER_POOL%" "%CONTENT_QUEUE_NAME%""
-)
-goto :eof
-
-:start_regular_workers
-if not "%START_WORKERS%"=="1" goto :eof
-if not exist "%ROOT%scripts\run_worker.bat" (
-  echo [WARN] Regular workers were not started because "%ROOT%scripts\run_worker.bat" was not found.
-  goto :eof
-)
-
-echo [STEP] Starting regular workers...
-for /L %%I in (1,1,%CELERY_WORKERS%) do (
-  start "Worker %%I" cmd /k ""%ROOT%scripts\run_worker.bat" "%%I" "%WORKER_CONCURRENCY%" "%WORKER_POOL%" "%WORKER_QUEUES%""
-)
-goto :eof
-
-:start_flower
-if not "%START_FLOWER%"=="1" goto :eof
-echo [STEP] Starting Flower...
-call :start_script_window "Flower" "%ROOT%scripts\run_flower.bat" "Flower"
-goto :eof
-
-:start_frontend_late_if_needed
-if "%FAST_UI_STARTUP%"=="1" goto :eof
-if not "%START_FRONTEND%"=="1" goto :eof
-
-echo [STEP] Starting frontend after backend/workers...
-timeout /t 8 /nobreak >nul
-call :start_script_window "Frontend" "%ROOT%scripts\run_frontend.bat" "Frontend"
-goto :eof
+:startup_failed
+echo.
+echo [ERROR] Nickelfront startup stopped before heavy services.
+endlocal
+exit /b 1
 
 :print_done
 echo.
 echo ============================================================
-echo Startup sequence has been launched.
-if "%DEFER_HEAVY_SERVICES%"=="1" (
-  echo Heavy services will be started later by scripts\run_deferred_workers.bat.
-) else (
-  echo Heavy services were started immediately in this run.
-)
-echo Backend serves RAG functionality directly.
+echo Nickelfront startup commands were issued.
+echo Started at:   %RUN_ALL_STARTED_AT%
+echo Finished at:  %DATE% %TIME%
+echo Open frontend: http://127.0.0.1:%FRONTEND_PORT%
+echo Backend docs:  http://127.0.0.1:%API_PORT%/docs
 echo ============================================================
 echo.
 goto :eof

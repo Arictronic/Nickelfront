@@ -2,6 +2,15 @@
 setlocal EnableExtensions
 for %%I in ("%~dp0..") do set "PROJECT_ROOT=%%~fI"
 cd /d "%PROJECT_ROOT%"
+
+if exist "%PROJECT_ROOT%\scripts\load_env.bat" (
+  call "%PROJECT_ROOT%\scripts\load_env.bat" "%PROJECT_ROOT%\.env"
+  if errorlevel 1 (
+    echo [ERROR] Failed to load .env.
+    pause
+    exit /b 1
+  )
+)
 set "TEST_QWEN_PY=%PROJECT_ROOT%\qwen_service\scripts\test_qwen.py"
 
 if not exist "%TEST_QWEN_PY%" (

@@ -1,36 +1,42 @@
 @echo off
-setlocal EnableDelayedExpansion
+chcp 65001 >nul
+setlocal EnableExtensions
 set "ROOT=%~dp0.."
+for %%I in ("%ROOT%") do set "ROOT=%%~fI"
 cd /d "%ROOT%"
+set "NF_CONSOLE_STARTED_AT=%DATE% %TIME%"
+title Nickelfront Redis
 
-set REDIS_PORT=6380
+echo ============================================================
+echo Nickelfront Redis console
+echo Console started at: %NF_CONSOLE_STARTED_AT%
+echo Project root: %ROOT%
+echo ============================================================
 
-if exist ".env" (
-  for /f "usebackq tokens=1,* delims==" %%A in (`findstr /b /c:"REDIS_URL=" ".env"`) do set "REDIS_URL=%%B"
+if exist "%ROOT%\scripts\load_env.bat" (
+  call "%ROOT%\scripts\load_env.bat" "%ROOT%\.env"
+  if errorlevel 1 exit /b 1
 )
 
-if defined REDIS_URL (
-  for /f "tokens=3 delims=:/ " %%A in ("%REDIS_URL%") do set "REDIS_PORT=%%A"
-)
+if not defined REDIS_HOST set "REDIS_HOST=127.0.0.1"
+if not defined REDIS_PORT set "REDIS_PORT=6380"
+if /I "%REDIS_HOST%"=="localhost" set "REDIS_HOST=127.0.0.1"
 
 set "REDIS_EXE=%ROOT%\redis\redis-server.exe"
 if not exist "%REDIS_EXE%" (
-  echo Redis server not found. Downloading into %ROOT%\redis\ ...
-  set "REDIS_ZIP=%ROOT%\redis.zip"
-  set "REDIS_DEST=%ROOT%\redis"
-  set "REDIS_DOWNLOAD_URL=https://github.com/tporadowski/redis/releases/download/v5.0.14.1/Redis-x64-5.0.14.1.zip"
-  set "REDIS_ZIP_ENV=!REDIS_ZIP!"
-  set "REDIS_DEST_ENV=!REDIS_DEST!"
-  set "REDIS_URL_ENV=!REDIS_DOWNLOAD_URL!"
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "& { $ErrorActionPreference = 'Stop'; $zip = $env:REDIS_ZIP_ENV; $dest = $env:REDIS_DEST_ENV; $url = $env:REDIS_URL_ENV; if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }; Invoke-WebRequest -Uri $url -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $dest -Force; Remove-Item $zip -Force }"
-  if not exist "%REDIS_EXE%" (
-    echo Failed to download Redis. Check network or URL.
-    echo.
+  echo [WARN] Redis executable was not found: %REDIS_EXE%
+  echo [INFO] Trying to download portable Redis.
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\download_redis.ps1" -ProjectRoot "%ROOT%"
+  if errorlevel 1 (
+    echo [ERROR] Redis could not be downloaded automatically.
+    echo Place redis-server.exe into: %ROOT%\redis\
     pause
     exit /b 1
   )
 )
 
+echo Redis command started at: %DATE% %TIME%
+echo Starting Redis: "%REDIS_EXE%" --port %REDIS_PORT%
+echo ============================================================
 "%REDIS_EXE%" --port %REDIS_PORT% --dir "%ROOT%\redis" --bind 127.0.0.1
-
 endlocal

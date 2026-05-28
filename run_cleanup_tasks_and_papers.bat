@@ -8,6 +8,15 @@ echo ============================================================
 echo This script removes runtime data: papers, parser jobs, Celery/Redis
 echo queues, PDF/RAG/ChromaDB files, logs and temporary caches.
 echo.
+
+if exist "%~dp0scripts\load_env.bat" (
+  call "%~dp0scripts\load_env.bat" "%~dp0.env"
+  if errorlevel 1 (
+    echo [ERROR] Failed to load .env.
+    pause
+    exit /b 1
+  )
+)
 echo Default mode keeps users, refresh_tokens, system_settings and alembic_version.
 echo Use --include-users or --include-settings only if you really need it.
 echo.

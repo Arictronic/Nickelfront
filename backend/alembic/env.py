@@ -1,11 +1,12 @@
 """Alembic migrations environment."""
 
 import asyncio
+import os
 import sys
 from logging.config import fileConfig
 from pathlib import Path
 
-from sqlalchemy import pool
+from sqlalchemy import inspect, pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -13,6 +14,24 @@ from alembic import context
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = BACKEND_DIR.parent
+ALEMBIC_VERSION_MIN_LENGTH = 255
+
+
+def _load_project_env() -> None:
+    if os.getenv("NICKELFRONT_DISABLE_ENV_OVERRIDE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+    env_file = PROJECT_ROOT / ".env"
+    if not env_file.exists():
+        return
+    try:
+        from dotenv import load_dotenv
+    except Exception:
+        return
+    load_dotenv(env_file, override=True)
+
+
+_load_project_env()
+
 for _path in (PROJECT_ROOT, BACKEND_DIR):
     _path_str = str(_path)
     if _path_str not in sys.path:
@@ -29,8 +48,35 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-
 config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+
+
+def _ensure_version_table_capacity(connection: Connection) -> None:
+    """Make Alembic's version table compatible with long project revision IDs.
+
+    Alembic defaults to VARCHAR(32). Several Nickelfront revisions use readable
+    IDs longer than 32 characters, so direct Alembic runs and apply_migrations.py
+    must widen this column before version updates happen.
+    """
+    inspector = inspect(connection)
+    if not inspector.has_table("alembic_version"):
+        if connection.dialect.name == "postgresql":
+            connection.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS alembic_version "
+                    f"(version_num VARCHAR({ALEMBIC_VERSION_MIN_LENGTH}) NOT NULL, "
+                    "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+                )
+            )
+        return
+
+    if connection.dialect.name == "postgresql":
+        connection.execute(
+            text(
+                "ALTER TABLE alembic_version "
+                f"ALTER COLUMN version_num TYPE VARCHAR({ALEMBIC_VERSION_MIN_LENGTH})"
+            )
+        )
 
 
 def run_migrations_offline() -> None:
@@ -48,6 +94,19 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
+    # Prepare alembic_version outside Alembic's migration transaction, then
+    # explicitly commit the implicit SQLAlchemy 2.x transaction opened by the
+    # DDL above. Without this commit PostgreSQL can execute all migration DDL,
+    # print "Running upgrade ...", and then roll everything back when the
+    # connection closes. That is why the backend later saw no users/papers tables.
+    _ensure_version_table_capacity(connection)
+    try:
+        connection.commit()
+    except Exception:
+        # Some dialect/test connections may not expose commit here. Alembic will
+        # still manage the transaction in the usual way for those cases.
+        pass
+
     context.configure(connection=connection, target_metadata=target_metadata)
 
     with context.begin_transaction():
