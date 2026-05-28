@@ -18,9 +18,10 @@ function badgeClass(ok: boolean): string {
 
 interface Props {
   papers: Paper[];
+  isAdmin?: boolean;
 }
 
-export default function RecentPapersPanel({ papers }: Props) {
+export default function RecentPapersPanel({ papers, isAdmin = false }: Props) {
   return (
     <section className="panel dashboard-recent-panel">
       <div className="dashboard-panel-head">
@@ -28,7 +29,7 @@ export default function RecentPapersPanel({ papers }: Props) {
           <span className="eyebrow">Последние данные</span>
           <h3>Последние документы</h3>
         </div>
-        <Link className="btn" to="/database">Вся база</Link>
+        <Link className="btn" to={isAdmin ? "/database" : "/papers"}>Вся база</Link>
       </div>
       <div className="dashboard-recent-list">
         {papers.length === 0 ? (

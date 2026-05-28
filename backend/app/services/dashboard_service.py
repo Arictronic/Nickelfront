@@ -66,10 +66,10 @@ _OVERVIEW_CACHE: dict[tuple[int], tuple[float, dict[str, Any]]] = {}
 
 DASHBOARD_ACTIONS: dict[str, dict[str, str]] = {
     "process_pdf_backlog": {
-        "title": "Поставить очередь PDF/контента",
+        "title": "Поставить очередь PDF и контента",
         "task": "app.tasks.dashboard.process_pdf_backlog",
         "source": "dashboard",
-        "query": "обработка очереди PDF/контента",
+        "query": "обработка очереди PDF и контента",
     },
     "retry_failed_content": {
         "title": "Повторить задачи контента с ошибками",
@@ -84,22 +84,22 @@ DASHBOARD_ACTIONS: dict[str, dict[str, str]] = {
         "query": "пересборка недостающих эмбеддингов",
     },
     "reindex_vector_store": {
-        "title": "Синхронизировать Vector index",
+        "title": "Синхронизировать векторный индекс",
         "task": "app.tasks.dashboard.reindex_vector_store",
         "source": "dashboard",
-        "query": "синхронизация Vector index со всеми эмбеддингами из PostgreSQL",
+        "query": "синхронизация векторного индекса со всеми эмбеддингами из PostgreSQL",
     },
     "rebuild_vector_store_full": {
-        "title": "Полностью пересобрать Vector index",
+        "title": "Полностью пересобрать векторный индекс",
         "task": "app.tasks.dashboard.rebuild_vector_store_full",
         "source": "dashboard",
-        "query": "полная пересборка Vector index из PostgreSQL",
+        "query": "полная пересборка векторного индекса из PostgreSQL",
     },
     "rebuild_rag_index": {
-        "title": "Полностью пересобрать RAG/Chroma",
+        "title": "Полностью пересобрать RAG-индекс",
         "task": "app.tasks.dashboard.rebuild_rag_index",
         "source": "dashboard",
-        "query": "полная пересборка RAG/Chroma из контента статей",
+        "query": "полная пересборка RAG-индекса из контента статей",
     },
     "rerun_source": {
         "title": "Запустить источник заново",
@@ -570,21 +570,22 @@ async def _check_rag_status(total_papers: int) -> dict[str, Any]:
         path = stats.get("persist_directory") or settings.CHROMA_DB_PATH
         path_exists = Path(settings.resolve_path(str(path))).exists() if path else False
 
-
-        status = "online"
         return {
-            "status": status,
-            "label": "RAG/Chroma",
+            "status": "online",
+            "index_status": "ready" if count > 0 else "empty",
+            "label": "RAG-индекс",
             "count": count,
             "indexed": count,
             "collection": stats.get("collection_name"),
             "path": path,
+            "path_exists": path_exists,
+            "available": True,
         }
     except asyncio.TimeoutError:
-        return {"status": "offline", "label": "RAG/Chroma", "count": 0, "indexed": 0, "reason": "RAG stats timeout"}
+        return {"status": "offline", "index_status": "unknown", "label": "RAG-индекс", "count": 0, "indexed": 0, "reason": "RAG stats timeout", "available": False}
     except Exception as exc:
         logger.warning("Dashboard RAG health check failed: {}", exc)
-        return {"status": "unknown", "label": "RAG/Chroma", "count": 0, "indexed": 0, "reason": str(exc)[:300]}
+        return {"status": "unknown", "index_status": "unknown", "label": "RAG-индекс", "count": 0, "indexed": 0, "reason": str(exc)[:300], "available": False}
 
 
 async def _build_services(db: AsyncSession, total_papers: int) -> dict[str, dict[str, Any]]:
@@ -638,7 +639,7 @@ async def _select_paper_ids(db: AsyncSession, expr) -> set[int]:
 
 
 def _source_success_rate(source: str, jobs: list[dict[str, Any]]) -> dict[str, Any]:
-    source_jobs = [job for job in jobs if str(job.get("source") or "") == source]
+    source_jobs = [job for job in jobs if str(job.get("source") or "") in {source, "all"}]
     terminal = [job for job in source_jobs if _job_status(job) in TERMINAL_JOB_STATUSES]
     if not terminal:
         return {"success_rate": None, "error_rate": None, "last_duration_sec": None}
@@ -679,15 +680,15 @@ def _build_diagnostics(
         add("error", "PostgreSQL недоступен", "Dashboard не сможет достоверно считать метрики базы.", "Настройки", "/settings")
     if services.get("redis", {}).get("status") == "offline":
         add("error", "Redis недоступен", "Очереди Celery и постановка новых задач могут не работать.", "Мониторинг", "/celery")
-    if services.get("celery", {}).get("status") in {"offline", "unknown"}:
+    if services.get("celery", {}).get("status") in {"offline", "unknown", "warning"}:
         add("warning", "Celery worker не подтверждён", "Запущенные задачи могут не обновлять прогресс на главной.", "Статус задач", "/jobs")
     if services.get("qwen", {}).get("status") != "online":
         reason = services.get("qwen", {}).get("reason") or "AI-анализ PDF и русские выводы могут быть недоступны."
         add("warning", "Qwen не готов", str(reason), "Настройки", "/settings")
     if services.get("rag", {}).get("status") in {"offline", "unknown"}:
-        add("warning", "RAG/Chroma не подтверждён", "Вопросы по базе и RAG-проекции могут работать неполно.", "RAG", "/rag")
-    elif total and counts.get("rag_ready", 0) < total * 0.5:
-        add("info", "Низкая готовность RAG", f"К RAG готово примерно {counts.get('rag_ready', 0)} из {total} документов.", "Векторный поиск", "/search")
+        add("warning", "RAG-индекс не подтверждён", "Вопросы по базе и RAG-проекции могут работать неполно.", "RAG", "/rag")
+    elif counts.get("rag_candidates", 0) and counts.get("rag_ready", 0) < counts.get("rag_candidates", 0) * 0.5:
+        add("info", "Низкая готовность RAG", f"К RAG готово примерно {counts.get('rag_ready', 0)} из {counts.get('rag_candidates', 0)} кандидатов.", "Векторный поиск", "/search")
 
     missing_full_text = max(0, total - counts.get("with_full_text", 0))
     if total and missing_full_text:
@@ -703,7 +704,7 @@ def _build_diagnostics(
         add("error", "Есть ошибки обработки контента", f"Документов с ошибками обработки: {counts['processing_errors']}.", "База статей", "/database")
 
     if counts.get("content_queued", 0) > 0:
-        add("info", "Есть очередь обработки контента", f"Ожидают или выполняют обработку PDF/контента: {counts['content_queued']}.", "Статус задач", "/jobs")
+        add("info", "Есть очередь обработки контента", f"Ожидают или выполняют обработку PDF и контента: {counts['content_queued']}.", "Статус задач", "/jobs")
 
     failed_jobs = [job for job in jobs if _job_status(job) == "failed"]
     if failed_jobs:
@@ -755,7 +756,7 @@ async def _build_dashboard_overview(db: AsyncSession, timezone_offset_minutes: i
     )
     content_queued_expr = PaperModel.processing_status.in_(sorted(CONTENT_QUEUE_STATUSES))
     content_ready_expr = or_(PaperModel.processing_status.in_(sorted(READY_CONTENT_STATUSES)), content_parts_expr)
-    rag_candidate_expr = and_(or_(full_text_expr, content_parts_expr), embedding_expr)
+    rag_candidate_expr = or_(content_parts_expr, full_text_expr, abstract_expr)
 
     summary_query = select(
         func.count().label("total"),
@@ -807,6 +808,14 @@ async def _build_dashboard_overview(db: AsyncSession, timezone_offset_minutes: i
     counts["rag_ready"] = len(rag_candidate_ids & rag_indexed_ids)
     counts["rag_indexed"] = len(rag_indexed_ids)
     counts["vector_index_records"] = len(vector_indexed_ids)
+    if isinstance(services.get("rag"), dict):
+        rag_service = services["rag"]
+        rag_gap = max(0, counts["rag_candidates"] - counts["rag_ready"])
+        rag_service["candidates"] = counts["rag_candidates"]
+        rag_service["ready"] = counts["rag_ready"]
+        rag_service["gap"] = rag_gap
+        if rag_service.get("status") == "online":
+            rag_service["index_status"] = "ready" if counts["rag_ready"] > 0 else ("empty" if counts["rag_candidates"] > 0 else "not_applicable")
 
     parser_settings = await SystemSettingsService(db).get_parser_settings()
     enabled_sources = parser_settings.get("enabled_sources") or {}
@@ -836,16 +845,23 @@ async def _build_dashboard_overview(db: AsyncSession, timezone_offset_minutes: i
     raw_jobs = await asyncio.to_thread(list_parse_jobs, 50)
     raw_jobs = [job for job in raw_jobs if not _is_placeholder_job_id(job.get("jobId"))]
     latest_job_by_source: dict[str, dict[str, Any]] = {}
+    latest_all_job: dict[str, Any] | None = None
     for job in raw_jobs:
         source = str(job.get("source") or "").strip()
-        if not source or source == "all" or source in latest_job_by_source:
+        if not source:
+            continue
+        if source == "all":
+            if latest_all_job is None:
+                latest_all_job = job
+            continue
+        if source in latest_job_by_source:
             continue
         latest_job_by_source[source] = job
 
     sources = []
     for source in PAPER_SOURCES:
         stats = source_stats.get(source, {})
-        latest_job = latest_job_by_source.get(source)
+        latest_job = latest_job_by_source.get(source) or latest_all_job
         rate = _source_success_rate(source, raw_jobs)
         sources.append(
             {
@@ -871,17 +887,18 @@ async def _build_dashboard_overview(db: AsyncSession, timezone_offset_minutes: i
     normalized_jobs = jobs_payload["jobs"]
     diagnostics = _build_diagnostics(total=total, counts=counts, services=services, jobs=raw_jobs)
 
-    quality_percent = round(
-        (
-            _percent(counts["metadata_ready"], total)
-            + _percent(counts["with_full_text"], total)
-            + _percent(counts["with_embeddings"], total)
-            + _percent(counts["vector_indexed"], counts["with_embeddings"])
-            + _percent(counts["rag_ready"], counts["rag_candidates"])
-        )
-        / 5,
-        1,
-    ) if total else 0.0
+    quality_components = []
+    if total:
+        quality_components.extend([
+            _percent(counts["metadata_ready"], total),
+            _percent(counts["with_full_text"], total),
+            _percent(counts["with_embeddings"], total),
+        ])
+    if counts["with_embeddings"] > 0:
+        quality_components.append(_percent(counts["vector_indexed"], counts["with_embeddings"]))
+    if counts["rag_candidates"] > 0:
+        quality_components.append(_percent(counts["rag_ready"], counts["rag_candidates"]))
+    quality_percent = round(sum(quality_components) / len(quality_components), 1) if quality_components else 0.0
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -938,7 +955,7 @@ def _build_recommended_actions(*, counts: dict[str, int], services: dict[str, An
 
     if services.get("redis", {}).get("status") == "offline":
         add("error", "Запустить Redis", "Без Redis очереди парсинга, обработки контента и Celery будут нестабильны.", "Инструкция", "/celery")
-    if services.get("celery", {}).get("status") in {"offline", "unknown"}:
+    if services.get("celery", {}).get("status") in {"offline", "unknown", "warning"}:
         add("warning", "Запустить worker", "Главная видит очередь, но не подтверждает активный Celery worker.", "Worker status", "/jobs")
     if counts.get("content_queued", 0) > 0:
         add("info", "Проверить обработку контента", f"В очереди или обработке: {counts['content_queued']} документов.", "Открыть задачи", "/jobs")
@@ -982,8 +999,8 @@ def _build_recommended_actions(*, counts: dict[str, int], services: dict[str, An
     if indexed_gap > 0:
         add(
             "warning",
-            "Vector index отстаёт",
-            f"В БД есть эмбеддинги, но в Vector index не подтверждено {indexed_gap} документов.",
+            "Векторный индекс отстаёт",
+            f"В БД есть эмбеддинги, но в векторном индексе не подтверждено {indexed_gap} документов.",
             "Синхронизировать",
             "/jobs",
             "reindex_vector_store",
@@ -994,8 +1011,8 @@ def _build_recommended_actions(*, counts: dict[str, int], services: dict[str, An
     if rag_gap > 0:
         add(
             "warning",
-            "RAG/Chroma отстаёт",
-            f"Есть контент и эмбеддинги, но в RAG/Chroma не подтверждено {rag_gap} документов.",
+            "RAG-индекс отстаёт",
+            f"Есть текст/контент для RAG, но в RAG-индексе не подтверждено {rag_gap} документов.",
             "Пересобрать RAG",
             "/jobs",
             "rebuild_rag_index",

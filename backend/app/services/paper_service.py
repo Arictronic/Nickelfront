@@ -1,13 +1,16 @@
 """Сервис для работы с научными статьями."""
 
 import re
+from datetime import datetime, time, timedelta
+from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from loguru import logger
-from sqlalchemy import String, func, or_, select
+from sqlalchemy import String, func, literal, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.models.paper import Paper as PaperModel
 from shared.schemas.paper import Paper as PaperSchema
 from shared.schemas.paper import PaperCreate
@@ -91,6 +94,83 @@ def _apply_search_query_filter(stmt, normalized_query: str, *, use_postgres_fts:
             identifier_filter,
         )
     )
+
+
+
+def _paper_search_rank_expr(normalized_query: str, *, use_postgres_fts: bool):
+    """Релевантность для вкладки «Статьи».
+
+    В PostgreSQL используем тот же search_vector, что и фильтр. В SQLite/тестовой
+    среде возвращаем стабильный 0, чтобы список оставался совместимым.
+    """
+    if not normalized_query or not use_postgres_fts:
+        return literal(0.0)
+    ts_query = func.websearch_to_tsquery("english", normalized_query)
+    return func.ts_rank_cd(PaperModel.search_vector, ts_query)
+
+
+def _date_start(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    return datetime.combine(value, time.min)
+
+
+def _date_exclusive_end(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value + timedelta(microseconds=1)
+    return datetime.combine(value + timedelta(days=1), time.min)
+
+
+def _nulls_last_order(column, direction: str):
+    order = column.asc() if direction == "asc" else column.desc()
+    try:
+        return order.nulls_last()
+    except AttributeError:
+        return order
+
+
+def _cleanup_local_pdf_file(pdf_local_path: str | None) -> None:
+    raw_path = str(pdf_local_path or "").strip()
+    if not raw_path:
+        return
+    try:
+        path = Path(raw_path).expanduser().resolve()
+        pdf_root = Path(settings.resolve_path(settings.PAPER_PDF_DIR)).expanduser().resolve()
+        if not path.is_file():
+            return
+        if pdf_root not in path.parents and path.parent != pdf_root:
+            logger.warning("Skip deleting PDF outside PAPER_PDF_DIR: {}", path)
+            return
+        if not path.name.startswith("paper_") or path.suffix.lower() != ".pdf":
+            logger.warning("Skip deleting unexpected PDF filename: {}", path)
+            return
+        path.unlink(missing_ok=True)
+    except Exception as exc:
+        logger.warning("Failed to delete local PDF file {}: {}", raw_path, exc)
+
+
+def _cleanup_vector_artifacts(paper_id: int) -> None:
+    try:
+        from app.services.vector_service import get_vector_service
+
+        get_vector_service().delete_paper(paper_id)
+    except Exception as exc:
+        logger.warning("Failed to delete paper {} from Vector/Chroma index: {}", paper_id, exc)
+
+    try:
+        from app.services.rag_vector_store import get_rag_vector_store
+
+        rag_store = get_rag_vector_store()
+        delete_paper = getattr(rag_store, "delete_paper", None)
+        if callable(delete_paper):
+            delete_paper(paper_id)
+    except Exception as exc:
+        logger.warning("Failed to delete paper {} from RAG/Chroma index: {}", paper_id, exc)
+
 
 def _paper_list_columns():
     """Единая лёгкая проекция статьи для списков без тяжёлого full_text."""
@@ -394,10 +474,12 @@ class PaperService:
                 use_postgres_fts=_is_postgresql_session(self.db),
             )
 
-        if date_from is not None:
-            stmt = stmt.where(PaperModel.publication_date >= date_from)
-        if date_to is not None:
-            stmt = stmt.where(PaperModel.publication_date <= date_to)
+        date_from_value = _date_start(date_from)
+        date_to_value = _date_exclusive_end(date_to)
+        if date_from_value is not None:
+            stmt = stmt.where(PaperModel.publication_date >= date_from_value)
+        if date_to_value is not None:
+            stmt = stmt.where(PaperModel.publication_date < date_to_value)
 
         status_key = (processing_status or "").strip()
         if status_key and status_key != "all":
@@ -445,14 +527,23 @@ class PaperService:
         total_result = await self.db.execute(count_stmt)
         total = int(total_result.scalar() or 0)
 
-        sort_column = _paper_list_sort_column(sort_by)
+        normalized_query = (query or "").strip()
+        use_postgres_fts = _is_postgresql_session(self.db)
+        rank_expr = _paper_search_rank_expr(normalized_query, use_postgres_fts=use_postgres_fts).label("rank")
         direction = (sort_dir or "desc").lower()
-        order_clause = sort_column.asc() if direction == "asc" else sort_column.desc()
 
         stmt = self._apply_list_filters(
-            select(*_paper_list_columns()),
+            select(*_paper_list_columns(), rank_expr),
             **base_filters,
-        ).order_by(order_clause, PaperModel.id.desc())
+        )
+
+        if sort_by == "relevance" and normalized_query:
+            order_clauses = [rank_expr.desc(), _nulls_last_order(PaperModel.created_at, "desc"), PaperModel.id.desc()]
+        else:
+            sort_column = _paper_list_sort_column(sort_by)
+            order_clauses = [_nulls_last_order(sort_column, direction), PaperModel.id.desc()]
+
+        stmt = stmt.order_by(*order_clauses)
 
         result = await self.db.execute(stmt.limit(limit).offset(offset))
         items: list[dict] = []
@@ -461,6 +552,7 @@ class PaperService:
             item["full_text"] = None
             item["has_pdf"] = bool(item.get("has_pdf"))
             item["has_full_text"] = bool(item.get("has_full_text"))
+            item["rank"] = float(item.get("rank") or 0)
             items.append(item)
         return items, total
 
@@ -581,6 +673,10 @@ class PaperService:
         if not paper:
             return False
 
+        pdf_local_path = getattr(paper, "pdf_local_path", None)
         await self.db.delete(paper)
         await self.db.commit()
+
+        _cleanup_vector_artifacts(paper_id)
+        _cleanup_local_pdf_file(pdf_local_path)
         return True

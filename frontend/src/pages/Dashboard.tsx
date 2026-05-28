@@ -24,6 +24,7 @@ import RecentPapersPanel from "../components/dashboard/RecentPapersPanel";
 import SourceBoard from "../components/dashboard/SourceBoard";
 import SystemHealthStrip from "../components/dashboard/SystemHealthStrip";
 import { PAPER_SOURCES, type Paper, type PaperSource, type PdfProcessingMode } from "../types/paper";
+import { useAuthStore } from "../store/authStore";
 import type { DashboardActionName, DashboardActionPayload, DashboardLoadError, DashboardOverview, DashboardSourceStatus } from "../types/dashboard";
 import type { ParserSettings } from "../types/settings";
 import {
@@ -155,6 +156,7 @@ export default function Dashboard() {
   const [topKeywords, setTopKeywords] = useState<TopItem[]>([]);
   const [parserSettings, setParserSettings] = useState<ParserSettings | null>(null);
   const [loadErrors, setLoadErrors] = useState<DashboardLoadError[]>([]);
+  const [initialLoading, setInitialLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [runningAction, setRunningAction] = useState<string | null>(null);
   const [actionStatus, setActionStatus] = useState<string | null>(null);
@@ -167,6 +169,7 @@ export default function Dashboard() {
   const [parsingError, setParsingError] = useState<string | null>(null);
   const [startingParse, setStartingParse] = useState(false);
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
+  const isAdmin = !!useAuthStore((state) => state.user?.is_admin);
   const jobsRef = useRef<ParseJob[]>(jobs);
   const pollingRef = useRef(false);
 
@@ -244,6 +247,7 @@ export default function Dashboard() {
       .finally(() => {
         if (!cancelled) {
           setRefreshing(false);
+          setInitialLoading(false);
         }
       });
     return () => {
@@ -454,6 +458,19 @@ export default function Dashboard() {
     }
   };
 
+  if (initialLoading) {
+    return (
+      <div className="page dashboard-page dashboard-redesign-page">
+        <DashboardHeader generatedAt={overview.generatedAt} onRefresh={refreshDashboard} refreshing={refreshing} />
+        <section className="panel dashboard-loading-panel">
+          <span className="eyebrow">Загрузка</span>
+          <h3>Загрузка dashboard…</h3>
+          <p>Получаю сводку backend, последние документы, задачи и состояние сервисов.</p>
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="page dashboard-page dashboard-redesign-page">
       <DashboardHeader generatedAt={overview.generatedAt} onRefresh={refreshDashboard} refreshing={refreshing} />
@@ -481,6 +498,7 @@ export default function Dashboard() {
         />
         <QuickActionsPanel
           recommendedActions={overview.recommendedActions}
+          isAdmin={isAdmin}
           runningAction={runningAction}
           actionStatus={actionStatus}
           actionError={actionError}
@@ -504,7 +522,7 @@ export default function Dashboard() {
       <SourceBoard sources={dashboardSources} />
 
       <div className="dashboard-main-grid dashboard-lower-grid">
-        <RecentPapersPanel papers={latest} />
+        <RecentPapersPanel papers={latest} isAdmin={isAdmin} />
         <DiagnosticsPanel diagnostics={overview.diagnostics} loadErrors={loadErrors} />
       </div>
 

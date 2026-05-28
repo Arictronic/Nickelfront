@@ -12,14 +12,15 @@ import { useToast } from "../components/ui/Toast";
 import { useAuthStore } from "../store/authStore";
 import {
   getProcessingProgress,
+  getProcessingStatusKey,
   getProcessingStatusLabel,
   isPaperProcessing,
   PAPER_SOURCES,
 } from "../types/paper";
-import type { Paper, PaperListFilters } from "../types/paper";
+import type { Paper, PaperListFilters, PaperProcessingStatusInfo } from "../types/paper";
 
 type SortState = {
-  sortKey: "id" | "authors" | "createdAt" | "publicationDate";
+  sortKey: "id" | "authors" | "createdAt" | "publicationDate" | "relevance";
   sortDir: "asc" | "desc";
 };
 
@@ -40,11 +41,14 @@ const RU = {
   sortByAuthors: "По авторам",
   sortByCreated: "По дате добавления",
   sortByPublication: "По дате публикации",
+  sortByRelevance: "По релевантности",
   sortDesc: "По убыванию",
   sortAsc: "По возрастанию",
   exportCsv: "Экспорт выбранных на странице",
   exportAllCsv: "Экспорт всех найденных (до 10 000)",
   exporting: "Экспорт...",
+  refresh: "Обновить",
+  refreshing: "Обновление...",
   deleteSelected: "Удалить выбранные",
   total: "Найдено",
   loading: "Загрузка...",
@@ -80,6 +84,23 @@ function toApiSortKey(sortKey: SortState["sortKey"]): PaperListSortBy {
   if (sortKey === "createdAt") return "created_at";
   if (sortKey === "publicationDate") return "publication_date";
   return sortKey;
+}
+
+function fallbackStatusInfo(key: string): PaperProcessingStatusInfo {
+  return {
+    key,
+    label: getProcessingStatusLabel(key),
+    group: isPaperProcessing(key) ? "processing" : key === "failed" ? "error" : "success",
+    final: !isPaperProcessing(key),
+  };
+}
+
+function statusProgressClass(info: PaperProcessingStatusInfo | null, progress: number) {
+  const group = info?.group;
+  if (group === "error") return "failed";
+  if (group === "warning") return "warning";
+  if (group === "success" || info?.final || progress >= 100) return "done";
+  return "";
 }
 
 const PROCESSING_STATUS_OPTIONS = [
@@ -155,7 +176,7 @@ export default function Patents() {
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [exportingAll, setExportingAll] = useState(false);
   const debouncedQuery = useDebouncedValue(filters.query ?? "", 450);
-  const [statusOptions, setStatusOptions] = useState<{ key: string; label: string }[]>([]);
+  const [statusOptions, setStatusOptions] = useState<PaperProcessingStatusInfo[]>([]);
 
   useEffect(() => {
     setPage(1);
@@ -175,11 +196,22 @@ export default function Patents() {
       .then((items) => {
         const normalized = items
           .filter((item) => item.key)
-          .map((item) => ({ key: item.key, label: item.label || getProcessingStatusLabel(item.key) }));
-        setStatusOptions(normalized.length ? normalized : PROCESSING_STATUS_OPTIONS.map((key) => ({ key, label: getProcessingStatusLabel(key) })));
+          .map((item) => ({
+            ...item,
+            label: item.label || getProcessingStatusLabel(item.key),
+            group: item.group || "unknown",
+            final: Boolean(item.final),
+          }));
+        setStatusOptions(normalized.length ? normalized : PROCESSING_STATUS_OPTIONS.map(fallbackStatusInfo));
       })
-      .catch(() => setStatusOptions(PROCESSING_STATUS_OPTIONS.map((key) => ({ key, label: getProcessingStatusLabel(key) }))));
+      .catch(() => setStatusOptions(PROCESSING_STATUS_OPTIONS.map(fallbackStatusInfo)));
   }, []);
+
+  useEffect(() => {
+    if (!debouncedQuery.trim() && sort.sortKey === "relevance") {
+      setSort(DEFAULT_SORT);
+    }
+  }, [debouncedQuery, sort.sortKey]);
 
   useEffect(() => {
     setSelectedIds([]);
@@ -214,6 +246,13 @@ export default function Patents() {
       });
 
       if (requestId !== requestSeq.current) return;
+      const nextTotalPages = Math.max(1, Math.ceil((response.total ?? 0) / PAGE_SIZE));
+      if (page > nextTotalPages) {
+        setTotalCount(response.total);
+        setPapers([]);
+        setPage(nextTotalPages);
+        return;
+      }
       setTotalCount(response.total);
       setPapers(response.papers);
       if (response.total === 0) setSelectedIds([]);
@@ -241,13 +280,15 @@ export default function Patents() {
 
   const visiblePapers = papers;
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const statusInfoByKey = new Map(statusOptions.map((item) => [item.key, item]));
 
   const currentIds = visiblePapers.map((p) => p.id);
   const allChecked =
     currentIds.length > 0 && currentIds.every((id) => selectedIds.includes(id));
-  const hasProcessingPapers = visiblePapers.some((p) =>
-    isPaperProcessing(p.processingStatus),
-  );
+  const hasProcessingPapers = visiblePapers.some((p) => {
+    const info = statusInfoByKey.get(getProcessingStatusKey(p.processingStatus));
+    return info ? !info.final : isPaperProcessing(p.processingStatus);
+  });
 
   useEffect(() => {
     if (!hasProcessingPapers) return;
@@ -478,6 +519,7 @@ export default function Patents() {
             <option value="authors">{RU.sortByAuthors}</option>
             <option value="createdAt">{RU.sortByCreated}</option>
             <option value="publicationDate">{RU.sortByPublication}</option>
+            <option value="relevance" disabled={!debouncedQuery.trim()}>{RU.sortByRelevance}</option>
           </select>
           <select
             value={sort.sortDir}
@@ -496,6 +538,9 @@ export default function Patents() {
       </div>
 
       <div className="actions">
+        <button className="btn" onClick={() => void fetchData()} disabled={loading}>
+          {loading ? RU.refreshing : RU.refresh}
+        </button>
         <button className="btn btn-primary" onClick={exportSelectedCSV}>
           {RU.exportCsv}
         </button>
@@ -553,7 +598,11 @@ export default function Patents() {
             ) : (
               visiblePapers.map((p) => {
                 const checked = selectedIds.includes(p.id);
-                const progress = getProcessingProgress(p.processingStatus);
+                const statusKey = getProcessingStatusKey(p.processingStatus);
+                const statusInfo = statusInfoByKey.get(statusKey) ?? null;
+                const progress = statusInfo?.final ? 100 : getProcessingProgress(p.processingStatus);
+                const statusLabel = statusInfo?.label || getProcessingStatusLabel(p.processingStatus);
+                const progressClass = statusProgressClass(statusInfo, progress);
                 return (
                   <tr key={p.id}>
                     <td>
@@ -584,7 +633,7 @@ export default function Patents() {
                       <div className="paper-progress">
                         <div className="paper-progress-head">
                           <span>
-                            {getProcessingStatusLabel(p.processingStatus)}
+                            {statusLabel}
                           </span>
                           <span>{progress}%</span>
                         </div>
@@ -597,7 +646,7 @@ export default function Patents() {
                           aria-valuenow={progress}
                         >
                           <div
-                            className={`paper-progress-fill ${p.processingStatus === "failed" ? "failed" : progress === 100 ? "done" : ""}`}
+                            className={`paper-progress-fill ${progressClass}`}
                             style={{
                               width: `${Math.max(3, progress)}%`,
                             }}

@@ -22,8 +22,8 @@ export default function PipelineReadinessPanel({ counts, pipeline }: Props) {
     { label: "Контент-блоки", value: pipeline.contentPartsPercent, hint: `${counts.withContentParts}/${counts.totalPapers}` },
     { label: "Контент готов", value: pipeline.contentReadyPercent, hint: `${counts.contentReady}/${counts.totalPapers}` },
     { label: "Эмбеддинги в БД", value: pipeline.embeddingPercent, hint: `${counts.withEmbeddings}/${counts.totalPapers}` },
-    { label: "Индекс Vector", value: pipeline.vectorPercent, hint: `${counts.vectorIndexed}/${counts.withEmbeddings} из эмбеддингов` },
-    { label: "RAG/Chroma", value: pipeline.ragPercent, hint: `${counts.ragReady}/${counts.ragCandidates} кандидатов` },
+    { label: "Векторный индекс", value: pipeline.vectorPercent, hint: `${counts.vectorIndexed}/${counts.withEmbeddings} из эмбеддингов` },
+    { label: "RAG-индексе", value: pipeline.ragPercent, hint: `${counts.ragReady}/${counts.ragCandidates} кандидатов` },
     { label: "Qwen-анализ", value: pipeline.qwenPercent, hint: `${counts.qwenReady}/${counts.totalPapers}` },
   ];
 
@@ -31,9 +31,9 @@ export default function PipelineReadinessPanel({ counts, pipeline }: Props) {
     missing(counts.totalPapers, counts.withFullText) > 0 ? `${missing(counts.totalPapers, counts.withFullText)} документов без полного текста` : null,
     missing(counts.totalPapers, counts.withContentParts) > 0 ? `${missing(counts.totalPapers, counts.withContentParts)} документов без контент-блоков` : null,
     missing(counts.totalPapers, counts.withEmbeddings) > 0 ? `${missing(counts.totalPapers, counts.withEmbeddings)} документов без эмбеддингов` : null,
-    Math.max(0, counts.withEmbeddings - counts.vectorIndexed) > 0 ? `${Math.max(0, counts.withEmbeddings - counts.vectorIndexed)} документов с эмбеддингами не подтверждены в Vector index` : null,
-    Math.max(0, counts.ragCandidates - counts.ragReady) > 0 ? `${Math.max(0, counts.ragCandidates - counts.ragReady)} RAG-кандидатов не подтверждены в RAG/Chroma` : null,
-    counts.contentQueued > 0 ? `${counts.contentQueued} документов в очереди обработки PDF/контента` : null,
+    Math.max(0, counts.withEmbeddings - counts.vectorIndexed) > 0 ? `${Math.max(0, counts.withEmbeddings - counts.vectorIndexed)} документов с эмбеддингами не подтверждены в векторном индексе` : null,
+    Math.max(0, counts.ragCandidates - counts.ragReady) > 0 ? `${Math.max(0, counts.ragCandidates - counts.ragReady)} RAG-кандидатов не подтверждены в RAG-индексе` : null,
+    counts.contentQueued > 0 ? `${counts.contentQueued} документов в очереди обработки PDF и контента` : null,
     counts.processingErrors > 0 ? `${counts.processingErrors} документов с ошибкой обработки` : null,
   ].filter(Boolean) as string[];
 

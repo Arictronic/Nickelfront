@@ -76,7 +76,7 @@ type PaperDetailResponseApiModel = {
   status_info: PaperProcessingStatusInfo;
 };
 
-export type PaperListSortBy = "id" | "authors" | "created_at" | "publication_date";
+export type PaperListSortBy = "id" | "authors" | "created_at" | "publication_date" | "relevance";
 export type PaperListSortDir = "asc" | "desc";
 
 type PaperContentPartApiModel = {

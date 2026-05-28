@@ -3,6 +3,7 @@ import type { DashboardActionName, DashboardActionPayload, DashboardRecommendedA
 
 interface Props {
   recommendedActions?: DashboardRecommendedAction[];
+  isAdmin?: boolean;
   runningAction?: string | null;
   actionStatus?: string | null;
   actionError?: string | null;
@@ -25,10 +26,10 @@ const adminActions: Array<{
 }> = [
   {
     name: "process_pdf_backlog",
-    label: "Обработать очередь PDF",
-    hint: "Поставить документы без полного текста и контент-блоков в очередь Celery",
+    label: "Обработать PDF и текст",
+    hint: "Поставить документы с PDF/ссылкой/текстовым fallback в очередь Celery",
     payload: { limit: 100, pdf_mode: "auto" },
-    confirm: "Поставить до 100 документов в очередь обработки PDF/контента?",
+    confirm: "Поставить до 100 документов в очередь обработки PDF и контента?",
   },
   {
     name: "retry_failed_content",
@@ -46,29 +47,30 @@ const adminActions: Array<{
   },
   {
     name: "reindex_vector_store",
-    label: "Синхронизировать Vector",
-    hint: "Добавить/обновить в Vector index все документы с эмбеддингами из PostgreSQL, без очистки и без лимита",
+    label: "Синхронизировать векторный индекс",
+    hint: "Добавить/обновить в векторном индексе все документы с эмбеддингами из PostgreSQL, без очистки и без лимита",
     payload: {},
-    confirm: "Синхронизировать Vector index со ВСЕМИ эмбеддингами из PostgreSQL?",
+    confirm: "Синхронизировать векторный индекс со ВСЕМИ эмбеддингами из PostgreSQL?",
   },
   {
     name: "rebuild_vector_store_full",
-    label: "Полная пересборка Vector",
-    hint: "Очистить Vector index и заново добавить все документы с эмбеддингами из PostgreSQL",
+    label: "Полная пересборка векторного индекса",
+    hint: "Очистить векторный индекс и заново добавить все документы с эмбеддингами из PostgreSQL",
     payload: {},
-    confirm: "ВНИМАНИЕ: Vector index будет очищен и пересобран полностью по ВСЕМ эмбеддингам. Продолжить?",
+    confirm: "ВНИМАНИЕ: векторный индекс будет очищен и пересобран полностью по ВСЕМ эмбеддингам. Продолжить?",
   },
   {
     name: "rebuild_rag_index",
-    label: "Пересобрать RAG/Chroma",
-    hint: "Очистить RAG/Chroma и заново добавить весь готовый контент статей, без лимита",
+    label: "Пересобрать RAG-индекс",
+    hint: "Очистить RAG-индекс и заново добавить весь готовый контент статей, без лимита",
     payload: {},
-    confirm: "ВНИМАНИЕ: RAG/Chroma будет очищен и полностью пересобран по ВСЕМ готовым документам. Продолжить?",
+    confirm: "ВНИМАНИЕ: RAG-индекс будет очищен и полностью пересобран по ВСЕМ готовым документам. Продолжить?",
   },
 ];
 
 export default function QuickActionsPanel({
   recommendedActions = [],
+  isAdmin = false,
   runningAction = null,
   actionStatus = null,
   actionError = null,
@@ -98,17 +100,19 @@ export default function QuickActionsPanel({
           {recommendedActions.slice(0, 3).map((action) => {
             if (action.actionName) {
               const running = runningAction === action.actionName;
+              const blocked = !isAdmin;
               return (
                 <button
                   key={`${action.title}:${action.actionName}`}
                   type="button"
                   className={`dashboard-recommended-action ${actionClass(action.kind)}`}
-                  disabled={Boolean(runningAction)}
+                  disabled={blocked || Boolean(runningAction)}
+                  title={blocked ? "Действие доступно только администратору" : undefined}
                   onClick={() => runAction(action.actionName!, action.actionPayload || undefined, `${action.title}?`)}
                 >
                   <span>{action.title}</span>
                   <small>{action.description}</small>
-                  <em>{running ? "Запускаю…" : action.actionLabel}</em>
+                  <em>{blocked ? "Только администратор" : running ? "Запускаю…" : action.actionLabel}</em>
                 </button>
               );
             }
@@ -123,27 +127,34 @@ export default function QuickActionsPanel({
         </div>
       )}
 
-      <div className="dashboard-admin-actions">
-        <strong>Админ-действия</strong>
-        <div className="dashboard-admin-action-grid">
-          {adminActions.map((action) => {
-            const running = runningAction === action.name;
-            return (
-              <button
-                key={action.name}
-                type="button"
-                className="dashboard-admin-action"
-                disabled={Boolean(runningAction)}
-                onClick={() => runAction(action.name, action.payload, action.confirm)}
-              >
-                <span>{action.label}</span>
-                <small>{action.hint}</small>
-                <em>{running ? "Запускаю…" : "Запустить"}</em>
-              </button>
-            );
-          })}
+      {isAdmin ? (
+        <div className="dashboard-admin-actions">
+          <strong>Администрирование индексов и контента</strong>
+          <div className="dashboard-admin-action-grid">
+            {adminActions.map((action) => {
+              const running = runningAction === action.name;
+              return (
+                <button
+                  key={action.name}
+                  type="button"
+                  className="dashboard-admin-action"
+                  disabled={Boolean(runningAction)}
+                  onClick={() => runAction(action.name, action.payload, action.confirm)}
+                >
+                  <span>{action.label}</span>
+                  <small>{action.hint}</small>
+                  <em>{running ? "Запускаю…" : "Запустить"}</em>
+                </button>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="dashboard-admin-locked">
+          <strong>Администрирование скрыто</strong>
+          <small>Пересборка PDF и контента, эмбеддингов, векторного индекса и RAG-индекса доступна только администратору.</small>
+        </div>
+      )}
 
     </section>
   );

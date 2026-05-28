@@ -1,12 +1,39 @@
 @echo off
+rem ============================================================================
+rem Safe outer wrapper: keeps the console open even if the inner doctor/setup
+rem exits early because of a batch syntax/runtime error.
+rem ============================================================================
+if /I not "%NF_DOCTOR_SETUP_INNER%"=="1" (
+    set "NF_DOCTOR_SETUP_INNER=1"
+    set "NF_DOCTOR_SETUP_INNER_NO_PAUSE=1"
+    set "NF_DOCTOR_SETUP_KEEP_OPEN=1"
+    for %%A in (%*) do if /I "%%~A"=="--no-pause" set "NF_DOCTOR_SETUP_KEEP_OPEN=0"
+    echo ==============================================================================
+    echo Nickelfront Doctor + Setup launcher
+    echo Console started at: %DATE% %TIME%
+    echo Script: %~f0
+    echo ==============================================================================
+    echo.
+    cmd /d /c ""%~f0" %*"
+    set "NF_DOCTOR_SETUP_RC=%ERRORLEVEL%"
+    echo.
+    echo ==============================================================================
+    echo Nickelfront Doctor + Setup finished with exit code: %NF_DOCTOR_SETUP_RC%
+    echo Console finished at: %DATE% %TIME%
+    echo ==============================================================================
+    echo.
+    if not "%NF_DOCTOR_SETUP_KEEP_OPEN%"=="0" pause
+    exit /b %NF_DOCTOR_SETUP_RC%
+)
+
 chcp 65001 >nul
 setlocal EnableExtensions EnableDelayedExpansion
 
-title Nickelfront Doctor + Setup FIXED v23
+title Nickelfront Doctor + Setup FIXED v25
 
 rem ============================================================================
 rem Nickelfront Doctor + Setup
-rem VERSION: 2026-05-28.02-INSTALL-ORCHESTRATION-FIX
+rem VERSION: 2026-05-28.04-NO-PARSER-REQ-CHECK
 rem
 rem Главное в этой версии:
 rem   1) Читает реальные DATABASE_URL и REDIS_URL из .env.
@@ -17,10 +44,12 @@ rem   5) RAG обслуживается backend; legacy standalone rag\requireme
 rem   6) Не закрывает окно при ошибке/раннем выходе, пишет логи в logs\run.
 rem   7) v22: убраны хрупкие inline python/node команды, которые ломались в cmd.exe.
 rem   8) v23: единый env-loader, constraints, Redis helper, frontend full-check, health-gated run_all.
+rem   9) v24: safe wrapper — окно не закрывается даже при раннем падении doctor/setup.
+rem  10) v25: parser dependencies полностью идут через корневой requirements.txt.
 rem
 rem ============================================================================
 
-set "SCRIPT_VERSION=2026-05-28.02-INSTALL-ORCHESTRATION-FIX"
+set "SCRIPT_VERSION=2026-05-28.04-NO-PARSER-REQ-CHECK"
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "PROJECT_ROOT="
@@ -113,6 +142,7 @@ call :banner
 call :preflight
 call :summary
 
+if "%FATAL%"=="1" goto finish_error
 if "%SKIP_INSTALL%"=="1" goto finish_ok
 
 if "%AUTO_YES%"=="1" (
@@ -137,6 +167,7 @@ goto finish_ok
 rem Разбор аргументов через SHIFT безопаснее, чем FOR %%A IN (%*):
 rem FOR ломается, если в аргументах/путях случайно есть спецсимволы cmd.
 if "%~1"=="" exit /b 0
+if /I "%~1"=="--no-pause" shift & goto parse_args
 if /I "%~1"=="--yes" set "AUTO_YES=1"
 if /I "%~1"=="-y" set "AUTO_YES=1"
 if /I "%~1"=="--check-only" set "SKIP_INSTALL=1"
@@ -311,12 +342,28 @@ for /f "tokens=1,2 delims=." %%a in ("%BEST_PY_VERSION%") do (
     set "BEST_PY_MAJOR=%%a"
     set "BEST_PY_MINOR=%%b"
 )
+if not defined BEST_PY_MAJOR (
+    call :bad "Не удалось определить major-версию Python: %BEST_PY_VERSION%"
+    set "FATAL=1"
+    exit /b 1
+)
+if not defined BEST_PY_MINOR (
+    call :bad "Не удалось определить minor-версию Python: %BEST_PY_VERSION%"
+    set "FATAL=1"
+    exit /b 1
+)
 if not "%BEST_PY_MAJOR%"=="3" (
     call :bad "Выбран не Python 3: %BEST_PY_VERSION%"
     set "FATAL=1"
     exit /b 1
 )
-if %BEST_PY_MINOR% LSS 10 (
+set /a "NF_BEST_PY_MINOR_NUM=%BEST_PY_MINOR%" >nul 2>nul
+if errorlevel 1 (
+    call :bad "Некорректная minor-версия Python: %BEST_PY_VERSION%"
+    set "FATAL=1"
+    exit /b 1
+)
+if %NF_BEST_PY_MINOR_NUM% LSS 10 (
     call :warn "Python %BEST_PY_VERSION% староват. Для проекта лучше 3.13/3.12/3.11/3.10."
 )
 if "%PY13_PROJECT%"=="1" if not "%BEST_PY_MINOR%"=="13" (
@@ -438,11 +485,6 @@ exit /b 0
 :check_project_files
 if exist "requirements.txt" (call :ok "requirements.txt найден.") else call :bad "requirements.txt не найден."
 if exist "pyproject.toml" (call :ok "pyproject.toml найден.") else call :warn "pyproject.toml не найден."
-if exist "parser_alpha\requirements.txt" (
-    call :warn "parser_alpha\requirements.txt найден, но отдельная установка parser-зависимостей отключена: зависимости объединены в корневой requirements.txt."
-) else (
-    call :ok "parser_alpha зависимости объединены в корневой requirements.txt; отдельный parser_alpha\requirements.txt не нужен."
-)
 if exist "rag\requirements.txt" (
     call :info "Backend-only RAG: legacy rag\requirements.txt найден, но не используется и не ставится."
 ) else (
@@ -909,8 +951,6 @@ if exist "requirements.txt" (
     ) else call :ok "requirements.txt установлен/проверен."
 )
 
-call :info "parser_alpha\requirements.txt не устанавливается отдельно: parser-зависимости объединены в корневой requirements.txt."
-
 if exist "qwen_service\service.py" (
     call :info "Проверяю импорт qwen_service..."
     "%VENV_PY%" -c "import sys; sys.path.insert(0,'.'); import qwen_service.service; print('qwen_service import ok')" >>"%LOG_FILE%" 2>>&1
@@ -1370,7 +1410,7 @@ echo Служебные файлы doctor/setup: "%RUN_ROOT%"
 echo Окно НЕ закроется, можно скопировать текст.
 echo ==============================================================================
 echo.
-pause
+if /I not "%NF_DOCTOR_SETUP_INNER_NO_PAUSE%"=="1" pause
 exit /b 0
 
 :finish_error
@@ -1385,5 +1425,5 @@ echo Служебные файлы doctor/setup: "%RUN_ROOT%"
 echo Окно НЕ закроется, можно скопировать ошибку.
 echo ==============================================================================
 echo.
-pause
+if /I not "%NF_DOCTOR_SETUP_INNER_NO_PAUSE%"=="1" pause
 exit /b 1

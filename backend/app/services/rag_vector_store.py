@@ -128,6 +128,28 @@ class RAGVectorStore:
             logger.error("Failed to add docs: %s", e)
             return []
 
+    def delete_paper(self, paper_id: int) -> bool:
+        """Best-effort удаление всех RAG-документов одной статьи из Chroma."""
+        try:
+            client = self._init_client()
+            collection = self._get_or_create_collection(client)
+            deleted_any = False
+            try:
+                collection.delete(where={"paper_id": int(paper_id)})
+                deleted_any = True
+            except Exception as exc:
+                logger.debug("RAG delete by metadata skipped for paper %s: %s", paper_id, exc)
+            try:
+                collection.delete(ids=[f"paper_{paper_id}"])
+                deleted_any = True
+            except Exception as exc:
+                logger.debug("RAG delete by direct id skipped for paper %s: %s", paper_id, exc)
+            return deleted_any
+        except Exception as e:
+            logger.warning("Failed to delete RAG documents for paper %s: %s", paper_id, e)
+            return False
+
+
     def get_indexed_paper_ids(self, batch_size: int = 5000) -> set[int]:
         """Вернуть paper_id, реально присутствующие в RAG/Chroma.
 

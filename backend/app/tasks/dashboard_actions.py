@@ -120,22 +120,41 @@ async def _queue_content_candidates_async(
         paper_service = PaperService(db)
         active_expr = PaperModel.processing_status.in_(sorted(CONTENT_ACTIVE_STATUSES))
         source_expr = PaperModel.source == source if source else True
+        content_parts_expr = exists(
+            select(PaperContentPart.id).where(
+                and_(
+                    PaperContentPart.paper_id == PaperModel.id,
+                    or_(_text_present_expr(PaperContentPart.markdown_text), _text_present_expr(PaperContentPart.raw_text)),
+                )
+            )
+        )
+        full_text_expr = _text_present_expr(PaperModel.full_text)
+        abstract_expr = _text_present_expr(PaperModel.abstract)
+        processable_source_expr = or_(
+            _text_present_expr(PaperModel.pdf_url),
+            _text_present_expr(PaperModel.pdf_local_path),
+            _text_present_expr(PaperModel.url),
+            _text_present_expr(PaperModel.source_id),
+            abstract_expr,
+            full_text_expr,
+            content_parts_expr,
+        )
+        missing_content_expr = and_(
+            ~content_parts_expr,
+            or_(~full_text_expr, PaperModel.processing_status.in_(["pending", "embedding_skipped"])),
+        )
 
         if failed_only:
-            candidate_expr = or_(
-                PaperModel.processing_status.in_(sorted(CONTENT_ERROR_STATUSES)),
-                _text_present_expr(PaperModel.processing_error),
-            )
-        else:
             candidate_expr = and_(
                 or_(
-                    PaperModel.full_text.is_(None),
-                    func.length(func.trim(cast(PaperModel.full_text, String))) == 0,
-                    PaperModel.pdf_local_path.is_(None),
-                    PaperModel.processing_status.in_(["pending", "embedding_skipped"]),
+                    PaperModel.processing_status.in_(sorted(CONTENT_ERROR_STATUSES)),
+                    _text_present_expr(PaperModel.processing_error),
                 ),
+                processable_source_expr,
                 ~active_expr,
             )
+        else:
+            candidate_expr = and_(missing_content_expr, processable_source_expr, ~active_expr)
 
         stmt = (
             select(PaperModel.id)
@@ -154,13 +173,14 @@ async def _queue_content_candidates_async(
                 {"stage": "queueing_content", "current": index, "total": len(paper_ids), "queued": queued},
             )
             try:
+                async_result = process_paper_content_task.apply_async(args=[paper_id, pdf_mode], queue=settings.CONTENT_QUEUE_NAME)
+                child_task_id = str(getattr(async_result, "id", "") or task_id or "") or None
                 await paper_service.update_paper(
                     paper_id,
                     processing_status="queued_for_content_processing",
-                    content_task_id=task_id,
+                    content_task_id=child_task_id,
                     processing_error=None,
                 )
-                process_paper_content_task.apply_async(args=[paper_id, pdf_mode], queue=settings.CONTENT_QUEUE_NAME)
                 queued += 1
             except Exception as exc:
                 logger.warning("Failed to queue content pipeline from dashboard: paper_id={}, error={}", paper_id, exc)
@@ -284,7 +304,7 @@ async def _sync_vector_store_async(
     if clear_first:
         cleared = await asyncio.to_thread(vector_service.clear)
         if not cleared:
-            result = {"status": "failed", "stage": "vector_clear_failed", "indexed": 0, "errors": ["Не удалось очистить Vector index"]}
+            result = {"status": "failed", "stage": "vector_clear_failed", "indexed": 0, "errors": ["Не удалось очистить векторный индекс"]}
             _safe_update_state(task_self, "FAILURE", result)
             return result
 
@@ -394,7 +414,7 @@ async def _rebuild_rag_index_async(task_self: Any) -> dict[str, Any]:
     rag_store = get_rag_vector_store()
     cleared = await asyncio.to_thread(rag_store.clear)
     if not cleared:
-        result = {"status": "failed", "stage": "rag_clear_failed", "indexed": 0, "errors": ["Не удалось очистить RAG/Chroma"]}
+        result = {"status": "failed", "stage": "rag_clear_failed", "indexed": 0, "errors": ["Не удалось очистить RAG-индекс"]}
         _safe_update_state(task_self, "FAILURE", result)
         return result
 

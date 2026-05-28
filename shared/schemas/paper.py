@@ -320,6 +320,7 @@ class PaperListItem(BaseModel):
     updated_at: datetime | None = None
     has_pdf: bool = False
     has_full_text: bool = False
+    rank: float | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

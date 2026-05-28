@@ -20,12 +20,12 @@ export default function DashboardKpiGrid({ counts, pipeline, jobs }: Props) {
     { label: "Полный текст", value: formatNumber(counts.withFullText), hint: percent(pipeline.fullTextPercent), tone: "success" },
     { label: "Контент-блоки", value: formatNumber(counts.withContentParts), hint: percent(pipeline.contentPartsPercent), tone: "neutral" },
     { label: "Эмбеддинги", value: formatNumber(counts.withEmbeddings), hint: percent(pipeline.embeddingPercent), tone: "success" },
-    { label: "Индекс Vector", value: formatNumber(counts.vectorIndexed), hint: `${percent(pipeline.vectorPercent)} от эмбеддингов`, tone: "primary" },
-    { label: "RAG/Chroma", value: formatNumber(counts.ragReady), hint: `${percent(pipeline.ragPercent)} кандидатов`, tone: "primary" },
+    { label: "Векторный индекс", value: formatNumber(counts.vectorIndexed), hint: `${percent(pipeline.vectorPercent)} от эмбеддингов`, tone: "primary" },
+    { label: "RAG-индексе", value: formatNumber(counts.ragReady), hint: `${percent(pipeline.ragPercent)} кандидатов`, tone: "primary" },
     { label: "Qwen-анализ", value: formatNumber(counts.qwenReady), hint: percent(pipeline.qwenPercent), tone: "neutral" },
     { label: "Активных задач", value: formatNumber(jobs.active), hint: `очередь: ${formatNumber(jobs.queued)}`, tone: jobs.active ? "warning" : "neutral" },
     { label: "Ошибок обработки", value: formatNumber(counts.processingErrors + jobs.failedRecent), hint: `${formatNumber(counts.contentQueued)} в обработке`, tone: counts.processingErrors || jobs.failedRecent ? "danger" : "success" },
-    { label: "Качество базы", value: percent(pipeline.qualityPercent), hint: "метаданные/текст/Vector/RAG", tone: "primary" },
+    { label: "Качество базы", value: percent(pipeline.qualityPercent), hint: "метаданные/текст/вектор/RAG", tone: "primary" },
   ];
 
   return (

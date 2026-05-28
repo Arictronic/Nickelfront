@@ -115,9 +115,11 @@ const RU = {
   pdfLen: "PDF",
   pdfLoading: "PDF загружается...",
   pdfLoadError: "PDF недоступен",
+  loadPdfPreview: "Показать PDF",
   pdfNotCached: "PDF-ссылка есть, но файл ещё не сохранён локально. Запустите обработку документа, чтобы скачать PDF через очередь.",
   queuePdfProcessing: "Поставить PDF в очередь",
   articleText: "Текст статьи",
+  fullTextPreviewNotice: "На главной показан только быстрый предпросмотр текста. Полный документ открывайте во вкладке «Текст по страницам».",
   reportTitle: "Отчёт по статье",
   reportLoadError: "JSON-отчёт не загрузился. Показаны доступные данные статьи.",
   exportPdf: "Экспорт PDF",
@@ -176,6 +178,8 @@ const RU = {
 };
 
 const LEGACY_PAGE_BLOCK_RE = /(?:^|\n)\s*#{1,6}\s*(?:Pages|Страницы?)\s+(\d+)(?:\s*-\s*(\d+))?[^\n]*\n+/gi;
+const MAIN_TEXT_PART_PREVIEW_LIMIT = 3;
+const MAIN_TEXT_CHAR_PREVIEW_LIMIT = 30000;
 
 function isMarkdownStructuralLine(line: string): boolean {
   const value = line.trim();
@@ -489,6 +493,8 @@ function aggregateStoredPartsByPage(parts: PaperContentPart[], fallbackParts: Di
 
 function getRegenerationKey(part: DisplayPart | null): string | null {
   if (!part) return null;
+  const sourcePartIds = Array.from(new Set(part.sourcePartIds.filter((id) => Number.isFinite(id))));
+  if (sourcePartIds.length > 1) return `parts-${sourcePartIds.join("-")}`;
   if (part.id) return `part-${part.id}`;
   if (part.pageStart && part.pageEnd) return `pages-${part.pageStart}-${part.pageEnd}`;
   return null;
@@ -659,6 +665,12 @@ function MarkdownText({ text }: { text: string }) {
       </ReactMarkdown>
     </div>
   );
+}
+
+function truncateForPreview(text: string, maxChars: number): string {
+  const value = text || "";
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars).trimEnd()}\n\n…`;
 }
 
 
@@ -869,6 +881,7 @@ export default function PatentDetail() {
   const [pdfObjectUrl, setPdfObjectUrl] = useState<string | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [pdfError, setPdfError] = useState<string | null>(null);
+  const [pdfPreviewRequested, setPdfPreviewRequested] = useState(false);
   const [tab, setTab] = useState<Tab>("main");
   const [activePartIndex, setActivePartIndex] = useState(0);
   const [textViewMode, setTextViewMode] = useState<TextViewMode>("ai");
@@ -914,6 +927,7 @@ export default function PatentDetail() {
     setReport(null);
     setReportWarning(null);
     setActivePartIndex(0);
+    setPdfPreviewRequested(false);
     loadPaper();
     getPublicDisplaySettings()
       .then((value) => setShowExtractionDiagnostics(value.show_extraction_diagnostics ?? true))
@@ -934,7 +948,7 @@ export default function PatentDetail() {
     let active = true;
     let objectUrl: string | null = null;
 
-    if (!paper?.id || !(paper.pdfUrl || paper.pdfLocalPath)) {
+    if (!paper?.id || !(paper.pdfUrl || paper.pdfLocalPath) || !pdfPreviewRequested) {
       setPdfObjectUrl(null);
       setPdfLoading(false);
       setPdfError(null);
@@ -970,7 +984,7 @@ export default function PatentDetail() {
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [paper?.id, paper?.pdfUrl, paper?.pdfLocalPath]);
+  }, [paper?.id, paper?.pdfUrl, paper?.pdfLocalPath, pdfPreviewRequested]);
 
   const fullText = paper?.fullText ?? "";
   const hasFullText = Boolean(fullText.trim().length);
@@ -1000,6 +1014,10 @@ export default function PatentDetail() {
   }, [contentParts, legacyMarkdownParts]);
 
   const displayedAiChars = displayParts.reduce((sum, part) => sum + (part.markdownTextChars || part.markdown.length || 0), 0);
+  const mainPreviewParts = displayParts.slice(0, MAIN_TEXT_PART_PREVIEW_LIMIT);
+  const hiddenMainPreviewPartsCount = Math.max(0, displayParts.length - mainPreviewParts.length);
+  const fallbackFullTextPreview = truncateForPreview(paper?.fullText ?? "", MAIN_TEXT_CHAR_PREVIEW_LIMIT);
+  const fallbackFullTextTruncated = Boolean((paper?.fullText?.length ?? 0) > MAIN_TEXT_CHAR_PREVIEW_LIMIT);
   const selectedPart = displayParts[activePartIndex] ?? null;
 
   useEffect(() => {
@@ -1067,7 +1085,10 @@ export default function PatentDetail() {
     setRegeneratingPartKey(key);
     setActionError(null);
     try {
-      if (part.id) {
+      const sourcePartIds = Array.from(new Set(part.sourcePartIds.filter((partId) => Number.isFinite(partId))));
+      if (sourcePartIds.length > 1) {
+        await Promise.all(sourcePartIds.map((partId) => regeneratePaperContentPart(paper.id, partId, mode)));
+      } else if (part.id) {
         await regeneratePaperContentPart(paper.id, part.id, mode);
       } else if (part.pageStart && part.pageEnd) {
         await regeneratePaperMarkdownPages(paper.id, part.pageStart, part.pageEnd, mode);
@@ -1279,7 +1300,9 @@ export default function PatentDetail() {
           {hasPdf && (
             <section className="article-section">
               <h2 className="article-section-title">{RU.pdfLen}</h2>
-              {pdfObjectUrl ? (
+              {hasLocalPdf && !pdfPreviewRequested ? (
+                <button className="btn" onClick={() => setPdfPreviewRequested(true)}>{RU.loadPdfPreview}</button>
+              ) : pdfObjectUrl ? (
                 <iframe
                   title="paper-pdf"
                   src={pdfObjectUrl}
@@ -1346,7 +1369,7 @@ export default function PatentDetail() {
 
                   <div className="article-text-scroll-panel">
                     <div className="markdown-parts-readable">
-                      {displayParts.map((part, idx) => {
+                      {mainPreviewParts.map((part, idx) => {
                         const rawStatus = getRawPartStatus(part);
                         const aiStatus = getAiPartStatus(part);
                         const text = textViewMode === "raw" ? part.rawText || "" : part.markdown || "";
@@ -1391,9 +1414,20 @@ export default function PatentDetail() {
                       })}
                     </div>
                   </div>
+                  {hiddenMainPreviewPartsCount > 0 && (
+                    <p className="muted">
+                      {RU.fullTextPreviewNotice} Скрыто частей: {hiddenMainPreviewPartsCount}. {" "}
+                      <button type="button" className="action-link as-button" onClick={() => setTab("parts")}>Открыть полный текст</button>
+                    </p>
+                  )}
                 </>
               ) : (
-                <MarkdownText text={paper.fullText ?? ""} />
+                <>
+                  <MarkdownText text={fallbackFullTextPreview} />
+                  {fallbackFullTextTruncated && (
+                    <p className="muted">{RU.fullTextPreviewNotice}</p>
+                  )}
+                </>
               )}
             </section>
           )}

@@ -57,7 +57,7 @@ function taskNameLabel(value: unknown): string {
   const labels: Record<string, string> = {
     "app.tasks.parse_tasks.parse_papers_task": "Парсинг источника",
     "app.tasks.parse_tasks.parse_all_sources_task": "Парсинг всех источников",
-    "app.tasks.dashboard.process_pdf_backlog": "Очередь PDF/контента",
+    "app.tasks.dashboard.process_pdf_backlog": "Очередь PDF и контента",
     "app.tasks.dashboard.retry_failed_content": "Повтор обработки контента",
     "app.tasks.dashboard.rebuild_embeddings": "Сбор эмбеддингов",
     "app.tasks.dashboard.reindex_vector_store": "Переиндексация Chroma",

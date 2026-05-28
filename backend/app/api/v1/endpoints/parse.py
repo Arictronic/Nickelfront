@@ -321,7 +321,7 @@ async def get_papers(
     date_to: date | None = Query(None, description="Дата публикации по"),
     processing_status: str | None = Query(None, description="Фильтр по статусу обработки"),
     full_text_only: bool = Query(False, description="Только записи с извлечённым полным текстом"),
-    sort_by: Literal["id", "authors", "created_at", "publication_date"] = Query("created_at"),
+    sort_by: Literal["id", "authors", "created_at", "publication_date", "relevance"] = Query("created_at"),
     sort_dir: Literal["asc", "desc"] = Query("desc"),
     _current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -426,7 +426,7 @@ async def export_papers_csv(
     date_to: date | None = Query(None, description="Дата публикации по"),
     processing_status: str | None = Query(None, description="Фильтр по статусу обработки"),
     full_text_only: bool = Query(False, description="Только записи с извлечённым полным текстом"),
-    sort_by: Literal["id", "authors", "created_at", "publication_date"] = Query("created_at"),
+    sort_by: Literal["id", "authors", "created_at", "publication_date", "relevance"] = Query("created_at"),
     sort_dir: Literal["asc", "desc"] = Query("desc"),
     max_rows: int = Query(default=10000, ge=1, le=50000),
     _current_user: UserResponse = Depends(get_current_user),
@@ -822,9 +822,6 @@ async def reprocess_paper_content(
     if not paper:
         raise HTTPException(status_code=404, detail="Статья не найдена")
 
-    part_service = PaperContentPartService(db)
-    cleared_parts = await part_service.clear_parts(paper_id)
-
     process_paper_content_task = _get_content_task()
     task = process_paper_content_task.apply_async(
         args=[paper_id, pdf_mode],
@@ -835,13 +832,8 @@ async def reprocess_paper_content(
         processing_status="queued_for_content_processing",
         content_task_id=task.id,
         processing_error=None,
-        full_text=None,
-        summary_ru=None,
-        analysis_ru=None,
-        translation_ru=None,
-        embedding=None,
     )
-    return {"paper_id": paper_id, "task_id": task.id, "status": "queued", "pdf_mode": pdf_mode, "cleared_content_parts": cleared_parts}
+    return {"paper_id": paper_id, "task_id": task.id, "status": "queued", "pdf_mode": pdf_mode, "preserved_existing_content": True}
 
 
 @router.post("/reprocess-all")
@@ -861,12 +853,9 @@ async def reprocess_all_papers(
         raise HTTPException(status_code=500, detail=format_paper_db_error(exc))
 
     process_paper_content_task = _get_content_task()
-    part_service = PaperContentPartService(db)
     queued = 0
-    cleared_total = 0
     task_ids: list[str] = []
     for paper_id in paper_ids:
-        cleared_total += await part_service.clear_parts(paper_id)
         task = process_paper_content_task.apply_async(
             args=[paper_id, pdf_mode],
             queue=settings.CONTENT_QUEUE_NAME,
@@ -876,16 +865,11 @@ async def reprocess_all_papers(
             processing_status="queued_for_content_processing",
             content_task_id=task.id,
             processing_error=None,
-            full_text=None,
-            summary_ru=None,
-            analysis_ru=None,
-            translation_ru=None,
-            embedding=None,
         )
         task_ids.append(task.id)
         queued += 1
 
-    return {"queued": queued, "task_ids": task_ids, "cleared_content_parts": cleared_total, "pdf_mode": pdf_mode}
+    return {"queued": queued, "task_ids": task_ids, "pdf_mode": pdf_mode, "preserved_existing_content": True}
 
 
 @router.delete("/id/{paper_id}")

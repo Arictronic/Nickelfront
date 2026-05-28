@@ -24,14 +24,14 @@ export default function DashboardHeader({ generatedAt, onRefresh, refreshing }: 
         <span className="eyebrow">Nickelfront · операционный центр</span>
         <h2>Главная панель сбора и готовности данных</h2>
         <p>
-          Управление парсерами, очередями обработки PDF/контента, качеством базы и готовностью RAG/Qwen.
+          Управление парсерами, очередями обработки PDF и контента, качеством базы и готовностью RAG/Qwen.
         </p>
       </div>
       <div className="dashboard-hero-actions">
         <button className="btn" type="button" onClick={onRefresh} disabled={refreshing}>
           {refreshing ? "Обновляю…" : "Обновить всё"}
         </button>
-        <div className="dashboard-hero-refresh-meta">Последняя связь с сервером: {formatGeneratedAt(generatedAt)}</div>
+        <div className="dashboard-hero-refresh-meta">Ответ от сервера: {formatGeneratedAt(generatedAt)}</div>
       </div>
     </section>
   );

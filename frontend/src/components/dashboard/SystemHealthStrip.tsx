@@ -13,8 +13,8 @@ const SERVICE_LABELS: Record<string, string> = {
   redis: "Redis",
   celery: "Celery",
   qwen: "Qwen",
-  vector: "Vector",
-  rag: "RAG/Chroma",
+  vector: "Векторный индекс",
+  rag: "RAG-индекс",
 };
 
 function statusClass(status: string | undefined): string {

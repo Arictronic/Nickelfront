@@ -238,14 +238,6 @@ async def _download_pdf_async(
             }
 
 
-
-
-
-        part_service = PaperContentPartService(db)
-        cleared_parts = await part_service.clear_parts(paper_id)
-        if cleared_parts:
-            logger.info("Cleared stale content parts before pipeline: paper_id={}, parts={}", paper_id, cleared_parts)
-
         postprocess = await _get_postprocess_settings(db)
         if not postprocess.get("download_pdf", True):
             await _set_stage(paper_service, paper_id, "pdf_download_skipped", task_id=task_id, error="download_pdf_disabled")
