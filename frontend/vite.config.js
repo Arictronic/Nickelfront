@@ -53,22 +53,40 @@ export default defineConfig(({ mode }) => {
   }
 
   const env = loadEnv(mode, rootEnvDir, '')
-  const apiUrl = env.VITE_API_URL || '/api/v1'
-  const backendPort = env.API_PORT || '8001'
-  const configuredProxyTarget = env.VITE_PROXY_TARGET || env.VITE_BACKEND_URL || `http://127.0.0.1:${backendPort}`
-  let proxyTarget = configuredProxyTarget
+  const apiUrl = String(env.VITE_API_URL || '/api/v1').trim()
+  const backendPort = String(env.API_PORT || env.VITE_API_PORT || '8001').trim()
 
-  try {
-    if (/^https?:\/\//i.test(apiUrl)) {
-      proxyTarget = new URL(apiUrl).origin
+  function normalizeProxyTarget(value) {
+    const raw = String(value || '').trim()
+    if (!raw) return null
+
+    try {
+      if (/^https?:\/\//i.test(raw)) {
+        const url = new URL(raw)
+        // Windows/Node may resolve localhost to IPv6 first and Vite proxy can fail with EACCES.
+        if (url.hostname === 'localhost') {
+          url.hostname = '127.0.0.1'
+        }
+        return url.origin
+      }
+    } catch {
+      return null
     }
-  } catch {
-    // Keep configured proxy target if VITE_API_URL isn't an absolute URL.
+
+    // Relative values like /api/v1 are valid for frontend axios baseURL,
+    // but they are NOT valid as Vite proxy target. Ignore them here.
+    return null
   }
 
-  // Windows/Node may resolve localhost to IPv6 first and Vite proxy can fail with EACCES.
-  // FastAPI is still reachable on 127.0.0.1:8001 in local dev, so prefer IPv4 explicitly.
-  proxyTarget = proxyTarget.replace('http://localhost:', 'http://127.0.0.1:')
+  const proxyTarget = (
+    normalizeProxyTarget(env.VITE_PROXY_TARGET) ||
+    normalizeProxyTarget(env.VITE_BACKEND_URL) ||
+    normalizeProxyTarget(env.VITE_BACKEND_ROOT_URL) ||
+    normalizeProxyTarget(apiUrl) ||
+    `http://127.0.0.1:${backendPort || '8001'}`
+  )
+
+  writeFrontendLog('INFO', `Vite API base: ${apiUrl}; proxy target: ${proxyTarget}`)
 
   return {
     customLogger,
