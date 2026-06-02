@@ -52,6 +52,9 @@ from app.api.v1.endpoints import (
     reports as reports_router,
 )
 from app.api.v1.endpoints import (
+    analysis as analysis_router,
+)
+from app.api.v1.endpoints import (
     search as search_router,
 )
 from app.api.v1.endpoints import (
@@ -257,6 +260,7 @@ app.include_router(monitoring_router.router, prefix="/api/v1")
 app.include_router(search_router.router, prefix="/api/v1")
 app.include_router(qwen_router.router, prefix="/api/v1")
 app.include_router(rag_router.router, prefix="/api/v1")
+app.include_router(analysis_router.router, prefix="/api/v1")
 
 
 @app.get(
