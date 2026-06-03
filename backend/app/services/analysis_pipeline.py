@@ -7,10 +7,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.analysis_prompts import ANALYSIS_OUTPUT_SCHEMA, ANALYSIS_SYSTEM_PROMPT
+from app.core.config import settings
 from app.db.models.analysis_result import AnalysisResult
 from app.db.models.paper import Paper
 from app.db.models.paper_content_part import PaperContentPart
 from app.services.qwen_client import get_qwen_client
+from app.services.rag_vector_store import get_rag_vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,7 @@ class AnalysisPipelineService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.qwen = get_qwen_client()
+        self._rag_store = None
 
     async def _load_paper(self, paper_id: int) -> Paper | None:
         result = await self.db.execute(select(Paper).where(Paper.id == paper_id))
@@ -62,6 +65,37 @@ class AnalysisPipelineService:
         combined_text = "\n\n".join(content_pieces)
         if not combined_text.strip() and paper.full_text:
             combined_text = paper.full_text
+
+        if settings.RAG_ENABLED:
+            rag_fragments = []
+            query_parts = []
+            if paper.title:
+                query_parts.append(paper.title)
+            if paper.abstract:
+                query_parts.append(paper.abstract)
+            if query_parts:
+                query = "\n".join(query_parts)
+                try:
+                    if self._rag_store is None:
+                        self._rag_store = get_rag_vector_store()
+                    results = self._rag_store.similarity_search(query, k=settings.RAG_SEARCH_K)
+                    for doc in results:
+                        meta = doc.metadata or {}
+                        if meta.get("paper_id") == paper_id:
+                            continue
+                        text = (doc.page_content or "").strip()
+                        if text:
+                            rag_fragments.append(text)
+                except Exception:
+                    logger.warning("RAG search failed, continuing without it")
+
+            if rag_fragments:
+                rag_section = "\n\n## Релевантные фрагменты из других статей\n\n" + \
+                    "\n\n---\n\n".join(
+                        f"**Фрагмент {i+1}:**\n{frag[:3000]}"
+                        for i, frag in enumerate(rag_fragments)
+                    )
+                combined_text = combined_text + rag_section
 
         truncated = combined_text[:MAX_CONTEXT_CHARS]
         preview = combined_text[:CONTEXT_PREVIEW_CHARS]

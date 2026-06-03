@@ -169,6 +169,7 @@ class Settings(BaseSettings):
     QWEN_MARKDOWN_PAGE_CHARS: int = 14000
 
 
+    RAG_ENABLED: bool = True
     RAG_CHUNK_SIZE: int = 1000
     RAG_CHUNK_OVERLAP: int = 200
     RAG_SEARCH_K: int = 4
