@@ -56,7 +56,7 @@ const SOURCE_GUIDANCE: Record<PaperSource | "all", SourceGuidance> = {
 };
 
 const EMPTY_OVERVIEW: DashboardOverview = {
-  generatedAt: new Date().toISOString(),
+  generatedAt: "",
   counts: {
     totalPapers: 0,
     todayPapers: 0,
@@ -73,6 +73,8 @@ const EMPTY_OVERVIEW: DashboardOverview = {
     vectorIndexed: 0,
     vectorIndexRecords: 0,
     ragIndexed: 0,
+    vectorIdsStatus: "verified",
+    ragIdsStatus: "verified",
     processingErrors: 0,
     contentQueued: 0,
   },
@@ -169,9 +171,11 @@ export default function Dashboard() {
   const [parsingError, setParsingError] = useState<string | null>(null);
   const [startingParse, setStartingParse] = useState(false);
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
+  const [showBackToTop, setShowBackToTop] = useState(false);
   const isAdmin = !!useAuthStore((state) => state.user?.is_admin);
   const jobsRef = useRef<ParseJob[]>(jobs);
   const pollingRef = useRef(false);
+  const jobsPanelRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     jobsRef.current = jobs;
@@ -202,9 +206,9 @@ export default function Dashboard() {
     ]);
 
     if (overviewRes.status === "fulfilled") setOverview(overviewRes.value);
-    setLatest(latestRes.status === "fulfilled" ? latestRes.value : []);
-    setTrend(trendRes.status === "fulfilled" ? trendRes.value.data?.trend ?? [] : []);
-    setTopKeywords(keywordsRes.status === "fulfilled" ? keywordsRes.value.data?.items ?? [] : []);
+    if (latestRes.status === "fulfilled") setLatest(latestRes.value);
+    if (trendRes.status === "fulfilled") setTrend(trendRes.value.data?.trend ?? []);
+    if (keywordsRes.status === "fulfilled") setTopKeywords(keywordsRes.value.data?.items ?? []);
     if (settingsRes.status === "fulfilled") setParserSettings(settingsRes.value.settings.parser);
 
     const errors = [
@@ -304,7 +308,7 @@ export default function Dashboard() {
         await refreshJobs();
         const hasNewlyFinishedJobs = jobsRef.current.some((job) => {
           const previousStatus = previousById.get(job.jobId);
-          return previousStatus === "in_progress" && ["completed", "cancelled", "failed", "expired"].includes(job.status);
+          return previousStatus === "in_progress" && ["completed", "partial", "cancelled", "failed", "expired"].includes(job.status);
         });
         if (hasNewlyFinishedJobs) await fetchPage({ forceRefresh: true }).catch(() => null);
       } finally {
@@ -315,9 +319,36 @@ export default function Dashboard() {
     return () => window.clearInterval(interval);
   }, [fetchPage, refreshJobs]);
 
+  const scrollToJobsPanel = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      jobsPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, []);
+
+  useEffect(() => {
+    const handleScroll = () => {
+      setShowBackToTop(window.scrollY > 420);
+    };
+
+    handleScroll();
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  const scrollToPageTop = useCallback(() => {
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    window.scrollTo({ top: 0, left: window.scrollX, behavior: "smooth" });
+  }, []);
+
   const startParsing = async (sourceOverride?: PaperSource | "all") => {
     if (startingParse) return;
     setParsingError(null);
+    if (!isAdmin) {
+      setParsingError("Запуск парсинга доступен только администратору");
+      return;
+    }
     const selectedSource = sourceOverride ?? source;
     const normalizedQuery = query.trim();
     if (!normalizedQuery) {
@@ -384,6 +415,7 @@ export default function Dashboard() {
         saveJobs(nextJobs);
         return nextJobs;
       });
+      scrollToJobsPanel();
     } catch (e) {
       setParsingError(extractErrorMessage(e));
     } finally {
@@ -392,6 +424,10 @@ export default function Dashboard() {
   };
 
   const cancelJob = async (jobId: string) => {
+    if (!isAdmin) {
+      setParsingError("Остановка Celery-задач доступна только администратору");
+      return;
+    }
     if (!window.confirm("Остановить задачу? В очереди она будет отменена, а запущенная может не прерваться сразу.")) return;
 
     try {
@@ -421,6 +457,10 @@ export default function Dashboard() {
   };
 
   const deleteJob = async (jobId: string) => {
+    if (!isAdmin) {
+      setParsingError("Удаление записей задач доступно только администратору");
+      return;
+    }
     if (!window.confirm("Удалить задачу из истории? Это не повлияет на Celery, только удалит запись из интерфейса.")) return;
 
     try {
@@ -489,6 +529,7 @@ export default function Dashboard() {
           selectedSourceDisabled={selectedSourceDisabled}
           sourceLimit={sourceLimit}
           startingParse={startingParse}
+          isAdmin={isAdmin}
           error={parsingError}
           onQueryChange={setQuery}
           onSourceChange={setSource}
@@ -509,13 +550,16 @@ export default function Dashboard() {
       <DashboardKpiGrid counts={overview.counts} pipeline={overview.pipeline} jobs={overview.jobs} />
 
       <div className="dashboard-main-grid">
-        <ActiveJobsPanel
-          jobs={jobs}
-          expandedJobId={expandedJobId}
-          onToggle={(jobId) => setExpandedJobId((current) => current === jobId ? null : jobId)}
-          onCancel={cancelJob}
-          onDelete={deleteJob}
-        />
+        <div ref={jobsPanelRef} className="dashboard-jobs-scroll-target">
+          <ActiveJobsPanel
+            jobs={jobs}
+            expandedJobId={expandedJobId}
+            onToggle={(jobId) => setExpandedJobId((current) => current === jobId ? null : jobId)}
+            isAdmin={isAdmin}
+            onCancel={cancelJob}
+            onDelete={deleteJob}
+          />
+        </div>
         <PipelineReadinessPanel counts={overview.counts} pipeline={overview.pipeline} />
       </div>
 
@@ -523,10 +567,21 @@ export default function Dashboard() {
 
       <div className="dashboard-main-grid dashboard-lower-grid">
         <RecentPapersPanel papers={latest} isAdmin={isAdmin} />
-        <DiagnosticsPanel diagnostics={overview.diagnostics} loadErrors={loadErrors} />
+        <DiagnosticsPanel diagnostics={overview.diagnostics} loadErrors={loadErrors} isAdmin={isAdmin} />
       </div>
 
       <DashboardMiniAnalytics trend={trend} keywords={topKeywords} sources={dashboardSources} />
+
+      <button
+        className={`dashboard-back-to-top${showBackToTop ? " is-visible" : ""}`}
+        type="button"
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={scrollToPageTop}
+        aria-label="Наверх"
+        title="Наверх"
+      >
+        ↑
+      </button>
     </div>
   );
 }

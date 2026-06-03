@@ -24,6 +24,15 @@ class Paper(Base):
     full_text = Column(Text, nullable=True)
     keywords = Column(JSON, default=list)
 
+    language_code = Column(String(20), nullable=True, index=True)
+    language_name = Column(String(100), nullable=True)
+    language_confidence = Column(Float, nullable=True)
+    language_source = Column(String(50), nullable=True)
+
+    available_language_codes = Column(JSON, nullable=False, default=list)
+    translation_status = Column(String(50), nullable=True, index=True)
+    translation_task_id = Column(String(100), nullable=True, index=True)
+    translation_error = Column(Text, nullable=True)
 
 
     embedding = Column(JSON, nullable=True)

@@ -19,6 +19,7 @@ if exist "%~dp0scripts\load_env.bat" (
 )
 echo Default mode keeps users, refresh_tokens, system_settings and alembic_version.
 echo Use --include-users or --include-settings only if you really need it.
+echo Use --dry-run to preview database cleanup without deleting anything.
 echo.
 echo Before running cleanup, stop these services if they are open:
 echo   backend, celery workers, qwen workers, qwen_service

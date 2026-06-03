@@ -31,10 +31,15 @@ from pathlib import Path
 _PARSER_ALPHA_DIR = Path(__file__).resolve().parents[1]
 _PROJECT_ROOT = _PARSER_ALPHA_DIR.parent
 _BACKEND_DIR = _PROJECT_ROOT / "backend"
-for _path in (_PROJECT_ROOT, _BACKEND_DIR, _PARSER_ALPHA_DIR):
-    _path_str = str(_path)
-    if _path.exists() and _path_str not in sys.path:
-        sys.path.insert(0, _path_str)
+
+# Keep the canonical project-level `shared` package ahead of parser_alpha.
+# The previous insert(0) loop reversed the intended order and could make
+# `from shared.schemas...` resolve to parser_alpha/shared instead of /shared.
+_PATH_ORDER = (_PROJECT_ROOT, _BACKEND_DIR, _PARSER_ALPHA_DIR)
+_path_strings = [str(_path) for _path in _PATH_ORDER if _path.exists()]
+if _path_strings:
+    sys.path[:] = [_existing for _existing in sys.path if _existing not in _path_strings]
+    sys.path[:0] = _path_strings
 
 
 

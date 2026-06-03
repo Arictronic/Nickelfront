@@ -11,15 +11,19 @@ const LEVEL_LABELS: Record<DashboardDiagnostic["level"], string> = {
 interface Props {
   diagnostics: DashboardDiagnostic[];
   loadErrors: DashboardLoadError[];
+  isAdmin?: boolean;
 }
 
-export default function DiagnosticsPanel({ diagnostics, loadErrors }: Props) {
+const ADMIN_ONLY_PATHS = new Set(["/settings", "/database", "/celery"]);
+
+export default function DiagnosticsPanel({ diagnostics, loadErrors, isAdmin = false }: Props) {
   const apiDiagnostics: DashboardDiagnostic[] = loadErrors.map((error) => ({
     level: "error",
     title: error.label,
     message: error.message,
   }));
   const items = [...apiDiagnostics, ...diagnostics].slice(0, 8);
+  const canOpenAction = (item: DashboardDiagnostic) => Boolean(item.actionTo && item.actionLabel) && (isAdmin || !ADMIN_ONLY_PATHS.has(item.actionTo || ""));
 
   return (
     <section className="panel dashboard-diagnostics-panel">
@@ -41,7 +45,7 @@ export default function DiagnosticsPanel({ diagnostics, loadErrors }: Props) {
             <div>
               <strong>{item.title}</strong>
               <p>{item.message}</p>
-              {item.actionTo && item.actionLabel && <Link to={item.actionTo}>{item.actionLabel} →</Link>}
+              {canOpenAction(item) && <Link to={item.actionTo!}>{item.actionLabel} →</Link>}
             </div>
           </article>
         ))}

@@ -110,6 +110,7 @@ celery_app.conf.update(
         "app.tasks.qwen.ru_analysis": {"queue": settings.QWEN_QUEUE_NAME},
         "app.tasks.qwen.keywords": {"queue": settings.QWEN_QUEUE_NAME},
         "app.tasks.qwen.regenerate_markdown_part": {"queue": settings.QWEN_QUEUE_NAME},
+        "app.tasks.qwen.translate_markdown_parts": {"queue": settings.QWEN_QUEUE_NAME},
         "app.tasks.qwen.ai_ocr_document": {"queue": settings.QWEN_QUEUE_NAME},
         "app.tasks.content_tasks.process_paper_content_task": {"queue": settings.CONTENT_QUEUE_NAME},
         "app.tasks.content_tasks.download_pdf_task": {"queue": settings.CONTENT_QUEUE_NAME},

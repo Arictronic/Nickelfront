@@ -9,6 +9,7 @@ import {
   type CeleryTaskStatus,
 } from "../api/papers";
 import { PAPER_SOURCES } from "../types/paper";
+import { useAuthStore } from "../store/authStore";
 
 type AlloyBatchPaperResult = {
   paper_id: number;
@@ -195,6 +196,7 @@ function propertySummary(alloy: any) {
 }
 
 export default function AlloyAnalysis() {
+  const isAdmin = !!useAuthStore((state) => state.user?.is_admin);
   const [idSpec, setIdSpec] = useState("");
   const [limit, setLimit] = useState(100);
   const [selectedSources, setSelectedSources] = useState<string[]>([]);
@@ -337,6 +339,10 @@ export default function AlloyAnalysis() {
   };
 
   const savePrompt = async () => {
+    if (!isAdmin) {
+      setPromptMessage("Ошибка: изменение промпта доступно только администратору");
+      return;
+    }
     setSavingPrompt(true);
     setPromptMessage(null);
     try {
@@ -546,6 +552,10 @@ export default function AlloyAnalysis() {
   };
 
   const runAnalysis = async () => {
+    if (!isAdmin) {
+      setError("Запуск анализа сплавов доступен только администратору");
+      return;
+    }
     const safeLimit = normalizeLimit(limit);
     setLimit(safeLimit);
     setSubmitting(true);
@@ -602,9 +612,10 @@ export default function AlloyAnalysis() {
           <button
             className="btn btn-primary"
             onClick={runAnalysis}
-            disabled={running}
+            disabled={running || !isAdmin}
+            title={!isAdmin ? "Запуск анализа доступен только администратору" : undefined}
           >
-            {running ? "Анализ выполняется..." : "Запустить анализ"}
+            {running ? "Анализ выполняется..." : isAdmin ? "Запустить анализ" : "Только админ"}
           </button>
         </div>
       </div>
@@ -645,6 +656,11 @@ export default function AlloyAnalysis() {
           Если диапазон ID пустой, будут взяты первые статьи с полным текстом по
           выбранным источникам и лимиту.
         </p>
+        {!isAdmin && (
+          <p className="dashboard-inline-warning" style={{ marginTop: 8 }}>
+            Пакетный анализ через Celery/Qwen доступен только администратору. Результаты можно просматривать.
+          </p>
+        )}
 
         <div className="filters" style={{ marginTop: 14 }}>
           {PAPER_SOURCES.map((source) => (
@@ -701,9 +717,13 @@ export default function AlloyAnalysis() {
                 </button>
               </>
             ) : (
-              <button className="btn" onClick={() => setEditingPrompt(true)}>
-                Изменить
-              </button>
+              isAdmin ? (
+                <button className="btn" onClick={() => setEditingPrompt(true)}>
+                  Изменить
+                </button>
+              ) : (
+                <span className="status neutral">Только админ</span>
+              )
             )}
           </div>
         </div>

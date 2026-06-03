@@ -116,6 +116,104 @@ export type QwenHarUpdateResponse = {
   };
 };
 
+
+export type QwenReadinessCheck = {
+  name: string;
+  status: "ok" | "warning" | "error" | string;
+  ok: boolean;
+  message: string;
+  action?: string | null;
+  [key: string]: unknown;
+};
+
+export type QwenReadinessResponse = {
+  status: "ready" | "warning" | "error" | "unavailable" | string;
+  ok: boolean;
+  service_alive?: boolean;
+  base_url?: string;
+  check_count?: number;
+  error_count?: number;
+  warning_count?: number;
+  checks?: QwenReadinessCheck[];
+  recommendations?: string[];
+  [key: string]: unknown;
+};
+
+export type QwenCacheMaintenanceResponse = {
+  status: "ok" | "warning" | "error" | "unavailable" | string;
+  dry_run?: boolean;
+  provider_called?: boolean;
+  base_url?: string;
+  total_candidates?: number;
+  total_removed?: number;
+  message?: string;
+  file_metadata?: Record<string, unknown>;
+  session_registry?: Record<string, unknown>;
+  before?: Record<string, unknown>;
+  after?: Record<string, unknown>;
+  operations?: {
+    file_metadata?: Record<string, unknown>;
+    session_registry?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+};
+
+export type QwenCacheMaintenanceOptions = {
+  dryRun?: boolean;
+  pruneFileMetadata?: boolean;
+  pruneSessionRegistry?: boolean;
+  fileMaxAgeDays?: number | null;
+  sessionMaxAgeDays?: number | null;
+  clearFileMetadata?: boolean;
+  clearSessionRegistry?: boolean;
+};
+
+
+export type QwenEventJournalEntry = {
+  ts: string;
+  event: string;
+  status: "ok" | "warning" | "error" | "started" | string;
+  message?: string;
+  operation?: string;
+  session_tail?: string;
+  details?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
+export type QwenEventJournalResponse = {
+  status: "ok" | "error" | "unavailable" | string;
+  enabled?: boolean;
+  provider_called?: boolean;
+  base_url?: string;
+  events?: QwenEventJournalEntry[];
+  count?: number;
+  stats?: Record<string, unknown>;
+  message?: string;
+  cleared?: number;
+  [key: string]: unknown;
+};
+
+export type QwenUploadTestResult = {
+  ok: boolean;
+  status: "ok" | "warning" | "error" | string;
+  message: string;
+  service_url?: string;
+  message_used?: string;
+  duration_sec?: number;
+  session_id?: string;
+  file_ids?: string[];
+  error?: string;
+  response_start?: string;
+  service_health?: Record<string, unknown>;
+  token_status?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
+export type QwenUploadTestRunPayload = {
+  message: string;
+};
+
 export type QwenTestChatResult = {
   chat: number;
   started_at_sec: number;
@@ -141,6 +239,8 @@ export type QwenTestResult = {
   duration_spread_sec?: number | null;
   rate_limited_count?: number;
   provider_limited?: boolean;
+  processing_mode?: "parallel" | "sequential_or_limited" | "single_request" | string;
+  parallelism_note?: string;
   service_health?: Record<string, unknown>;
   token_status?: Record<string, unknown>;
   results: QwenTestChatResult[];

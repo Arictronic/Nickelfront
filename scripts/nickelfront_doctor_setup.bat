@@ -1,4 +1,5 @@
 @echo off
+setlocal EnableExtensions EnableDelayedExpansion
 rem ============================================================================
 rem Safe outer wrapper: keeps the console open even if the inner doctor/setup
 rem exits early because of a batch syntax/runtime error.
@@ -7,33 +8,33 @@ if /I not "%NF_DOCTOR_SETUP_INNER%"=="1" (
     set "NF_DOCTOR_SETUP_INNER=1"
     set "NF_DOCTOR_SETUP_INNER_NO_PAUSE=1"
     set "NF_DOCTOR_SETUP_KEEP_OPEN=1"
-    for %%A in (%*) do if /I "%%~A"=="--no-pause" set "NF_DOCTOR_SETUP_KEEP_OPEN=0"
+    if not "%~1"=="" for %%A in (%*) do if /I "%%~A"=="--no-pause" set "NF_DOCTOR_SETUP_KEEP_OPEN=0"
     echo ==============================================================================
     echo Nickelfront Doctor + Setup launcher
-    echo Console started at: %DATE% %TIME%
+    echo Console started at: !DATE! !TIME!
     echo Script: %~f0
     echo ==============================================================================
     echo.
     cmd /d /c ""%~f0" %*"
-    set "NF_DOCTOR_SETUP_RC=%ERRORLEVEL%"
+    set "NF_DOCTOR_SETUP_RC=!ERRORLEVEL!"
     echo.
     echo ==============================================================================
-    echo Nickelfront Doctor + Setup finished with exit code: %NF_DOCTOR_SETUP_RC%
-    echo Console finished at: %DATE% %TIME%
+    echo Nickelfront Doctor + Setup finished with exit code: !NF_DOCTOR_SETUP_RC!
+    echo Console finished at: !DATE! !TIME!
     echo ==============================================================================
     echo.
-    if not "%NF_DOCTOR_SETUP_KEEP_OPEN%"=="0" pause
-    exit /b %NF_DOCTOR_SETUP_RC%
+    if not "!NF_DOCTOR_SETUP_KEEP_OPEN!"=="0" pause
+    exit /b !NF_DOCTOR_SETUP_RC!
 )
 
 chcp 65001 >nul
 setlocal EnableExtensions EnableDelayedExpansion
 
-title Nickelfront Doctor + Setup FIXED v25
+title Nickelfront Doctor + Setup FIXED v27
 
 rem ============================================================================
 rem Nickelfront Doctor + Setup
-rem VERSION: 2026-05-28.04-NO-PARSER-REQ-CHECK
+rem VERSION: 2026-05-28.08-FRONTEND-CHECK-HELPER
 rem
 rem Главное в этой версии:
 rem   1) Читает реальные DATABASE_URL и REDIS_URL из .env.
@@ -43,13 +44,13 @@ rem   4) По умолчанию работает с .venv, как run_backend.b
 rem   5) RAG обслуживается backend; legacy standalone rag\requirements.txt не ставится и не используется.
 rem   6) Не закрывает окно при ошибке/раннем выходе, пишет логи в logs\run.
 rem   7) v22: убраны хрупкие inline python/node команды, которые ломались в cmd.exe.
-rem   8) v23: единый env-loader, constraints, Redis helper, frontend full-check, health-gated run_all.
+rem   8) v23: единый env-loader, Redis helper, frontend full-check, health-gated run_all.
 rem   9) v24: safe wrapper — окно не закрывается даже при раннем падении doctor/setup.
 rem  10) v25: parser dependencies полностью идут через корневой requirements.txt.
 rem
 rem ============================================================================
 
-set "SCRIPT_VERSION=2026-05-28.04-NO-PARSER-REQ-CHECK"
+set "SCRIPT_VERSION=2026-05-28.08-FRONTEND-CHECK-HELPER"
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "PROJECT_ROOT="
@@ -576,10 +577,10 @@ call :parse_redis_url
 
 call :ok "Настройки из .env: PostgreSQL %POSTGRES_HOST%:%POSTGRES_PORT%/%POSTGRES_DB%, Redis %REDIS_HOST%:%REDIS_PORT%, API %API_HOST%:%API_PORT%, Qwen %QWEN_SERVICE_HOST%:%QWEN_SERVICE_PORT%, Flower %FLOWER_PORT%, Frontend %FRONTEND_PORT%."
 call :info "Таймауты ожидания сервисов внутренние, не из .env: Redis %REDIS_WAIT_SECONDS%s, Backend %BACKEND_WAIT_SECONDS%s, Qwen %QWEN_WAIT_SECONDS%s, Frontend %FRONTEND_WAIT_SECONDS%s."
->>"%LOG_FILE%" echo DATABASE_URL=%DATABASE_URL%
->>"%LOG_FILE%" echo REDIS_URL=%REDIS_URL%
->>"%LOG_FILE%" echo CELERY_BROKER_URL=%CELERY_BROKER_URL%
->>"%LOG_FILE%" echo CELERY_RESULT_BACKEND=%CELERY_RESULT_BACKEND%
+>>"%LOG_FILE%" echo DATABASE_URL=postgresql+asyncpg://%POSTGRES_USER%:***@%POSTGRES_HOST%:%POSTGRES_PORT%/%POSTGRES_DB%
+>>"%LOG_FILE%" echo REDIS_URL=redis://%REDIS_HOST%:%REDIS_PORT%/...
+>>"%LOG_FILE%" echo CELERY_BROKER_URL=***masked***
+>>"%LOG_FILE%" echo CELERY_RESULT_BACKEND=***masked***
 exit /b 0
 
 :strip_quotes
@@ -690,32 +691,37 @@ if errorlevel 1 (
 )
 exit /b 0
 
+
 :check_frontend
 if not exist "frontend\package.json" exit /b 0
-if exist "frontend\node_modules" (call :ok "frontend\node_modules найден.") else call :warn "frontend\node_modules не найден. Нужен npm install/npm ci."
+if exist "frontend
+ode_modules" (call :ok "frontend
+ode_modules найден.") else call :warn "frontend
+ode_modules не найден. Нужен npm install/npm ci."
 
-call :write_frontend_deps_check_js "%TEMP%\nf_frontend_deps_check_%RANDOM%_%RANDOM%.js" "FRONT_CHECK_JS"
-pushd frontend >nul
-node "%FRONT_CHECK_JS%" >>"%LOG_FILE%" 2>>&1
+if not exist "scripts\check_frontend_deps.js" (
+    call :warn "scripts\check_frontend_deps.js не найден. Frontend зависимости будут проверены установкой."
+    exit /b 0
+)
+call :run_logged node "scripts\check_frontend_deps.js" "frontend"
 set "FRONT_CHECK_RC=%ERRORLEVEL%"
-popd >nul
-del "%FRONT_CHECK_JS%" >nul 2>nul
 if not "%FRONT_CHECK_RC%"=="0" (
-    call :warn "frontend зависимости не полностью проверены или часть отсутствует. Установка попробует исправить. Детали в логе: %LOG_FILE%."
+    call :warn "frontend зависимости не полностью проверены или часть отсутствует. Установка попробует исправить. Детали выше и в логе: %LOG_FILE%."
 ) else (
-    call :ok "frontend\package.json и прямые зависимости быстро проверены."
+    call :ok "frontend\package.json, direct deps и vite.cmd проверены."
 )
 exit /b 0
+
 
 :check_services
 call :check_tcp "%REDIS_HOST%" "%REDIS_PORT%" "Redis"
 if errorlevel 1 (
-    if exist "run_redis.bat" (
-        call :warn "Redis не отвечает на %REDIS_HOST%:%REDIS_PORT%. При установке попробую запустить run_redis.bat."
-    ) else if exist "redis\redis-server.exe" (
-        call :warn "Redis не отвечает. При установке попробую запустить redis\redis-server.exe."
+    if exist "scriptsun_redis.bat" (
+        call :warn "Redis не отвечает на %REDIS_HOST%:%REDIS_PORT%. При установке попробую запустить scriptsun_redis.bat."
+    ) else if exist "redisedis-server.exe" (
+        call :warn "Redis не отвечает. scriptsun_redis.bat не найден, но найден redisedis-server.exe."
     ) else (
-        call :warn "Redis не отвечает и локальный запускатор не найден. Запусти Redis вручную."
+        call :warn "Redis не отвечает и scriptsun_redis.bat не найден. Запусти Redis вручную."
     )
 ) else (
     call :ok "Redis отвечает на %REDIS_HOST%:%REDIS_PORT%."
@@ -754,7 +760,6 @@ exit /b %ERRORLEVEL%
 if exist "requirements.txt" (
     findstr /I /C:"torch" "requirements.txt" >nul 2>nul && call :info "В requirements есть torch: setuptools держим ниже 82, чтобы не повторять конфликт старых сборок."
     findstr /I /C:"chromadb" "requirements.txt" >nul 2>nul && call :ok "Корневой requirements содержит chromadb для backend-RAG."
-    if exist "requirements-constraints.txt" (call :ok "requirements-constraints.txt найден: установка будет использовать стабильные верхние границы зависимостей.") else call :warn "requirements-constraints.txt не найден: pip может подтянуть слишком новые зависимости."
 )
 if exist "rag\requirements.txt" (
     call :info "Backend-only RAG: legacy rag\requirements.txt не ставится и не нужен для обычного запуска."
@@ -927,12 +932,8 @@ if not "%FORCE_INSTALL%"=="1" (
     )
 )
 
-call :info "Обновляю pip/wheel и применяю constraints для стабильной установки..."
-if not exist "%RUN_ROOT%\tmp" mkdir "%RUN_ROOT%\tmp" >nul 2>nul
-set "NF_PIP_CONSTRAINTS=%RUN_ROOT%\tmp\pip_constraints_setuptools_lt82.txt"
->"%NF_PIP_CONSTRAINTS%" echo setuptools^<82
-if exist "requirements-constraints.txt" set "NF_PIP_CONSTRAINTS=requirements-constraints.txt"
-call :run_logged "%VENV_PY%" -m pip install --upgrade pip wheel setuptools -c "%NF_PIP_CONSTRAINTS%"
+call :info "Обновляю pip/wheel и фиксирую setuptools ниже 82..."
+call :run_logged "%VENV_PY%" -m pip install --upgrade pip wheel "setuptools<82"
 if errorlevel 1 (
     call :bad "Ошибка обновления pip/wheel/setuptools."
     call :save_last_error "Ошибка pip bootstrap"
@@ -942,7 +943,7 @@ if errorlevel 1 (
 
 if exist "requirements.txt" (
     call :info "Ставлю корневые Python-зависимости из requirements.txt..."
-    call :run_logged "%VENV_PY%" -m pip install --prefer-binary -r requirements.txt -c "%NF_PIP_CONSTRAINTS%"
+    call :run_logged "%VENV_PY%" -m pip install --prefer-binary -r requirements.txt
     if errorlevel 1 (
         call :bad "Ошибка установки requirements.txt. Подробности в текущем логе и файле последней ошибки: %LOG_FILE% / %ERROR_FILE%."
         call :save_last_error "Ошибка установки requirements.txt"
@@ -971,18 +972,14 @@ if not exist "%STATE_DIR%" mkdir "%STATE_DIR%" >nul 2>nul
 
 call :hash_file "requirements.txt" "ROOT_REQ_HASH"
 if errorlevel 1 set "ROOT_REQ_HASH=NO_REQUIREMENTS"
-call :hash_file "requirements-constraints.txt" "CONSTRAINTS_HASH"
-if errorlevel 1 set "CONSTRAINTS_HASH=NO_CONSTRAINTS"
-
 call :capture_python_version "CURRENT_PY_ID"
 if not defined CURRENT_PY_ID exit /b 1
 
 call :read_marker "%STATE_DIR%\python_version.txt" "MARK_PY_ID"
 call :read_marker "%STATE_DIR%\requirements.sha256" "MARK_ROOT_REQ_HASH"
-call :read_marker "%STATE_DIR%\requirements_constraints.sha256" "MARK_CONSTRAINTS_HASH"
 
 set "NO_PY_MARKERS=0"
-if not exist "%STATE_DIR%\python_version.txt" if not exist "%STATE_DIR%\requirements.sha256" if not exist "%STATE_DIR%\requirements_constraints.sha256" set "NO_PY_MARKERS=1"
+if not exist "%STATE_DIR%\python_version.txt" if not exist "%STATE_DIR%\requirements.sha256" set "NO_PY_MARKERS=1"
 
 "%VENV_PY%" -c "import fastapi,uvicorn,sqlalchemy,alembic,pydantic,redis,celery,asyncpg; print('python imports ok')" >>"%LOG_FILE%" 2>>&1
 if errorlevel 1 exit /b 1
@@ -996,20 +993,16 @@ if "%NO_PY_MARKERS%"=="1" (
 
 if not "%MARK_PY_ID%"=="%CURRENT_PY_ID%" exit /b 1
 if not "%MARK_ROOT_REQ_HASH%"=="%ROOT_REQ_HASH%" exit /b 1
-if not "%MARK_CONSTRAINTS_HASH%"=="%CONSTRAINTS_HASH%" exit /b 1
 exit /b 0
 
 :mark_python_deps_current
 if not exist "%STATE_DIR%" mkdir "%STATE_DIR%" >nul 2>nul
 call :hash_file "requirements.txt" "ROOT_REQ_HASH"
 if errorlevel 1 set "ROOT_REQ_HASH=NO_REQUIREMENTS"
-call :hash_file "requirements-constraints.txt" "CONSTRAINTS_HASH"
-if errorlevel 1 set "CONSTRAINTS_HASH=NO_CONSTRAINTS"
 call :capture_python_version "CURRENT_PY_ID"
 if not defined CURRENT_PY_ID set "CURRENT_PY_ID=UNKNOWN"
 >"%STATE_DIR%\python_version.txt" echo %CURRENT_PY_ID%
 >"%STATE_DIR%\requirements.sha256" echo %ROOT_REQ_HASH%
->"%STATE_DIR%\requirements_constraints.sha256" echo %CONSTRAINTS_HASH%
 exit /b 0
 
 :install_playwright_browsers
@@ -1089,42 +1082,29 @@ if not "%RUN_FRONTEND_BUILD%"=="1" call :info "Frontend build не запуск�
 call :ok "Frontend зависимости установлены/проверены."
 exit /b 0
 
+
 :frontend_deps_are_current
-if not exist "frontend\node_modules" exit /b 1
+if not exist "frontend
+ode_modules" exit /b 1
 call :hash_file "frontend\package.json" "FRONT_PKG_HASH"
 if errorlevel 1 exit /b 1
 call :hash_file "frontend\package-lock.json" "FRONT_LOCK_HASH"
 if errorlevel 1 set "FRONT_LOCK_HASH=NO_PACKAGE_LOCK"
-call :read_marker "%STATE_DIR%\frontend_package.sha256" "MARK_FRONT_PKG_HASH"
-call :read_marker "%STATE_DIR%\frontend_lock.sha256" "MARK_FRONT_LOCK_HASH"
+call :read_marker "%STATE_DIR%rontend_package.sha256" "MARK_FRONT_PKG_HASH"
+call :read_marker "%STATE_DIR%rontend_lock.sha256" "MARK_FRONT_LOCK_HASH"
 
-call :write_frontend_deps_check_js "%TEMP%\nf_frontend_deps_check_%RANDOM%_%RANDOM%.js" "FRONT_CHECK_JS"
-pushd frontend >nul
-node "%FRONT_CHECK_JS%" >>"%LOG_FILE%" 2>>&1
+if not exist "scripts\check_frontend_deps.js" exit /b 1
+node "scripts\check_frontend_deps.js" "frontend" >>"%LOG_FILE%" 2>>&1
 set "FRONT_NODE_RC=%ERRORLEVEL%"
-popd >nul
-del "%FRONT_CHECK_JS%" >nul 2>nul
 if not "%FRONT_NODE_RC%"=="0" exit /b 1
 
-if not exist "%STATE_DIR%\frontend_package.sha256" if not exist "%STATE_DIR%\frontend_lock.sha256" (
+if not exist "%STATE_DIR%rontend_package.sha256" if not exist "%STATE_DIR%rontend_lock.sha256" (
     call :info "Маркеров frontend ещё нет: запущу npm ci/npm install для полной проверки package-lock/package.json."
     exit /b 1
 )
 
 if not "%MARK_FRONT_PKG_HASH%"=="%FRONT_PKG_HASH%" exit /b 1
 if not "%MARK_FRONT_LOCK_HASH%"=="%FRONT_LOCK_HASH%" exit /b 1
-exit /b 0
-
-:write_frontend_deps_check_js
-set "OUT_JS=%~1"
-set "%~2=%OUT_JS%"
->"%OUT_JS%" echo const fs = require('fs');
->>"%OUT_JS%" echo const path = require('path');
->>"%OUT_JS%" echo const p = require(path.join(process.cwd(), 'package.json'));
->>"%OUT_JS%" echo const deps = Object.assign({}, p.dependencies ^|^| {}, p.devDependencies ^|^| {});
->>"%OUT_JS%" echo const miss = Object.keys(deps).filter((n) =^> !fs.existsSync(path.join(process.cwd(), 'node_modules', ...n.split('/'), 'package.json')));
->>"%OUT_JS%" echo if (miss.length) { console.error('missing frontend deps: ' + miss.join(', ')); process.exit(1); }
->>"%OUT_JS%" echo console.log('frontend direct deps ok: ' + Object.keys(deps).length);
 exit /b 0
 
 :mark_frontend_deps_current
@@ -1137,44 +1117,24 @@ if errorlevel 1 set "FRONT_LOCK_HASH=NO_PACKAGE_LOCK"
 >"%STATE_DIR%\frontend_lock.sha256" echo %FRONT_LOCK_HASH%
 exit /b 0
 
+
 :ensure_redis_launcher
-if exist "run_redis.bat" (
-    call :ok "run_redis.bat найден."
-) else (
-    call :warn "run_redis.bat не найден. Создаю wrapper на scripts\run_redis.bat."
-    >"run_redis.bat" echo @echo off
-    >>"run_redis.bat" echo setlocal EnableExtensions
-    >>"run_redis.bat" echo cd /d %%~dp0
-    >>"run_redis.bat" echo if exist "scripts\run_redis.bat" ^(
-    >>"run_redis.bat" echo   call "scripts\run_redis.bat" %%*
-    >>"run_redis.bat" echo   exit /b %%ERRORLEVEL%%
-    >>"run_redis.bat" echo ^)
-    >>"run_redis.bat" echo echo [ERROR] scripts\run_redis.bat was not found.
-    >>"run_redis.bat" echo exit /b 1
-)
-if exist "scripts\run_redis.bat" (call :ok "scripts\run_redis.bat найден.") else call :warn "scripts\run_redis.bat не найден. Redis нужно будет запускать вручную."
+if exist "scriptsun_redis.bat" (call :ok "scriptsun_redis.bat найден.") else call :warn "scriptsun_redis.bat не найден. Redis нужно будет запускать вручную."
 if exist "scripts\download_redis.ps1" (call :ok "Redis download helper найден.") else call :warn "scripts\download_redis.ps1 не найден. Автоскачивание Redis будет недоступно."
 exit /b 0
+
 
 :start_redis_if_possible
 call :check_tcp "%REDIS_HOST%" "%REDIS_PORT%" "Redis"
 if not errorlevel 1 exit /b 0
-if exist "scripts\run_redis.bat" (
-    call :info "Пробую запустить Redis через scripts\run_redis.bat на порту из .env..."
-    start "Nickelfront Redis" /min cmd /c "cd /d ""%PROJECT_ROOT%"" && call scripts\run_redis.bat"
+if exist "scriptsun_redis.bat" (
+    call :info "Пробую запустить Redis через scriptsun_redis.bat на порту из .env..."
+    start "Nickelfront Redis" /min cmd /c "cd /d ""%PROJECT_ROOT%"" && call scriptsun_redis.bat"
     timeout /t 4 >nul
     call :check_tcp "%REDIS_HOST%" "%REDIS_PORT%" "Redis"
-    if errorlevel 1 (call :warn "Redis не запустился автоматически. Проверь scripts\run_redis.bat и порт %REDIS_PORT%.") else call :ok "Redis запущен/отвечает."
-    exit /b 0
-)
-if exist "run_redis.bat" (
-    call :info "Пробую запустить Redis через run_redis.bat..."
-    start "Nickelfront Redis" /min cmd /c "cd /d ""%PROJECT_ROOT%"" && call run_redis.bat"
-    timeout /t 4 >nul
-    call :check_tcp "%REDIS_HOST%" "%REDIS_PORT%" "Redis"
-    if errorlevel 1 (call :warn "Redis не запустился автоматически. Запусти run_redis.bat вручную.") else call :ok "Redis запущен."
+    if errorlevel 1 (call :warn "Redis не запустился автоматически. Проверь scriptsun_redis.bat и порт %REDIS_PORT%.") else call :ok "Redis запущен/отвечает."
 ) else (
-    call :warn "Redis launcher не найден. Автозапуск Redis невозможен."
+    call :warn "scriptsun_redis.bat не найден. Автозапуск Redis невозможен."
 )
 exit /b 0
 
@@ -1321,10 +1281,10 @@ if exist "run_all.bat" (
     start "Nickelfront run_all" cmd /k "cd /d ""%PROJECT_ROOT%"" && set SKIP_BACKEND_MIGRATIONS=1&& call run_all.bat"
 ) else (
     call :warn "run_all.bat не найден. Пробую запускать основные сервисы по отдельности."
-    if exist "run_redis.bat" start "Nickelfront Redis" cmd /k "cd /d ""%PROJECT_ROOT%"" && call run_redis.bat"
-    if exist "run_qwen_service.bat" start "Nickelfront Qwen Service" cmd /k "cd /d ""%PROJECT_ROOT%"" && call run_qwen_service.bat"
-    if exist "run_backend.bat" start "Nickelfront Backend" cmd /k "cd /d ""%PROJECT_ROOT%"" && set SKIP_BACKEND_MIGRATIONS=1&& call run_backend.bat"
-    if exist "run_frontend.bat" start "Nickelfront Frontend" cmd /k "cd /d ""%PROJECT_ROOT%"" && call run_frontend.bat"
+    if exist "scripts\run_redis.bat" start "Nickelfront Redis" cmd /k "cd /d ""%PROJECT_ROOT%"" && call scripts\run_redis.bat"
+    if exist "scripts\run_qwen_service.bat" start "Nickelfront Qwen Service" cmd /k "cd /d ""%PROJECT_ROOT%"" && call scripts\run_qwen_service.bat"
+    if exist "scripts\run_backend.bat" start "Nickelfront Backend" cmd /k "cd /d ""%PROJECT_ROOT%"" && set SKIP_BACKEND_MIGRATIONS=1&& call scripts\run_backend.bat"
+    if exist "scripts\run_frontend.bat" start "Nickelfront Frontend" cmd /k "cd /d ""%PROJECT_ROOT%"" && call scripts\run_frontend.bat"
 )
 call :info "Жду старта сервисов и проверяю порты из .env. run_all дополнительно ждёт backend /health перед worker-процессами."
 

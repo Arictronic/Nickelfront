@@ -99,6 +99,18 @@ def _paper_projection(paper: PaperModel) -> dict[str, Any]:
     }
 
 
+def _paper_content_basis(paper: PaperModel) -> str:
+    if str(paper.pdf_local_path or "").strip() or str(paper.pdf_url or "").strip():
+        return "pdf"
+    if str(paper.url or "").strip() or str(paper.source_id or "").strip():
+        return "source"
+    if str(paper.full_text or "").strip():
+        return "full_text"
+    if str(paper.abstract or "").strip():
+        return "abstract_fallback"
+    return "content_parts"
+
+
 async def _queue_content_candidates_async(
     task_self: Any,
     *,
@@ -157,23 +169,41 @@ async def _queue_content_candidates_async(
             candidate_expr = and_(missing_content_expr, processable_source_expr, ~active_expr)
 
         stmt = (
-            select(PaperModel.id)
+            select(PaperModel)
             .where(and_(candidate_expr, source_expr))
             .order_by(PaperModel.updated_at.asc().nullsfirst(), PaperModel.created_at.desc(), PaperModel.id.desc())
             .limit(limit)
         )
-        paper_ids = [int(row[0]) for row in (await db.execute(stmt)).all()]
+        papers = list((await db.execute(stmt)).scalars().all())
+        paper_ids = [int(paper.id) for paper in papers]
 
         queued = 0
         errors: list[str] = []
-        for index, paper_id in enumerate(paper_ids, start=1):
+        child_tasks: list[dict[str, Any]] = []
+        basis_counts: dict[str, int] = {"pdf": 0, "source": 0, "full_text": 0, "abstract_fallback": 0, "content_parts": 0}
+        for index, paper in enumerate(papers, start=1):
+            paper_id = int(paper.id)
+            basis = _paper_content_basis(paper)
+            basis_counts[basis] = basis_counts.get(basis, 0) + 1
             _safe_update_state(
                 task_self,
                 "PROGRESS",
-                {"stage": "queueing_content", "current": index, "total": len(paper_ids), "queued": queued},
+                {
+                    "stage": "queueing_content",
+                    "current": index,
+                    "total": len(paper_ids),
+                    "queued": queued,
+                    "child_tasks_count": len(child_tasks),
+                    "child_task_ids": [item["task_id"] for item in child_tasks[:20]],
+                    "basis_counts": basis_counts,
+                },
             )
             try:
-                async_result = process_paper_content_task.apply_async(args=[paper_id, pdf_mode], queue=settings.CONTENT_QUEUE_NAME)
+                async_result = process_paper_content_task.apply_async(
+                    args=[paper_id],
+                    kwargs={"pdf_mode": pdf_mode, "parse_root_task_id": task_id},
+                    queue=settings.CONTENT_QUEUE_NAME,
+                )
                 child_task_id = str(getattr(async_result, "id", "") or task_id or "") or None
                 await paper_service.update_paper(
                     paper_id,
@@ -181,6 +211,8 @@ async def _queue_content_candidates_async(
                     content_task_id=child_task_id,
                     processing_error=None,
                 )
+                if child_task_id:
+                    child_tasks.append({"paper_id": paper_id, "task_id": child_task_id, "basis": basis})
                 queued += 1
             except Exception as exc:
                 logger.warning("Failed to queue content pipeline from dashboard: paper_id={}, error={}", paper_id, exc)
@@ -192,6 +224,10 @@ async def _queue_content_candidates_async(
         "stage": "content_queued",
         "total": len(paper_ids),
         "queued": queued,
+        "child_tasks_count": len(child_tasks),
+        "child_task_ids": [item["task_id"] for item in child_tasks[:50]],
+        "child_tasks_preview": child_tasks[:25],
+        "basis_counts": basis_counts,
         "errors": errors[:20],
         "source": source or "all",
         "pdf_mode": pdf_mode,
@@ -420,6 +456,7 @@ async def _rebuild_rag_index_async(task_self: Any) -> dict[str, Any]:
 
     indexed = 0
     errors = 0
+    error_messages: list[str] = []
     total_parts = 0
     total_papers = 0
     batch_size = 64
@@ -463,9 +500,16 @@ async def _rebuild_rag_index_async(task_self: Any) -> dict[str, Any]:
                 "PROGRESS",
                 {"stage": "indexing_rag_content_parts", "current": indexed, "total": total_parts, "batch": len(documents), "unlimited": True},
             )
-            added_ids = await asyncio.to_thread(rag_store.add_documents, documents)
-            indexed += len(added_ids)
-            errors += max(0, len(documents) - len(added_ids))
+            if not documents:
+                continue
+            try:
+                added_ids = await asyncio.to_thread(rag_store.add_documents, documents)
+                indexed += len(added_ids)
+                errors += max(0, len(documents) - len(added_ids))
+            except Exception as exc:
+                logger.warning("Failed to index RAG content-parts batch from dashboard: last_part_id={}, error={}", last_part_id, exc)
+                errors += len(documents)
+                error_messages.append(f"content_parts:last_id={last_part_id}: {exc}")
 
         content_parts_exists = exists(
             select(PaperContentPart.id).where(
@@ -500,9 +544,16 @@ async def _rebuild_rag_index_async(task_self: Any) -> dict[str, Any]:
                 "PROGRESS",
                 {"stage": "indexing_rag_paper_text", "current": processed_fallback, "total": total_papers, "batch": len(documents), "unlimited": True},
             )
-            added_ids = await asyncio.to_thread(rag_store.add_documents, documents)
-            indexed += len(added_ids)
-            errors += max(0, len(documents) - len(added_ids))
+            if not documents:
+                continue
+            try:
+                added_ids = await asyncio.to_thread(rag_store.add_documents, documents)
+                indexed += len(added_ids)
+                errors += max(0, len(documents) - len(added_ids))
+            except Exception as exc:
+                logger.warning("Failed to index RAG fallback batch from dashboard: last_paper_id={}, error={}", last_paper_id, exc)
+                errors += len(documents)
+                error_messages.append(f"fallback:last_id={last_paper_id}: {exc}")
 
     result = {
         "status": "completed" if not errors else "completed_with_errors",
@@ -511,6 +562,7 @@ async def _rebuild_rag_index_async(task_self: Any) -> dict[str, Any]:
         "fallback_papers_total": total_papers,
         "indexed": indexed,
         "errors_count": errors,
+        "errors": error_messages[:20],
         "unlimited": True,
     }
     _safe_update_state(task_self, "SUCCESS", result)

@@ -1,8 +1,14 @@
 import { apiClient } from "./client";
 import type {
   PublicDisplaySettings,
+  QwenCacheMaintenanceOptions,
+  QwenCacheMaintenanceResponse,
+  QwenEventJournalResponse,
+  QwenReadinessResponse,
   QwenTestResult,
   QwenTestRunPayload,
+  QwenUploadTestResult,
+  QwenUploadTestRunPayload,
   QwenTokenStatus,
   SettingsSectionKey,
   SystemSettingsResponse,
@@ -66,7 +72,7 @@ export async function getQwenTokenStatus(options: QwenTokenStatusOptions = {}): 
     return qwenTokenStatusInFlight;
   }
 
-  qwenTokenStatusInFlight = apiClient
+  const request = apiClient
     .get<QwenTokenStatus>("/admin/settings/qwen/token/status", { timeout: 5000 })
     .then(({ data }) => {
       qwenTokenStatusCache = {
@@ -79,7 +85,8 @@ export async function getQwenTokenStatus(options: QwenTokenStatusOptions = {}): 
       qwenTokenStatusInFlight = null;
     });
 
-  return qwenTokenStatusInFlight;
+  qwenTokenStatusInFlight = request;
+  return request;
 }
 
 
@@ -102,5 +109,49 @@ export async function updateQwenTokenFromHar(file: File) {
 
 export async function runQwenServiceTest(payload: QwenTestRunPayload) {
   const { data } = await apiClient.post<QwenTestResult>("/admin/settings/qwen/test-run", payload, { timeout: 360000 });
+  return data;
+}
+
+export async function runQwenUploadTest(payload: QwenUploadTestRunPayload) {
+  const { data } = await apiClient.post<QwenUploadTestResult>("/admin/settings/qwen/upload-test-run", payload, { timeout: 420000 });
+  return data;
+}
+
+
+export async function getQwenReadiness() {
+  const { data } = await apiClient.get<QwenReadinessResponse>("/qwen/readiness", { timeout: 10000 });
+  return data;
+}
+
+export async function runQwenRuntimeCacheMaintenance(options: QwenCacheMaintenanceOptions = {}) {
+  const { data } = await apiClient.post<QwenCacheMaintenanceResponse>("/qwen/cache-maintenance", null, {
+    params: {
+      dry_run: options.dryRun ?? true,
+      prune_file_metadata: options.pruneFileMetadata ?? true,
+      prune_session_registry: options.pruneSessionRegistry ?? true,
+      file_max_age_days: options.fileMaxAgeDays ?? undefined,
+      session_max_age_days: options.sessionMaxAgeDays ?? undefined,
+      clear_file_metadata: options.clearFileMetadata ?? false,
+      clear_session_registry: options.clearSessionRegistry ?? false,
+    },
+    timeout: 15000,
+  });
+  return data;
+}
+
+export async function getQwenEventJournal(options: { limit?: number; event?: string; status?: string } = {}) {
+  const { data } = await apiClient.get<QwenEventJournalResponse>("/qwen/events", {
+    params: {
+      limit: options.limit ?? 50,
+      event: options.event || undefined,
+      status: options.status || undefined,
+    },
+    timeout: 10000,
+  });
+  return data;
+}
+
+export async function clearQwenEventJournal() {
+  const { data } = await apiClient.post<QwenEventJournalResponse>("/qwen/events/clear", null, { timeout: 10000 });
   return data;
 }

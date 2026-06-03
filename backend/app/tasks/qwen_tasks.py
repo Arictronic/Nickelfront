@@ -1,8 +1,8 @@
-"""Shared Qwen Celery gateway tasks and article Qwen stages.
+"""Shared Qwen Celery gateway tasks and document Qwen stages.
 
 The queue can be served by up to QWEN_QUEUE_WORKERS workers.  Background callers
 should either enqueue one raw Qwen message through ``app.tasks.qwen.send_message``
-or use the article-stage tasks below: markdown, RU analysis, keywords.
+or use the document-stage tasks below: markdown, RU analysis, keywords.
 """
 
 from __future__ import annotations
@@ -11,21 +11,23 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
+
 from loguru import logger
 
 from app.core.config import settings
+from app.db.models.paper_content_part_translation import PaperContentPartTranslation
 from app.db.session import async_session_maker
 from app.services.paper_content_service import (
     create_qwen_session_for_paper,
     generate_ai_enrichment_ru,
-    generate_article_keywords,
+    generate_document_keywords,
     normalize_pdf_text_part,
     PDF_MARKDOWN_PROMPT_VERSION,
 )
 from app.services.paper_service import PaperService
 from app.services.paper_content_part_service import (
     PaperContentPartService,
-    get_qwen_projection_text_for_part,
     should_qwen_markdown_content_type,
 )
 from app.services.system_settings_service import (
@@ -35,125 +37,128 @@ from app.services.system_settings_service import (
 )
 from app.services.qwen_client import QwenServiceClient
 from app.services.qwen_token_tools import is_qwen_auth_expired_message
+from app.services.qwen_document.cleaning import (
+    clean_qwen_markdown_response as _clean_qwen_markdown_response,
+)
+from app.services.qwen_document.context import (
+    count_pdf_pages_for_ai_ocr as _count_pdf_pages_for_ai_ocr,
+    fresh_markdown_input_available as _fresh_markdown_input_available,
+    mark_ai_fields_stale as _mark_ai_fields_stale,
+    merge_language_codes as _merge_language_codes,
+    merge_previous as _merge_previous,
+    merge_quality_flags as _merge_quality_flags,
+    page_markdown_heading as _page_markdown_heading,
+    paper_id_from_previous as _paper_id_from_previous,
+    qwen_input_text_for_part as _qwen_input_text_for_part,
+    root_task_id as _root_task_id,
+)
+from app.services.qwen_document.keywords import (
+    keywords_raw_source_from_parts as _keywords_raw_source_from_parts,
+)
+from app.services.qwen_document.prompts import (
+    ARTICLE_MARKDOWN_IMAGE_REGENERATION_PROMPT_VERSION,
+    build_article_translation_prompt as _build_article_translation_prompt,
+)
+from app.services.qwen_document.regeneration import (
+    extract_part_pdf_pages_as_text as _extract_part_pdf_pages_as_text,
+    normalize_regeneration_mode as _normalize_regeneration_mode,
+    regenerate_part_markdown_from_page_images as _regenerate_part_markdown_from_page_images,
+)
+from app.services.qwen_document.stage_failures import (
+    short_error as _short_error,
+    stage_errors_from_previous as _stage_errors_from_previous,
+    append_stage_error as _append_stage_error,
+    stage_failure_payload as _stage_failure_payload,
+)
+from app.services.qwen_document.translation import (
+    ARTICLE_TRANSLATION_MAX_ATTEMPTS,
+    ARTICLE_TRANSLATION_PROMPT_VERSION,
+    extract_qwen_error_response as _extract_qwen_error_response,
+    format_translation_final_error as _format_translation_final_error,
+    format_translation_retry_error as _format_translation_retry_error,
+    is_retryable_translation_quality_error as _is_retryable_translation_quality_error,
+    is_transient_article_translation_error as _is_transient_article_translation_error,
+    markdown_translation_source_quality as _markdown_translation_source_quality,
+    translation_language_name as _translation_language_name,
+    translation_output_quality_error as _translation_output_quality_error,
+    translation_retry_delay_seconds as _translation_retry_delay_seconds,
+)
 from app.tasks.async_runner import run_async
 from app.tasks.celery_app import celery_app
 
 
-def _page_markdown_heading(page_start: int | None, page_end: int | None) -> str:
-    if not page_start or not page_end:
-        return "### Страница"
-    if page_start == page_end:
-        return f"### Страница {page_start}"
-    return f"### Страницы {page_start}-{page_end}"
-
-
-def _qwen_input_text_for_part(part: Any) -> str:
-    """Return sanitized block-aware text for Qwen markdown normalization."""
-    return get_qwen_projection_text_for_part(part)
-
-
-def _normalize_regeneration_mode(value: Any) -> str:
-    mode = str(value or "text").strip().lower()
-    return mode if mode in {"text", "image"} else "text"
-
-
-def _build_image_regeneration_options(
+async def _upsert_part_translation(
+    db,
     *,
-    qwen_settings: dict[str, Any],
-    pdf_markdown_settings: dict[str, Any],
-    timeout: float,
-) -> dict[str, Any]:
-    return {
-        "parser_mode": "ai",
-        "force_strategy": "ai",
-        "extraction_strategy": "ai",
-        "selected_strategy": "ai",
-        "ai_mode": "force",
-        "ai_enabled": True,
-        "ai_provider": str(pdf_markdown_settings.get("ai_provider") or "qwen"),
-        "ai_model": str(pdf_markdown_settings.get("ai_model") or qwen_settings.get("model") or settings.QWEN_MODEL),
-        "ai_render_dpi": int(pdf_markdown_settings.get("ai_render_dpi") or 220),
-        "ai_page_image_format": str(pdf_markdown_settings.get("ai_page_image_format") or "png"),
-        "ai_timeout_sec": float(timeout or pdf_markdown_settings.get("ai_timeout_sec") or settings.QWEN_QUEUE_TIMEOUT),
-        "ai_delete_temp_images": bool(pdf_markdown_settings.get("ai_delete_temp_images", True)),
-    }
-
-
-def _recognize_part_pdf_pages_as_text(
-    *,
-    pdf_path: str,
     paper_id: int,
     part_id: int,
-    page_start: int,
-    page_end: int,
-    options: dict[str, Any],
-) -> tuple[str, dict[str, Any]]:
-    path = Path(str(pdf_path or ""))
-    if not path.exists() or not path.is_file():
-        raise RuntimeError("pdf_file_not_found")
-
-    try:
-        from app.services.pdf_parser.ai import AIPageRecognitionService
-    except Exception as exc:
-        raise RuntimeError(f"ai_page_recognition_unavailable:{type(exc).__name__}:{exc}") from exc
-
-    pdf_bytes = path.read_bytes()
-    service = AIPageRecognitionService()
-    service.reset_document_session()
-
-    pages: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    text_blocks: list[str] = []
-    for page_number in range(int(page_start), int(page_end) + 1):
-        result = service.recognize_page(
-            file_bytes=pdf_bytes,
-            page_number=page_number,
-            opts=options,
+    language_code: str,
+    language_name: str | None,
+    source_language_code: str | None,
+    translated_markdown_text: str | None = None,
+    status: str = "pending",
+    error: str | None = None,
+    qwen_model: str | None = None,
+    qwen_prompt_version: str | None = None,
+    source_chars: int = 0,
+) -> PaperContentPartTranslation:
+    result = await db.execute(
+        select(PaperContentPartTranslation).where(
+            PaperContentPartTranslation.part_id == part_id,
+            PaperContentPartTranslation.language_code == language_code,
         )
-        page_text = str(result.text or "").strip()
-        pages.append(
-            {
-                "page_number": page_number,
-                "chars": len(page_text),
-                "status": result.status,
-                "reason": result.reason,
-                "confidence": float(result.confidence or 0.0),
-                "provider": result.provider,
-                "model": result.model,
-                "warnings": list(result.warnings or []),
-            }
+    )
+    row = result.scalar_one_or_none()
+    text = (translated_markdown_text or "").strip() if translated_markdown_text is not None else None
+    if not row:
+        row = PaperContentPartTranslation(
+            paper_id=paper_id,
+            part_id=part_id,
+            language_code=language_code,
+            language_name=language_name,
+            source_language_code=source_language_code,
         )
-        warnings.extend(str(item) for item in (result.warnings or []) if item)
-        if page_text:
-            text_blocks.append(f"[Страница {page_number}]\n{page_text}")
+        db.add(row)
+    row.language_name = language_name
+    row.source_language_code = source_language_code
+    row.status = status
+    row.error = (error or None)[:4000] if error else None
+    row.qwen_model = qwen_model
+    row.qwen_prompt_version = qwen_prompt_version
+    row.source_chars = int(source_chars or 0)
+    if text is not None:
+        row.translated_markdown_text = text
+        row.translated_chars = len(text)
+    elif status != "ready":
+        row.translated_chars = int(row.translated_chars or 0)
+    await db.commit()
+    await db.refresh(row)
+    return row
 
-    text = "\n\n".join(text_blocks).strip()
-    return text, {
-        "regeneration_mode": "image",
-        "paper_id": paper_id,
-        "part_id": part_id,
-        "pdf_path": str(path),
-        "page_start": page_start,
-        "page_end": page_end,
-        "pages": pages,
-        "text_chars": len(text),
-        "warnings": sorted(set(warnings)),
-        "ai_session_id": service.session_id or "",
+
+
+def _mark_regenerated_part_quality(part: Any, *, mode: str, raw_text: str | None = None) -> None:
+    metadata = dict(getattr(part, "extraction_metadata", None) or {})
+    text_ok = bool(str(raw_text if raw_text is not None else getattr(part, "raw_text", "") or "").strip())
+    if mode in {"image", "ai"}:
+        part.extraction_quality_score = 1.0 if text_ok else 0.0
+        part.extraction_method = "ai_page_image_regenerate"
+    elif mode == "mypdf":
+        part.extraction_quality_score = 0.8 if text_ok else 0.0
+        part.extraction_method = "mypdf_text_layer_regenerate"
+    elif mode == "auto" and part.extraction_quality_score is None:
+        part.extraction_quality_score = 1.0 if text_ok else 0.0
+    elif part.extraction_quality_score is None:
+
+        part.extraction_quality_score = 1.0 if text_ok else 0.0
+    metadata["regeneration_mode"] = mode
+    metadata["regeneration_quality"] = {
+        "mode": "ai" if mode in {"image", "ai"} else mode,
+        "pages_total": max(1, int((getattr(part, "page_end", None) or getattr(part, "page_start", None) or 1)) - int((getattr(part, "page_start", None) or 1)) + 1),
+        "pages_success": 1 if text_ok else 0,
+        "pages_failed": 0 if text_ok else 1,
     }
-
-
-def _fresh_markdown_input_available(previous: dict[str, Any]) -> bool:
-    """Return whether this chain produced fresh text safe for Qwen markdown.
-
-    Qwen must not read arbitrary existing ``paper_content_parts`` after a failed
-    PDF/extraction stage. Abstract-only content is enough for RU analysis, but it
-    is not a PDF markdown-normalization input.
-    """
-    if not isinstance(previous, dict):
-        return False
-    if previous.get("markdown_input_available") is True:
-        return True
-    return bool(previous.get("fresh_content_available")) and str(previous.get("text_source") or "") in {"pdf", "fallback_fulltext"}
+    part.extraction_metadata = metadata
 
 
 def _qwen_queue_rate_limit() -> str | None:
@@ -186,32 +191,6 @@ def _safe_update_state(task_self: Any, task_id: str | None, state: str, meta: di
         logger.warning("Failed to update Qwen task state: task_id={}, state={}, error={}", task_id, state, exc)
 
 
-def _paper_id_from_previous(previous: Any) -> int | None:
-    if isinstance(previous, dict):
-        value = previous.get("paper_id")
-    else:
-        value = previous
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _root_task_id(previous: Any, fallback: str | None = None) -> str | None:
-    if isinstance(previous, dict):
-        return str(previous.get("root_task_id") or previous.get("content_task_id") or fallback or "") or None
-    return fallback
-
-
-def _merge_previous(previous: Any, **updates: Any) -> dict[str, Any]:
-    if isinstance(previous, dict):
-        payload = dict(previous)
-    else:
-        payload = {"paper_id": _paper_id_from_previous(previous)}
-    payload.update(updates)
-    return payload
-
-
 async def _get_postprocess_settings(db=None) -> dict[str, bool]:
     return await get_postprocess_settings_safe(db)
 
@@ -236,6 +215,62 @@ async def _set_stage(
         processing_status=stage,
         content_task_id=task_id,
         processing_error=error,
+    )
+
+
+async def _mark_qwen_stage_failed_async(
+    paper_id: int | None,
+    *,
+    stage_status: str,
+    task_id: str | None,
+    error: BaseException | str | None,
+) -> None:
+    if not paper_id:
+        return
+    async with async_session_maker() as db:
+        paper_service = PaperService(db)
+        paper = await paper_service.get_by_id(int(paper_id))
+        if not paper:
+            return
+        await _set_stage(paper_service, int(paper_id), stage_status, task_id=task_id, error=_short_error(error))
+
+
+async def _handle_qwen_stage_failure_async(
+    previous: Any,
+    *,
+    stage: str,
+    stage_status: str,
+    task_id: str | None,
+    exc: BaseException | str | None,
+    paper_id: int | None = None,
+    retry_allowed: bool = True,
+    fallback_used: bool = True,
+    **updates: Any,
+) -> dict[str, Any]:
+    resolved_paper_id = paper_id or _paper_id_from_previous(previous)
+    try:
+        await _mark_qwen_stage_failed_async(
+            resolved_paper_id,
+            stage_status=stage_status,
+            task_id=task_id,
+            error=exc,
+        )
+    except Exception as status_exc:
+        logger.warning(
+            "Failed to mark Qwen stage as failed: paper_id={}, stage={}, error={}",
+            resolved_paper_id,
+            stage,
+            status_exc,
+        )
+    return _stage_failure_payload(
+        previous,
+        stage=stage,
+        task_id=task_id,
+        exc=exc,
+        paper_id=resolved_paper_id,
+        retry_allowed=retry_allowed,
+        fallback_used=fallback_used,
+        **updates,
     )
 
 
@@ -295,25 +330,6 @@ def qwen_send_message_task(
     result.setdefault("purpose", purpose)
     return result
 
-
-
-def _count_pdf_pages_for_ai_ocr(pdf_bytes: bytes) -> int:
-    try:
-        import fitz
-    except Exception:
-        return 0
-    doc = None
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        return int(len(doc))
-    except Exception:
-        return 0
-    finally:
-        try:
-            if doc is not None:
-                doc.close()
-        except Exception:
-            pass
 
 
 @celery_app.task(
@@ -466,6 +482,7 @@ def qwen_ai_ocr_document_task(
                 "source": "ai",
                 "method": "ai_page_image",
                 "content_type": "body",
+                "quality_score": 1.0 if text.strip() else 0.0,
                 "metadata": metadata,
             }
         )
@@ -516,7 +533,18 @@ def qwen_markdown_task(self, previous: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         paper_id = _paper_id_from_previous(previous)
         logger.exception("Qwen markdown task failed for paper {}: {}", paper_id, exc)
-        raise
+        return run_async(
+            _handle_qwen_stage_failure_async(
+                previous,
+                stage="qwen_markdown",
+                stage_status="markdown_failed",
+                task_id=task_id,
+                exc=exc,
+                paper_id=paper_id,
+                markdown_ready=False,
+                markdown_error=_short_error(exc),
+            )
+        )
 
 
 async def _qwen_markdown_async(
@@ -791,7 +819,19 @@ def qwen_ru_analysis_task(self, previous: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         paper_id = _paper_id_from_previous(previous)
         logger.exception("Qwen RU analysis task failed for paper {}: {}", paper_id, exc)
-        raise
+        return run_async(
+            _handle_qwen_stage_failure_async(
+                previous,
+                stage="qwen_ru_analysis",
+                stage_status="ru_analysis_failed",
+                task_id=task_id,
+                exc=exc,
+                paper_id=paper_id,
+                ru_analysis_ready=False,
+                qwen_used_fallback=True,
+                qwen_fallback_reason=_short_error(exc),
+            )
+        )
 
 
 async def _qwen_ru_analysis_async(
@@ -842,6 +882,10 @@ async def _qwen_ru_analysis_async(
             analysis_ru=enrichment.analysis_ru,
             translation_ru=enrichment.translation_ru,
             processing_error=fallback_reason,
+            quality_flags=_merge_quality_flags(
+                getattr(paper, "quality_flags", None),
+                remove={"ai_fields_stale_after_text_update"},
+            ),
         )
         await _set_stage(
             paper_service,
@@ -870,14 +914,25 @@ async def _qwen_ru_analysis_async(
     time_limit=int(max(90, settings.QWEN_QUEUE_TIMEOUT + 90)),
 )
 def qwen_keywords_task(self, previous: dict[str, Any]) -> dict[str, Any]:
-    """Generate article keywords/entities through Qwen."""
+    """Extract validated document keywords through Qwen."""
     task_id = _task_id(self)
     try:
         return run_async(_qwen_keywords_async(self, previous, task_id=task_id))
     except Exception as exc:
         paper_id = _paper_id_from_previous(previous)
         logger.exception("Qwen keywords task failed for paper {}: {}", paper_id, exc)
-        raise
+        return run_async(
+            _handle_qwen_stage_failure_async(
+                previous,
+                stage="qwen_keywords",
+                stage_status="keywords_failed",
+                task_id=task_id,
+                exc=exc,
+                paper_id=paper_id,
+                keywords_ready=False,
+                keywords_error=_short_error(exc),
+            )
+        )
 
 
 async def _qwen_keywords_async(
@@ -911,36 +966,58 @@ async def _qwen_keywords_async(
         if not session_id:
             session_id = await asyncio.to_thread(create_qwen_session_for_paper, paper_id, paper.title)
         qwen_timeout = float(qwen_settings.get("request_timeout_seconds") or settings.QWEN_QUEUE_TIMEOUT)
+        part_service = PaperContentPartService(db)
+        raw_source_text = _keywords_raw_source_from_parts(await part_service.list_parts(paper_id))
 
         try:
-            keywords = await asyncio.to_thread(
-                generate_article_keywords,
+            keyword_result = await asyncio.to_thread(
+                generate_document_keywords,
                 title=paper.title,
-                authors=paper.authors or [],
-                journal=paper.journal,
-                doi=paper.doi,
-                source=paper.source,
-                source_id=paper.source_id,
-                url=paper.url,
                 abstract=paper.abstract,
                 full_text=paper.full_text,
+                raw_text=raw_source_text,
                 existing_keywords=paper.keywords or [],
-                summary_ru=paper.summary_ru,
-                analysis_ru=paper.analysis_ru,
-                translation_ru=paper.translation_ru,
                 session_id=session_id,
                 timeout_seconds=qwen_timeout,
             )
-            if keywords:
-                await paper_service.update_paper(paper_id, keywords=keywords)
+
+            language_code = keyword_result.language_code or "unknown"
+            language_payload: dict[str, Any] = {}
+            if language_code and (language_code != "unknown" or not getattr(paper, "language_code", None)):
+                language_payload = {
+                    "language_code": language_code,
+                    "language_name": keyword_result.language_name or "Не определён",
+                    "language_confidence": keyword_result.language_confidence,
+                    "language_source": keyword_result.language_source or "qwen_keywords",
+                }
+
+            await paper_service.update_paper(
+                paper_id,
+                keywords=keyword_result.keywords,
+                **language_payload,
+                quality_flags=_merge_quality_flags(
+                    getattr(paper, "quality_flags", None),
+                    remove={"keywords_stale_after_text_update"},
+                ),
+            )
+
             await _set_stage(paper_service, paper_id, "keywords_ready", task_id=task_id, error=None)
             return _merge_previous(
                 previous,
                 paper_id=paper_id,
                 root_task_id=root_task_id,
-                session_id=session_id,
+                session_id=keyword_result.session_id or session_id,
                 keywords_ready=True,
-                keywords_count=len(keywords or []),
+                keywords_count=len(keyword_result.keywords or []),
+                keywords_generated_count=keyword_result.generated_count,
+                keywords_validated_count=keyword_result.validated_count,
+                keywords_rejected_count=keyword_result.rejected_count,
+                keyword_source_chars=keyword_result.source_chars,
+                keyword_source_mode=keyword_result.source_mode,
+                language_code=keyword_result.language_code,
+                language_name=keyword_result.language_name,
+                language_confidence=keyword_result.language_confidence,
+                language_source=keyword_result.language_source,
             )
         except Exception as keyword_exc:
             logger.warning("Keyword generation failed for paper {}: {}", paper_id, keyword_exc)
@@ -953,6 +1030,543 @@ async def _qwen_keywords_async(
                 keywords_ready=False,
                 keywords_error=str(keyword_exc),
             )
+
+
+async def _mark_article_translation_failed(paper_id: int, task_id: str | None, error: str) -> None:
+    async with async_session_maker() as db:
+        paper_service = PaperService(db)
+        await paper_service.update_paper(
+            int(paper_id),
+            translation_status="translation_failed",
+            translation_task_id=task_id,
+            translation_error=(error or "translation_failed")[:4000],
+        )
+
+
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.qwen.translate_markdown_parts",
+    rate_limit=_qwen_queue_rate_limit(),
+    acks_late=True,
+    soft_time_limit=int(max(120, settings.QWEN_QUEUE_TIMEOUT * 2)),
+    time_limit=int(max(180, settings.QWEN_QUEUE_TIMEOUT * 2 + 90)),
+)
+def translate_markdown_parts_task(
+    self,
+    paper_id: int,
+    target_language_code: str = "ru",
+    target_language_name: str | None = "Русский",
+    force: bool = False,
+) -> dict[str, Any]:
+    """Translate saved Qwen Markdown parts into a separate language layer."""
+    task_id = _task_id(self)
+    try:
+        return run_async(
+            _translate_markdown_parts_async(
+                self,
+                int(paper_id),
+                target_language_code=target_language_code,
+                target_language_name=target_language_name,
+                force=bool(force),
+                task_id=task_id,
+            )
+        )
+    except Exception as exc:
+        error_text = f"{type(exc).__name__}: {exc}"
+        logger.exception("Qwen article translation failed for paper {}: {}", paper_id, error_text)
+        try:
+            run_async(_mark_article_translation_failed(int(paper_id), task_id, error_text))
+        except Exception as status_exc:
+            logger.warning("Failed to mark article translation as failed: paper_id={}, error={}", paper_id, status_exc)
+        raise
+
+
+async def _translate_markdown_parts_async(
+    self,
+    paper_id: int,
+    *,
+    target_language_code: str = "ru",
+    target_language_name: str | None = "Русский",
+    force: bool = False,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    task_id = task_id or _task_id(self)
+    language_code = (target_language_code or "ru").strip().lower()
+    language_name = _translation_language_name(language_code, target_language_name)
+
+    _safe_update_state(
+        self,
+        task_id,
+        "STARTED",
+        {"paper_id": paper_id, "stage": "translating_article", "stage_label": "Перевод текста статьи", "current": 0, "total": 0, "percent": 0},
+    )
+
+    async with async_session_maker() as db:
+        paper_service = PaperService(db)
+        part_service = PaperContentPartService(db)
+        paper = await paper_service.get_by_id(paper_id)
+        if not paper:
+            return {"ok": False, "paper_id": paper_id, "error": "paper_not_found"}
+
+        parts = await part_service.list_parts(paper_id)
+        eligible_parts = [
+            part
+            for part in parts
+            if str(getattr(part, "markdown_text", None) or "").strip()
+            or (str(getattr(part, "source", "") or "") == "legacy_full_text" and str(getattr(part, "raw_text", None) or "").strip())
+        ]
+        if not eligible_parts:
+            await paper_service.update_paper(
+                paper_id,
+                translation_status="translation_failed",
+                translation_task_id=task_id,
+                translation_error="Нет сохранённого Markdown-текста для перевода. Сначала выполните оцифровку файла через Qwen.",
+            )
+            return {"ok": False, "paper_id": paper_id, "error": "no_markdown_parts"}
+
+        total = len(eligible_parts)
+        ready_count = 0
+        failed_count = 0
+        skipped_count = 0
+        source_language_code = str(getattr(paper, "language_code", None) or "").strip().lower() or None
+        await paper_service.update_paper(
+            paper_id,
+            available_language_codes=_merge_language_codes(getattr(paper, "available_language_codes", None), source_language_code),
+            translation_status=f"translating_article:0/{total}",
+            translation_task_id=task_id,
+            translation_error=None,
+        )
+
+        qwen_settings = await _get_qwen_settings(db)
+        qwen_timeout = float(qwen_settings.get("request_timeout_seconds") or settings.QWEN_QUEUE_TIMEOUT)
+        client = QwenServiceClient(queue_enabled=False, timeout=qwen_timeout)
+
+        temp_dir = Path(settings.resolve_path("tmp/qwen_article_translations"))
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        for index, part in enumerate(eligible_parts, start=1):
+            existing = None
+            for item in getattr(part, "translations", []) or []:
+                if str(getattr(item, "language_code", "") or "").strip().lower() == language_code:
+                    existing = item
+                    break
+            if existing and getattr(existing, "status", None) == "ready" and getattr(existing, "translated_markdown_text", None) and not force:
+                ready_count += 1
+                skipped_count += 1
+                continue
+
+            source_markdown = str(part.markdown_text or (part.raw_text if str(getattr(part, "source", "") or "") == "legacy_full_text" else "") or "").strip()
+            await _upsert_part_translation(
+                db,
+                paper_id=paper_id,
+                part_id=part.id,
+                language_code=language_code,
+                language_name=language_name,
+                source_language_code=source_language_code,
+                status="processing",
+                qwen_model=str(qwen_settings.get("model") or settings.QWEN_MODEL),
+                qwen_prompt_version=ARTICLE_TRANSLATION_PROMPT_VERSION,
+                source_chars=len(source_markdown),
+            )
+            await paper_service.update_paper(
+                paper_id,
+                translation_status=f"translating_article:{index - 1}/{total}",
+                translation_task_id=task_id,
+                translation_error=None,
+            )
+            _safe_update_state(
+                self,
+                task_id,
+                "PROGRESS",
+                {
+                    "paper_id": paper_id,
+                    "stage": "translating_article",
+                    "stage_label": "Перевод текста статьи",
+                    "current": index - 1,
+                    "total": total,
+                    "percent": round(((index - 1) / max(1, total)) * 100),
+                    "language_code": language_code,
+                    "page_start": part.page_start,
+                    "page_end": part.page_end,
+                },
+            )
+
+            source_quality = _markdown_translation_source_quality(source_markdown)
+            if not source_quality.get("ok"):
+                source_error = str(source_quality.get("error") or "source_markdown_invalid")
+                fallback_notice = (
+                    "Исходный Markdown повреждён, пробую повторно восстановить страницу по фото: "
+                    f"{source_error}"
+                )[:4000]
+                await _upsert_part_translation(
+                    db,
+                    paper_id=paper_id,
+                    part_id=part.id,
+                    language_code=language_code,
+                    language_name=language_name,
+                    source_language_code=source_language_code,
+                    status="processing",
+                    error=fallback_notice,
+                    qwen_model=str(qwen_settings.get("model") or settings.QWEN_MODEL),
+                    qwen_prompt_version=ARTICLE_TRANSLATION_PROMPT_VERSION,
+                    source_chars=len(source_markdown),
+                )
+                await paper_service.update_paper(
+                    paper_id,
+                    translation_status=f"translating_article:{index - 1}/{total}",
+                    translation_task_id=task_id,
+                    translation_error=fallback_notice,
+                )
+                _safe_update_state(
+                    self,
+                    task_id,
+                    "PROGRESS",
+                    {
+                        "paper_id": paper_id,
+                        "stage": "translating_article_regenerate_markdown",
+                        "stage_label": "Повторная обработка страницы по фото",
+                        "current": index - 1,
+                        "total": total,
+                        "percent": round(((index - 1) / max(1, total)) * 100),
+                        "language_code": language_code,
+                        "page_start": part.page_start,
+                        "page_end": part.page_end,
+                        "source_quality_error": source_error,
+                    },
+                )
+                try:
+                    regenerated_markdown, regeneration_meta = await _regenerate_part_markdown_from_page_images(
+                        client=client,
+                        paper=paper,
+                        part=part,
+                        qwen_settings=qwen_settings,
+                        qwen_timeout=qwen_timeout,
+                        temp_dir=temp_dir,
+                    )
+                except Exception as exc:
+                    regenerated_markdown = ""
+                    regeneration_meta = {"error": f"image_regeneration_failed:{type(exc).__name__}:{exc}"}
+                    logger.warning(
+                        "Article translation image fallback failed: paper_id={}, part_id={}, error={}",
+                        paper_id,
+                        part.id,
+                        regeneration_meta["error"],
+                    )
+
+                regenerated_quality = _markdown_translation_source_quality(regenerated_markdown)
+                if not regenerated_markdown or not regenerated_quality.get("ok"):
+                    failed_count += 1
+                    final_source_error = str(
+                        regeneration_meta.get("error")
+                        or regenerated_quality.get("error")
+                        or source_error
+                        or "source_markdown_invalid"
+                    )[:4000]
+                    await _upsert_part_translation(
+                        db,
+                        paper_id=paper_id,
+                        part_id=part.id,
+                        language_code=language_code,
+                        language_name=language_name,
+                        source_language_code=source_language_code,
+                        status="failed",
+                        error="Исходный Markdown повреждён, повторная обработка по фото не восстановила страницу: " + final_source_error,
+                        qwen_model=str(qwen_settings.get("model") or settings.QWEN_MODEL),
+                        qwen_prompt_version=ARTICLE_TRANSLATION_PROMPT_VERSION,
+                        source_chars=len(source_markdown),
+                    )
+                    await paper_service.update_paper(
+                        paper_id,
+                        translation_status=f"translating_article:{index}/{total}",
+                        translation_task_id=task_id,
+                        translation_error="Исходный Markdown повреждён, повторная обработка по фото не восстановила страницу: " + final_source_error,
+                    )
+                    continue
+
+                metadata = dict(getattr(part, "extraction_metadata", None) or {})
+                metadata["translation_markdown_fallback"] = {
+                    **regeneration_meta,
+                    "source_quality_error": source_error,
+                    "regenerated_quality_warnings": regenerated_quality.get("warnings") or [],
+                }
+                part.markdown_text = regenerated_markdown.strip()
+                part.markdown_text_chars = len(part.markdown_text)
+                part.status = "ready"
+                part.error = None
+                part.qwen_model = str(qwen_settings.get("model") or settings.QWEN_MODEL)
+                part.qwen_prompt_version = ARTICLE_MARKDOWN_IMAGE_REGENERATION_PROMPT_VERSION
+                part.extraction_method = "ai_page_image_translation_fallback"
+                part.extraction_quality_score = 1.0
+                part.extraction_metadata = metadata
+                part.regeneration_count = int(getattr(part, "regeneration_count", 0) or 0) + 1
+                await db.commit()
+                await db.refresh(part)
+                source_markdown = part.markdown_text
+                try:
+                    assembled_markdown = await part_service.assemble_markdown(paper_id)
+                    if assembled_markdown:
+                        stale_updates = _mark_ai_fields_stale(paper)
+                        await paper_service.update_paper(
+                            paper_id,
+                            full_text=assembled_markdown,
+                            **stale_updates,
+                        )
+                    else:
+                        stale_updates = _mark_ai_fields_stale(paper)
+                        if stale_updates:
+                            await paper_service.update_paper(paper_id, **stale_updates)
+                except Exception:
+                    logger.debug("Failed to refresh paper.full_text after translation fallback markdown regeneration", exc_info=True)
+
+            prompt = _build_article_translation_prompt(
+                target_language_code=language_code,
+                target_language_name=language_name,
+                paper_title=paper.title,
+                page_start=part.page_start,
+                page_end=part.page_end,
+            )
+
+            result: dict[str, Any] | None = None
+            response_text = ""
+            translated_candidate = ""
+            error_text = ""
+            max_attempts = max(1, ARTICLE_TRANSLATION_MAX_ATTEMPTS)
+            for attempt in range(1, max_attempts + 1):
+                if attempt > 1:
+                    retry_error = _format_translation_retry_error(error_text, attempt, max_attempts)
+                    await _upsert_part_translation(
+                        db,
+                        paper_id=paper_id,
+                        part_id=part.id,
+                        language_code=language_code,
+                        language_name=language_name,
+                        source_language_code=source_language_code,
+                        status="processing",
+                        error=retry_error,
+                        qwen_model=str(qwen_settings.get("model") or settings.QWEN_MODEL),
+                        qwen_prompt_version=ARTICLE_TRANSLATION_PROMPT_VERSION,
+                        source_chars=len(source_markdown),
+                    )
+                    await paper_service.update_paper(
+                        paper_id,
+                        translation_status=f"translating_article:{index - 1}/{total}",
+                        translation_task_id=task_id,
+                        translation_error=retry_error,
+                    )
+                    _safe_update_state(
+                        self,
+                        task_id,
+                        "PROGRESS",
+                        {
+                            "paper_id": paper_id,
+                            "stage": "translating_article",
+                            "stage_label": "Перевод текста статьи: повторная попытка",
+                            "current": index - 1,
+                            "total": total,
+                            "percent": round(((index - 1) / max(1, total)) * 100),
+                            "language_code": language_code,
+                            "page_start": part.page_start,
+                            "page_end": part.page_end,
+                            "retry_attempt": attempt,
+                            "retry_total": max_attempts,
+                            "error": error_text,
+                        },
+                    )
+                    await asyncio.sleep(_translation_retry_delay_seconds(attempt - 1))
+
+                file_path = temp_dir / f"paper_{paper_id}_part_{part.id}_{language_code}_try_{attempt}.md"
+                file_path.write_text(source_markdown, encoding="utf-8")
+                try:
+                    attempt_session_id = await asyncio.to_thread(
+                        create_qwen_session_for_paper,
+                        paper_id,
+                        f"{paper.title} — {language_name} — part {part.id} try {attempt}",
+                    )
+                    raw_result = await asyncio.to_thread(
+                        client.upload_file_and_send_message,
+                        file_path=str(file_path),
+                        message=prompt,
+                        session_id=attempt_session_id,
+                        thinking_enabled=False,
+                        search_enabled=False,
+                        auto_continue=True,
+                        timeout=qwen_timeout,
+                        session_prompt="",
+                    )
+                except Exception as exc:
+                    raw_result = {"error": f"{type(exc).__name__}: {exc}", "response": ""}
+                finally:
+                    try:
+                        file_path.unlink(missing_ok=True)
+                    except Exception:
+                        logger.debug("Failed to delete temporary translation file {}", file_path, exc_info=True)
+
+                result = raw_result if isinstance(raw_result, dict) else {"error": "invalid_qwen_response", "response": ""}
+                error_text = str(result.get("error") or result.get("message") or "").strip()
+                response_text = str(result.get("response") or "").strip()
+                response_error = _extract_qwen_error_response(response_text)
+                if response_error:
+                    error_text = error_text or response_error
+                    response_text = ""
+                if response_text:
+                    translated_candidate = _clean_qwen_markdown_response(response_text)
+                    quality_error = _translation_output_quality_error(source_markdown, translated_candidate)
+                    if not quality_error:
+                        break
+                    error_text = quality_error
+                    response_text = ""
+                    translated_candidate = ""
+
+                if is_qwen_auth_expired_message(error_text):
+                    break
+                retryable = _is_transient_article_translation_error(error_text) or _is_retryable_translation_quality_error(error_text)
+                if attempt >= max_attempts or not retryable:
+                    break
+                logger.warning(
+                    "Qwen translation attempt will be retried: paper_id={}, part_id={}, attempt={}/{}, error={}",
+                    paper_id,
+                    part.id,
+                    attempt + 1,
+                    max_attempts,
+                    error_text,
+                )
+
+            if error_text and not response_text:
+                if is_qwen_auth_expired_message(error_text):
+                    await _upsert_part_translation(
+                        db,
+                        paper_id=paper_id,
+                        part_id=part.id,
+                        language_code=language_code,
+                        language_name=language_name,
+                        source_language_code=source_language_code,
+                        status="failed",
+                        error="qwen_token_expired",
+                        qwen_model=str(qwen_settings.get("model") or settings.QWEN_MODEL),
+                        qwen_prompt_version=ARTICLE_TRANSLATION_PROMPT_VERSION,
+                        source_chars=len(source_markdown),
+                    )
+                    await paper_service.update_paper(
+                        paper_id,
+                        translation_status="translation_failed",
+                        translation_task_id=task_id,
+                        translation_error="Токен Qwen истёк. Обновите QWEN_TOKEN.",
+                    )
+                    return {"ok": False, "paper_id": paper_id, "error": "qwen_token_expired"}
+                failed_count += 1
+                final_part_error = (
+                    _format_translation_final_error(error_text, max_attempts)
+                    if (_is_transient_article_translation_error(error_text) or _is_retryable_translation_quality_error(error_text))
+                    else (error_text or "empty_qwen_response")
+                )
+                await _upsert_part_translation(
+                    db,
+                    paper_id=paper_id,
+                    part_id=part.id,
+                    language_code=language_code,
+                    language_name=language_name,
+                    source_language_code=source_language_code,
+                    status="failed",
+                    error=final_part_error,
+                    qwen_model=str(qwen_settings.get("model") or settings.QWEN_MODEL),
+                    qwen_prompt_version=ARTICLE_TRANSLATION_PROMPT_VERSION,
+                    source_chars=len(source_markdown),
+                )
+                await paper_service.update_paper(
+                    paper_id,
+                    translation_status=f"translating_article:{index}/{total}",
+                    translation_task_id=task_id,
+                    translation_error=final_part_error,
+                )
+                continue
+
+            translated = translated_candidate or _clean_qwen_markdown_response(response_text)
+            if not translated:
+                failed_count += 1
+                await _upsert_part_translation(
+                    db,
+                    paper_id=paper_id,
+                    part_id=part.id,
+                    language_code=language_code,
+                    language_name=language_name,
+                    source_language_code=source_language_code,
+                    status="failed",
+                    error="empty_translation",
+                    qwen_model=str(qwen_settings.get("model") or settings.QWEN_MODEL),
+                    qwen_prompt_version=ARTICLE_TRANSLATION_PROMPT_VERSION,
+                    source_chars=len(source_markdown),
+                )
+                continue
+
+            await _upsert_part_translation(
+                db,
+                paper_id=paper_id,
+                part_id=part.id,
+                language_code=language_code,
+                language_name=language_name,
+                source_language_code=source_language_code,
+                translated_markdown_text=translated,
+                status="ready",
+                qwen_model=str(qwen_settings.get("model") or settings.QWEN_MODEL),
+                qwen_prompt_version=ARTICLE_TRANSLATION_PROMPT_VERSION,
+                source_chars=len(source_markdown),
+            )
+            ready_count += 1
+            fresh_paper = await paper_service.get_by_id(paper_id)
+            await paper_service.update_paper(
+                paper_id,
+                available_language_codes=_merge_language_codes(
+                    getattr(fresh_paper, "available_language_codes", None),
+                    source_language_code,
+                    language_code,
+                ),
+                translation_status=f"translating_article:{index}/{total}",
+                translation_task_id=task_id,
+                translation_error=None,
+            )
+            _safe_update_state(
+                self,
+                task_id,
+                "PROGRESS",
+                {
+                    "paper_id": paper_id,
+                    "stage": "translating_article",
+                    "stage_label": "Перевод текста статьи",
+                    "current": index,
+                    "total": total,
+                    "percent": round((index / max(1, total)) * 100),
+                    "language_code": language_code,
+                    "page_start": part.page_start,
+                    "page_end": part.page_end,
+                },
+            )
+
+        final_status = "translation_ready" if ready_count == total else "translation_partial" if ready_count > 0 else "translation_failed"
+        final_error = None if final_status == "translation_ready" else f"ready={ready_count}, failed={failed_count}, skipped={skipped_count}, total={total}"
+        fresh_paper = await paper_service.get_by_id(paper_id)
+        await paper_service.update_paper(
+            paper_id,
+            available_language_codes=_merge_language_codes(
+                getattr(fresh_paper, "available_language_codes", None),
+                source_language_code,
+                language_code if ready_count else None,
+            ),
+            translation_status=final_status,
+            translation_task_id=task_id,
+            translation_error=final_error,
+        )
+        return {
+            "ok": ready_count > 0,
+            "paper_id": paper_id,
+            "language_code": language_code,
+            "language_name": language_name,
+            "ready": ready_count,
+            "failed": failed_count,
+            "skipped": skipped_count,
+            "total": total,
+            "status": final_status,
+        }
 
 
 @celery_app.task(
@@ -991,7 +1605,7 @@ async def _regenerate_markdown_part_async(
             "part_id": part_id,
             "mode": mode,
             "stage": "regenerating_markdown_part",
-            "stage_label": "Повторная оцифровка части" if mode == "text" else "Повторная оцифровка части по фото",
+            "stage_label": "Повторная оцифровка части" if mode == "text" else "Повторное извлечение текста страницы" if mode in {"auto", "mypdf"} else "Повторная оцифровка части по фото",
         },
     )
 
@@ -1022,9 +1636,10 @@ async def _regenerate_markdown_part_async(
             await paper_service.update_paper(
                 paper_id,
                 full_text=full_text,
-                processing_status="markdown_ready",
+                processing_status="page_regenerated",
                 content_task_id=task_id,
                 processing_error=None,
+                **_mark_ai_fields_stale(paper),
             )
             return {
                 "status": "ok",
@@ -1039,22 +1654,19 @@ async def _regenerate_markdown_part_async(
                 "content_type": getattr(part, "content_type", "body"),
             }
 
-        image_regeneration_metadata: dict[str, Any] = {}
-        if mode == "image":
-            image_options = _build_image_regeneration_options(
-                qwen_settings=qwen_settings,
-                pdf_markdown_settings=pdf_markdown_settings,
-                timeout=qwen_timeout,
-            )
+        if mode in {"image", "ai", "auto", "mypdf"}:
             try:
-                raw_text, image_regeneration_metadata = await asyncio.to_thread(
-                    _recognize_part_pdf_pages_as_text,
+                raw_text, regeneration_metadata = await asyncio.to_thread(
+                    _extract_part_pdf_pages_as_text,
                     pdf_path=str(getattr(paper, "pdf_local_path", "") or ""),
                     paper_id=paper_id,
                     part_id=part_id,
                     page_start=int(part.page_start or 1),
                     page_end=int(part.page_end or part.page_start or 1),
-                    options=image_options,
+                    mode=mode,
+                    pdf_markdown_settings=pdf_markdown_settings,
+                    qwen_settings=qwen_settings,
+                    timeout=qwen_timeout,
                 )
             except Exception as exc:
                 error_text = str(exc)
@@ -1065,15 +1677,20 @@ async def _regenerate_markdown_part_async(
             if raw_text:
                 metadata = dict(getattr(part, "extraction_metadata", None) or {})
                 warnings = set(str(item) for item in (getattr(part, "extraction_warnings", None) or []) if item)
-                warnings.update(str(item) for item in image_regeneration_metadata.get("warnings", []) if item)
-                metadata["regeneration_mode"] = "image"
-                metadata["ai_page_image_regeneration"] = image_regeneration_metadata
+                warnings.update(str(item) for item in regeneration_metadata.get("warnings", []) if item)
+                metadata["pdf_page_regeneration"] = regeneration_metadata
                 part.raw_text = raw_text
                 part.raw_text_chars = len(raw_text)
-                part.extraction_method = "ai_page_image_regenerate"
-                part.extraction_quality_score = None
+                if regeneration_metadata.get("method"):
+                    part.extraction_method = str(regeneration_metadata.get("method"))
+                if regeneration_metadata.get("quality_score") is not None:
+                    try:
+                        part.extraction_quality_score = float(regeneration_metadata.get("quality_score"))
+                    except (TypeError, ValueError):
+                        pass
                 part.extraction_warnings = sorted(warnings)
                 part.extraction_metadata = metadata
+                _mark_regenerated_part_quality(part, mode=mode, raw_text=raw_text)
                 await db.commit()
                 await db.refresh(part)
         else:
@@ -1084,9 +1701,10 @@ async def _regenerate_markdown_part_async(
             await paper_service.update_paper(
                 paper_id,
                 full_text=full_text,
-                processing_status="markdown_ready",
+                processing_status="page_regenerated",
                 content_task_id=task_id,
                 processing_error=None,
+                **_mark_ai_fields_stale(paper),
             )
             return {"status": "ok", "paper_id": paper_id, "part_id": part_id, "mode": mode, "markdown_skipped": True, "error": "empty_qwen_projection"}
 
@@ -1142,12 +1760,15 @@ async def _regenerate_markdown_part_async(
             increment_regeneration=True,
         )
         full_text = await part_service.assemble_markdown(paper_id)
+        _mark_regenerated_part_quality(part, mode=mode, raw_text=raw_text)
+        await db.commit()
         await paper_service.update_paper(
             paper_id,
             full_text=full_text,
-            processing_status="markdown_ready",
+            processing_status="page_regenerated",
             content_task_id=task_id,
             processing_error=None,
+            **_mark_ai_fields_stale(paper),
         )
         return {
             "status": "ok",
@@ -1158,5 +1779,5 @@ async def _regenerate_markdown_part_async(
             "page_end": part.page_end,
             "markdown_text_chars": len(markdown_text),
             "regeneration_count": int(part.regeneration_count or 0),
-            "image_regeneration": image_regeneration_metadata if mode == "image" else None,
+            "image_regeneration": regeneration_metadata if mode in {"image", "ai"} else None,
         }

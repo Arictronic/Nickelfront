@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -243,6 +244,28 @@ class AIPageRecognitionService:
                 page_number=page_number,
                 opts=options,
             )
+            max_upload_mb = float(os.getenv("QWEN_FILE_UPLOAD_MAX_SIZE_MB", "20") or 20)
+            max_upload_bytes = int(max_upload_mb * 1024 * 1024)
+            image_size = temp_path.stat().st_size
+            if image_size > max_upload_bytes:
+                reason = "qwen_file_too_large"
+                warnings.append(reason)
+                return AIPageResult(
+                    page_number=page_number,
+                    provider=provider,
+                    model=model,
+                    status="provider_error",
+                    reason=reason,
+                    warnings=warnings,
+                    metadata={
+                        **base_meta,
+                        "ai_session_id": self._session_id or sid,
+                        "ai_temp_image_path": str(temp_path) if not delete_temp else "",
+                        "ai_page_image_size_bytes": image_size,
+                        "ai_upload_max_size_bytes": max_upload_bytes,
+                        "ai_external_call_performed": False,
+                    },
+                )
 
             from app.services.qwen_client import get_qwen_client
 
@@ -279,7 +302,7 @@ class AIPageRecognitionService:
                 "ai_external_call_performed": True,
                 "ai_response_chars": len(response),
                 "ai_page_text_chars": len(response),
-                "ai_upload_attempts": int((result or {}).get("upload_attempts") or 3),
+                "ai_upload_attempts": int((result or {}).get("upload_attempts") or 1),
                 "ai_replacement_session_used": replacement_session,
                 "ai_message_id": (result or {}).get("message_id") or 0,
             }

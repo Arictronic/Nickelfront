@@ -14,7 +14,7 @@ export const PAPER_SOURCES = [
 
 export type PaperSource = (typeof PAPER_SOURCES)[number];
 export type PdfProcessingMode = "auto" | "ai" | "mypdf";
-export type PaperRegenerationMode = "text" | "image";
+export type PaperRegenerationMode = "text" | "image" | "auto" | "mypdf" | "ai";
 
 export interface Paper {
   id: number;
@@ -26,6 +26,14 @@ export interface Paper {
   abstract: string | null;
   fullText: string | null;
   keywords: string[];
+  languageCode: string | null;
+  languageName: string | null;
+  languageConfidence: number | null;
+  languageSource: string | null;
+  availableLanguageCodes: string[];
+  translationStatus: string | null;
+  translationTaskId: string | null;
+  translationError: string | null;
   source: PaperSource | string;
   sourceId: string | null;
   canonicalPatentId: string | null;
@@ -73,6 +81,24 @@ export interface FullTextSearchResult extends Paper {
   matchedFields: string[];
 }
 
+export interface PaperContentPartTranslation {
+  id: number;
+  paperId: number;
+  partId: number;
+  languageCode: string;
+  languageName: string | null;
+  sourceLanguageCode: string | null;
+  translatedMarkdownText: string | null;
+  status: string;
+  error: string | null;
+  qwenModel: string | null;
+  qwenPromptVersion: string | null;
+  sourceChars: number;
+  translatedChars: number;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
 export interface PaperContentPart {
   id: number;
   paperId: number;
@@ -98,6 +124,7 @@ export interface PaperContentPart {
   extractionQualityScore: number | null;
   extractionWarnings: string[];
   extractionMetadata: Record<string, unknown> | null;
+  translations: PaperContentPartTranslation[];
   createdAt: string | null;
   updatedAt: string | null;
 }
@@ -107,6 +134,53 @@ export interface PaperProcessingStatusInfo {
   label: string;
   group: "pending" | "processing" | "success" | "warning" | "error" | "unknown" | string;
   final: boolean;
+  stage?: string;
+  stageLabel?: string;
+}
+
+export interface PaperPipelineStageInfo {
+  key: string;
+  label: string;
+  status: "pending" | "processing" | "success" | "warning" | "error" | "skipped" | "unknown" | string;
+  statusLabel: string;
+  progress: number;
+  final: boolean;
+  enabled: boolean | null;
+  skipped: boolean;
+  fallbackUsed: boolean;
+  error: string | null;
+  source: string;
+  details: Record<string, unknown>;
+}
+
+export interface PaperProcessingPipelineStatus {
+  aggregateStatus: "pending" | "processing" | "success" | "warning" | "error" | "unknown" | string;
+  aggregateLabel: string;
+  aggregateProgress: number;
+  hasErrors: boolean;
+  hasWarnings: boolean;
+  pdfStage: PaperPipelineStageInfo;
+  ocrStage: PaperPipelineStageInfo;
+  markdownStage: PaperPipelineStageInfo;
+  ruAnalysisStage: PaperPipelineStageInfo;
+  keywordsStage: PaperPipelineStageInfo;
+  embeddingStage: PaperPipelineStageInfo;
+  finalStage: PaperPipelineStageInfo;
+  stages: PaperPipelineStageInfo[];
+}
+
+export interface PaperProcessingQualityInfo {
+  mode: PdfProcessingMode | "mixed" | "unknown" | string;
+  score: number | null;
+  label: string;
+  basis: string;
+  status: "success" | "warning" | "error" | "unknown" | string;
+  pagesTotal?: number | null;
+  pagesSuccess?: number | null;
+  pagesFailed?: number | null;
+  fallbackUsed?: boolean;
+  requestedMode?: string | null;
+  actualMode?: string | null;
 }
 
 export interface PaperContentPartRegenerateResponse {
@@ -117,6 +191,16 @@ export interface PaperContentPartRegenerateResponse {
   page_start: number;
   page_end: number;
   mode: PaperRegenerationMode;
+}
+
+export interface PaperTranslateResponse {
+  paper_id: number;
+  task_id: string;
+  status: string;
+  target_language_code: string;
+  target_language_name: string | null;
+  parts_total: number;
+  parts_ready: number;
 }
 
 export interface PaperReportData {
@@ -142,12 +226,15 @@ export interface PaperDetailResponse {
   paper: Paper;
   contentParts: PaperContentPart[];
   statusInfo: PaperProcessingStatusInfo;
+  processingQuality: PaperProcessingQualityInfo | null;
+  pipelineStatus: PaperProcessingPipelineStatus | null;
 }
 
 const PROCESSING_STATUS_LABELS: Record<string, string> = {
   pending: "Ожидает обработки",
   queued_for_content_processing: "В очереди на обработку",
   processing_content: "Обрабатывается",
+  content_queue_failed: "Ошибка постановки content pipeline",
   started: "Запущено",
   pdf_pending: "Подготовка PDF",
   downloading_pdf: "Загрузка PDF",
@@ -158,6 +245,7 @@ const PROCESSING_STATUS_LABELS: Record<string, string> = {
   extracting_pdf_text: "Извлечение текста из PDF",
   pdf_text_skipped: "Извлечение текста PDF пропущено",
   pdf_parsed: "Текст PDF извлечён",
+  pdf_text_failed: "Ошибка извлечения текста PDF",
   fulltext_fallback_parsed: "Текст получен из резервного источника",
   fulltext_unavailable: "Полный текст недоступен",
   formatting_markdown: "Оцифровка файла",
@@ -165,18 +253,25 @@ const PROCESSING_STATUS_LABELS: Record<string, string> = {
   markdown_ready: "Файл оцифрован",
   markdown_partial: "Файл частично оцифрован",
   markdown_ready_without_qwen: "Текст собран без Qwen",
+  page_regenerated: "Страница переоцифрована",
   markdown_failed: "Ошибка оцифровки файла",
   markdown_skipped: "Оцифровка пропущена",
   analyzing_ru: "Анализ на русском",
   ru_analysis_ready: "Русский анализ готов",
+  ru_analysis_failed: "Ошибка русского анализа",
   ru_analysis_fallback: "Русский анализ в резервном режиме",
   ru_analysis_skipped: "Русский анализ пропущен",
+  translating_article: "Перевод текста статьи",
+  translation_ready: "Перевод текста готов",
+  translation_partial: "Перевод текста частично готов",
+  translation_failed: "Ошибка перевода текста",
   extracting_keywords: "Выделение ключевых слов",
   keywords_ready: "Ключевые слова готовы",
   keywords_failed: "Ошибка ключевых слов",
   keywords_skipped: "Ключевые слова пропущены",
   indexing_vector: "Индексация в векторной базе",
   embedding_ready: "Векторный индекс готов",
+  embedding_failed: "Ошибка векторной индексации",
   embedding_skipped: "Векторная индексация пропущена",
   qwen_auth_failed: "Ошибка авторизации Qwen",
   ready: "Готово",
@@ -189,6 +284,7 @@ const PROCESSING_STATUS_PROGRESS: Record<string, number> = {
   pending: 0,
   queued_for_content_processing: 5,
   processing_content: 10,
+  content_queue_failed: 10,
   started: 12,
   pdf_pending: 15,
   downloading_pdf: 25,
@@ -199,27 +295,35 @@ const PROCESSING_STATUS_PROGRESS: Record<string, number> = {
   extracting_pdf_text: 40,
   pdf_text_skipped: 48,
   pdf_parsed: 48,
+  pdf_text_failed: 48,
   fulltext_fallback_parsed: 48,
   fulltext_unavailable: 48,
   formatting_markdown: 52,
   digitizing_file: 52,
   markdown_ready: 72,
   markdown_partial: 72,
-  markdown_ready_without_qwen: 100,
+  markdown_ready_without_qwen: 72,
+  page_regenerated: 100,
   markdown_failed: 72,
   markdown_skipped: 72,
   analyzing_ru: 80,
   ru_analysis_ready: 86,
-  ru_analysis_fallback: 100,
-  ru_analysis_skipped: 100,
+  ru_analysis_failed: 86,
+  ru_analysis_fallback: 86,
+  ru_analysis_skipped: 86,
+  translating_article: 88,
+  translation_ready: 100,
+  translation_partial: 96,
+  translation_failed: 96,
   extracting_keywords: 90,
   keywords_ready: 92,
-  keywords_failed: 100,
-  keywords_skipped: 100,
+  keywords_failed: 92,
+  keywords_skipped: 92,
   indexing_vector: 96,
-  embedding_ready: 100,
-  embedding_skipped: 100,
-  qwen_auth_failed: 100,
+  embedding_ready: 96,
+  embedding_failed: 96,
+  embedding_skipped: 96,
+  qwen_auth_failed: 80,
   ready: 100,
   ready_with_fallback: 100,
   completed: 100,
@@ -231,21 +335,12 @@ const PROCESSING_FINAL_STATUSES = new Set([
   "ready_with_fallback",
   "completed",
   "failed",
-  "qwen_auth_failed",
-  "pdf_download_failed",
-  "pdf_unavailable",
-  "pdf_download_skipped",
-  "pdf_text_skipped",
-  "fulltext_unavailable",
-  "markdown_ready_without_qwen",
-  "markdown_failed",
-  "markdown_skipped",
-  "ru_analysis_fallback",
-  "ru_analysis_skipped",
-  "keywords_failed",
-  "keywords_skipped",
-  "embedding_ready",
-  "embedding_skipped",
+  // Translation statuses are final for the translation action, not for the
+  // AI/PDF/Qwen document pipeline. They are kept here for legacy widgets that
+  // still receive translation status through processingStatus.
+  "translation_ready",
+  "translation_partial",
+  "translation_failed",
 ]);
 
 type ParsedProcessingStatus = {
@@ -286,12 +381,13 @@ export function getProcessingStatusLabel(
 
   const baseLabel = PROCESSING_STATUS_LABELS[parsed.key] ?? parsed.key;
   if (
-    parsed.key === "digitizing_file" &&
+    (parsed.key === "digitizing_file" || parsed.key === "translating_article") &&
     parsed.current !== null &&
     parsed.total !== null &&
     parsed.total > 0
   ) {
-    return `${baseLabel} — ${Math.min(parsed.current, parsed.total)}/${parsed.total} стр.`;
+    const unit = parsed.key === "translating_article" ? "част." : "стр.";
+    return `${baseLabel} — ${Math.min(parsed.current, parsed.total)}/${parsed.total} ${unit}`;
   }
 
   return baseLabel;
@@ -304,12 +400,15 @@ export function getProcessingProgress(
   if (!parsed.key) return 0;
 
   if (
-    parsed.key === "digitizing_file" &&
+    (parsed.key === "digitizing_file" || parsed.key === "translating_article") &&
     parsed.current !== null &&
     parsed.total !== null &&
     parsed.total > 0
   ) {
     const pageRatio = Math.max(0, Math.min(1, parsed.current / parsed.total));
+    if (parsed.key === "translating_article") {
+      return Math.max(88, Math.min(96, Math.round(88 + pageRatio * 8)));
+    }
     return Math.max(52, Math.min(72, Math.round(52 + pageRatio * 20)));
   }
 
@@ -335,6 +434,7 @@ export interface PaperListFilters {
   dateTo?: string; // yyyy-mm-dd
   query?: string;
   processingStatus?: string;
+  translationStatus?: string;
 }
 
 export type SearchType = "vector" | "semantic" | "hybrid" | "text";

@@ -102,6 +102,7 @@ async def _verify_database_schema_ready() -> None:
         "refresh_tokens",
         "patent_tasks",
         "paper_content_parts",
+        "paper_content_part_translations",
         "system_settings",
     )
     missing: list[str] = []

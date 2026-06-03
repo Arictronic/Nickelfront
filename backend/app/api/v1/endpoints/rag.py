@@ -121,7 +121,7 @@ async def ask_question(
 @router.post("/upload", response_model=UploadResponse)
 async def upload_document(
     file: UploadFile = File(...),
-    _current_user: UserResponse = Depends(get_current_user),
+    _current_user: UserResponse = Depends(require_admin_user),
 ):
     """
     Загрузить PDF документ для RAG.

@@ -51,10 +51,73 @@ class QwenServiceClient:
         return self._request("POST", "/config/token", json={"token": token})
 
     def set_token_from_har(self, har_path: str, validate: bool = True) -> dict:
-        """Extract Qwen token from HAR through qwen_service and apply it."""
+        """Extract Qwen token + browser-session headers from HAR and apply them."""
         endpoint = f"/config/token/update-from-har?validate={str(validate).lower()}"
         with open(har_path, "rb") as file_obj:
             return self._request("POST", endpoint, files={"har_file": (Path(har_path).name, file_obj, "application/json")})
+
+    def get_har_dir_info(self) -> dict:
+        """Return qwen_service/har import folder state."""
+        return self._request("GET", "/config/har")
+
+    def set_token_from_har_file(self, filename: str | None = None, validate: bool = True, require_file_api: bool = True) -> dict:
+        """Import newest or named HAR from qwen_service/har on the service host."""
+        endpoint = f"/config/token/update-from-har-file?validate={str(validate).lower()}&require_file_api={str(require_file_api).lower()}"
+        payload = {"filename": filename} if filename else {}
+        return self._request("POST", endpoint, json=payload)
+
+    def update_session_headers(
+        self,
+        *,
+        token: str | None = None,
+        cookie: str | None = None,
+        bx_ua: str | None = None,
+        bx_umidtoken: str | None = None,
+        bx_v: str | None = None,
+        user_agent: str | None = None,
+        file_api_extra_headers_json: str | None = None,
+        file_sts_payload_template_json: str | None = None,
+        file_sts_url: str | None = None,
+        file_parse_payload_template_json: str | None = None,
+        file_parse_url: str | None = None,
+        file_parse_status_payload_template_json: str | None = None,
+        file_parse_status_url: str | None = None,
+        oss_put_headers_template_json: str | None = None,
+        source: str = "manual",
+        clear_missing: bool = False,
+        validate: bool = False,
+    ) -> dict:
+        """Manually update Qwen token + browser-session headers without Playwright login."""
+        payload = {
+            "token": token,
+            "cookie": cookie,
+            "bx_ua": bx_ua,
+            "bx_umidtoken": bx_umidtoken,
+            "bx_v": bx_v,
+            "user_agent": user_agent,
+            "file_api_extra_headers_json": file_api_extra_headers_json,
+            "file_sts_payload_template_json": file_sts_payload_template_json,
+            "file_sts_url": file_sts_url,
+            "file_parse_payload_template_json": file_parse_payload_template_json,
+            "file_parse_url": file_parse_url,
+            "file_parse_status_payload_template_json": file_parse_status_payload_template_json,
+            "file_parse_status_url": file_parse_status_url,
+            "oss_put_headers_template_json": oss_put_headers_template_json,
+            "source": source,
+            "clear_missing": clear_missing,
+        }
+        endpoint = f"/config/session/update?validate={str(validate).lower()}"
+        return self._request("POST", endpoint, json=payload)
+
+    def refresh_cdp_session(self, validate: bool = False) -> dict:
+        """Capture Qwen browser session from an already-open Chrome via CDP."""
+        endpoint = f"/config/session/refresh-cdp?validate={str(validate).lower()}"
+        return self._request("POST", endpoint)
+
+    def refresh_browser_session(self, validate: bool = False) -> dict:
+        """Compatibility endpoint; by default prefers CDP/HAR/manual over login automation."""
+        endpoint = f"/config/session/refresh-browser?validate={str(validate).lower()}"
+        return self._request("POST", endpoint)
 
     def set_api_key(self, api_key: str) -> dict:
         """Documentation updated."""
@@ -150,9 +213,34 @@ class QwenServiceClient:
         auto_continue: bool | None = None,
         session_prompt: str | None = None,
     ) -> dict:
-        """Upload a file and send it with optional message."""
+        """Upload one file and send it with optional message."""
+        return self.upload_files_and_send_message(
+            file_paths=[file_path],
+            message=message,
+            session_id=session_id,
+            thinking_enabled=thinking_enabled,
+            search_enabled=search_enabled,
+            auto_continue=auto_continue,
+            session_prompt=session_prompt,
+        )
+
+    def upload_files(self, file_paths: list[str]) -> dict:
+        """Upload 1..5 files through qwen_service provider pipeline."""
+        return self._request("POST", "/files/upload", json={"file_paths": file_paths})
+
+    def upload_files_and_send_message(
+        self,
+        file_paths: list[str],
+        message: str = "",
+        session_id: str | None = None,
+        thinking_enabled: bool = True,
+        search_enabled: bool = True,
+        auto_continue: bool | None = None,
+        session_prompt: str | None = None,
+    ) -> dict:
+        """Upload 1..5 files and send one prompt with all files attached."""
         payload = {
-            "file_path": file_path,
+            "file_paths": file_paths,
             "message": message,
             "session_id": session_id or self.current_session_id,
             "thinking_enabled": thinking_enabled,

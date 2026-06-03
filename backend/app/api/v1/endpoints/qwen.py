@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.deps import get_current_user, require_admin_user
 from app.services.qwen_client import get_qwen_client
-from app.services.qwen_service import get_qwen_service
 from shared.schemas.auth import UserResponse
 from shared.schemas.paper import (
     QwenConfigResponse,
@@ -34,6 +33,35 @@ def _qwen_unavailable_message(health: dict) -> str:
     return f"Qwen сервис недоступен.{details}{where}"
 
 
+def _qwen_error_status_code(result: dict) -> int:
+    raw_code = result.get("status_code")
+    if isinstance(raw_code, int) and 400 <= raw_code < 600:
+        return raw_code
+
+    code = str(result.get("error_code") or result.get("error") or "").lower()
+    if "token" in code or "auth" in code or "unauthorized" in code:
+        return 401
+    if "rate" in code or "too_many" in code:
+        return 429
+    if "timeout" in code:
+        return 504
+    if "empty" in code or "validation" in code:
+        return 422
+    return 503
+
+
+def _raise_qwen_result_error(result: dict) -> None:
+    if not result.get("error"):
+        return
+    detail = {
+        "error": result.get("error_code") or result.get("error"),
+        "message": result.get("message") or result.get("detail") or result.get("error"),
+        "session_id": result.get("session_id") or "",
+        "status": result.get("status", "error"),
+    }
+    raise HTTPException(status_code=_qwen_error_status_code(result), detail=detail)
+
+
 @router.get("/health", response_model=QwenHealthResponse)
 async def health_check():
     """
@@ -42,10 +70,65 @@ async def health_check():
     Returns:
         Информация о статусе и доступности сервиса.
     """
-    qwen_service = get_qwen_service()
-    health = await asyncio.to_thread(qwen_service.health_status)
+    qwen_client = get_qwen_client()
+    health = await asyncio.to_thread(qwen_client.health_status)
 
     return QwenHealthResponse(**health)
+
+
+@router.get("/readiness")
+async def get_readiness(
+    _admin: UserResponse = Depends(require_admin_user),
+):
+    """Получить локальную диагностику готовности qwen_service без вызова внешнего Qwen."""
+    qwen_client = get_qwen_client()
+    return await asyncio.to_thread(qwen_client.get_readiness)
+
+
+@router.post("/cache-maintenance")
+async def run_cache_maintenance(
+    dry_run: bool = True,
+    prune_file_metadata: bool = True,
+    prune_session_registry: bool = True,
+    file_max_age_days: int | None = None,
+    session_max_age_days: int | None = None,
+    clear_file_metadata: bool = False,
+    clear_session_registry: bool = False,
+    _admin: UserResponse = Depends(require_admin_user),
+):
+    """Очистить/проверить локальные runtime-кэши qwen_service без вызова внешнего Qwen."""
+    qwen_client = get_qwen_client()
+    return await asyncio.to_thread(
+        qwen_client.run_cache_maintenance,
+        dry_run=dry_run,
+        prune_file_metadata=prune_file_metadata,
+        prune_session_registry=prune_session_registry,
+        file_max_age_days=file_max_age_days,
+        session_max_age_days=session_max_age_days,
+        clear_file_metadata=clear_file_metadata,
+        clear_session_registry=clear_session_registry,
+    )
+
+
+@router.get("/events")
+async def get_qwen_events(
+    limit: int = 50,
+    event: str | None = None,
+    status: str | None = None,
+    _admin: UserResponse = Depends(require_admin_user),
+):
+    """Получить локальный журнал событий qwen_service без вызова внешнего Qwen."""
+    qwen_client = get_qwen_client()
+    return await asyncio.to_thread(qwen_client.get_event_journal, limit=limit, event=event, status=status)
+
+
+@router.post("/events/clear")
+async def clear_qwen_events(
+    _admin: UserResponse = Depends(require_admin_user),
+):
+    """Очистить локальный журнал событий qwen_service."""
+    qwen_client = get_qwen_client()
+    return await asyncio.to_thread(qwen_client.clear_event_journal)
 
 
 @router.get("/config", response_model=QwenConfigResponse)
@@ -58,8 +141,8 @@ async def get_config(
     Returns:
         Конфигурация сервиса.
     """
-    qwen_service = get_qwen_service()
-    config = await asyncio.to_thread(qwen_service.get_config)
+    qwen_client = get_qwen_client()
+    config = await asyncio.to_thread(qwen_client.get_config)
 
     return QwenConfigResponse(**config)
 
@@ -79,15 +162,8 @@ async def get_stats(
     Returns:
         Статистика сервиса.
     """
-    qwen_service = get_qwen_service()
-    stats = await asyncio.to_thread(qwen_service.get_stats)
-    is_available = await asyncio.to_thread(lambda: qwen_service.is_available)
-
-    return {
-        **stats,
-        "model": qwen_service.model,
-        "is_available": is_available,
-    }
+    qwen_client = get_qwen_client()
+    return await asyncio.to_thread(qwen_client.get_stats)
 
 
 @router.post("/config", response_model=QwenConfigResponse)
@@ -105,10 +181,10 @@ async def update_config(
     - **auto_continue_enabled** - авто-продолжение
     - **max_continues** - макс. количество продолжений (1-20)
     """
-    qwen_service = get_qwen_service()
+    qwen_client = get_qwen_client()
 
     updated = await asyncio.to_thread(
-        qwen_service.update_config,
+        qwen_client.update_config,
         model=config_update.model,
         thinking_enabled=config_update.thinking_enabled,
         search_enabled=config_update.search_enabled,
@@ -117,6 +193,8 @@ async def update_config(
         stream_retries=config_update.stream_retries,
         history_recovery_attempts=config_update.history_recovery_attempts,
         history_recovery_interval_sec=config_update.history_recovery_interval_sec,
+        file_metadata_cache_max_age_days=config_update.file_metadata_cache_max_age_days,
+        session_registry_cache_max_age_days=config_update.session_registry_cache_max_age_days,
     )
 
     return QwenConfigResponse(**updated)
@@ -125,7 +203,7 @@ async def update_config(
 @router.post("/sessions", response_model=QwenSessionCreateResponse)
 async def create_session(
     request: QwenSessionCreateRequest | None = None,
-    _current_user: UserResponse = Depends(get_current_user),
+    _current_user: UserResponse = Depends(require_admin_user),
 ):
     """
     Создать новую сессию чата.
@@ -136,15 +214,16 @@ async def create_session(
     Returns:
         Информация о созданной сессии.
     """
-    qwen_service = get_qwen_service()
+    qwen_client = get_qwen_client()
+    health = await asyncio.to_thread(qwen_client.health_status)
 
-    if not await asyncio.to_thread(lambda: qwen_service.is_available):
+    if not health.get("available"):
         raise HTTPException(
             status_code=503,
-            detail="Qwen сервис недоступен. Проверьте настройку QWEN_TOKEN."
+            detail=_qwen_unavailable_message(health),
         )
 
-    session_id = await asyncio.to_thread(qwen_service.create_session)
+    session_id = await asyncio.to_thread(qwen_client.create_session, request.title if request else None)
 
     if not session_id:
         raise HTTPException(
@@ -154,9 +233,6 @@ async def create_session(
 
     title = request.title if request else "Новый чат"
 
-
-    if title != "Новый чат":
-        await asyncio.to_thread(qwen_service.rename_session, session_id, title)
 
     return QwenSessionCreateResponse(
         session_id=session_id,
@@ -174,12 +250,12 @@ async def list_sessions(
     Returns:
         Список сессий.
     """
-    qwen_service = get_qwen_service()
+    qwen_client = get_qwen_client()
 
-    if not await asyncio.to_thread(lambda: qwen_service.is_available):
+    if not await asyncio.to_thread(qwen_client.is_available):
         return QwenSessionListResponse(sessions=[])
 
-    sessions_data = await asyncio.to_thread(qwen_service.list_sessions)
+    sessions_data = await asyncio.to_thread(qwen_client.list_sessions)
 
     sessions = [
         QwenSessionInfo(
@@ -207,15 +283,15 @@ async def get_session(
     Returns:
         Информация о сессии с историей сообщений.
     """
-    qwen_service = get_qwen_service()
+    qwen_client = get_qwen_client()
 
-    if not await asyncio.to_thread(lambda: qwen_service.is_available):
+    if not await asyncio.to_thread(qwen_client.is_available):
         raise HTTPException(
             status_code=503,
-            detail="Qwen сервис недоступен"
+            detail="Qwen сервис недоступен",
         )
 
-    session_info = await asyncio.to_thread(qwen_service.get_session_info, session_id)
+    session_info = await asyncio.to_thread(qwen_client.get_session_info, session_id)
 
     if not session_info:
         raise HTTPException(
@@ -229,7 +305,7 @@ async def get_session(
 @router.delete("/sessions/{session_id}", response_model=QwenDeleteResponse)
 async def delete_session(
     session_id: str,
-    _current_user: UserResponse = Depends(get_current_user),
+    _current_user: UserResponse = Depends(require_admin_user),
 ):
     """
     Удалить сессию.
@@ -240,15 +316,15 @@ async def delete_session(
     Returns:
         Результат удаления.
     """
-    qwen_service = get_qwen_service()
+    qwen_client = get_qwen_client()
 
-    if not await asyncio.to_thread(lambda: qwen_service.is_available):
+    if not await asyncio.to_thread(qwen_client.is_available):
         raise HTTPException(
             status_code=503,
-            detail="Qwen сервис недоступен"
+            detail="Qwen сервис недоступен",
         )
 
-    success = await asyncio.to_thread(qwen_service.delete_session, session_id)
+    success = await asyncio.to_thread(qwen_client.delete_session, session_id)
 
     return QwenDeleteResponse(
         status="ok" if success else "error",
@@ -260,7 +336,7 @@ async def delete_session(
 async def rename_session(
     session_id: str,
     request: QwenRenameRequest,
-    _current_user: UserResponse = Depends(get_current_user),
+    _current_user: UserResponse = Depends(require_admin_user),
 ):
     """
     Переименовать сессию.
@@ -272,15 +348,15 @@ async def rename_session(
     Returns:
         Результат переименования.
     """
-    qwen_service = get_qwen_service()
+    qwen_client = get_qwen_client()
 
-    if not await asyncio.to_thread(lambda: qwen_service.is_available):
+    if not await asyncio.to_thread(qwen_client.is_available):
         raise HTTPException(
             status_code=503,
-            detail="Qwen сервис недоступен"
+            detail="Qwen сервис недоступен",
         )
 
-    success = await asyncio.to_thread(qwen_service.rename_session, session_id, request.title)
+    success = await asyncio.to_thread(qwen_client.rename_session, session_id, request.title)
 
     if not success:
         raise HTTPException(
@@ -297,7 +373,7 @@ async def rename_session(
 @router.post("/messages", response_model=QwenMessageResponse)
 async def send_message(
     request: QwenMessageRequest,
-    _current_user: UserResponse = Depends(get_current_user),
+    _current_user: UserResponse = Depends(require_admin_user),
 ):
     """
     Отправить сообщение в Qwen чат.
@@ -322,24 +398,19 @@ async def send_message(
             "auto_continue": true
         }
     """
-    qwen_service = get_qwen_service()
-    health = await asyncio.to_thread(qwen_service.health_status)
+    qwen_client = get_qwen_client()
+    health = await asyncio.to_thread(qwen_client.health_status)
 
     if not health.get("available"):
-        return QwenMessageResponse(
-            session_id="",
-            message=request.message,
-            response="",
-            thinking="",
-            thinking_enabled=request.thinking_enabled,
-            search_enabled=request.search_enabled,
-            error=_qwen_unavailable_message(health),
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "qwen_service_unavailable",
+                "message": _qwen_unavailable_message(health),
+                "health": health,
+            },
         )
 
-
-
-
-    qwen_client = get_qwen_client()
     result = await asyncio.to_thread(
         qwen_client.send_message,
         message=request.message,
@@ -350,7 +421,10 @@ async def send_message(
         auto_continue=request.auto_continue,
     )
 
+    _raise_qwen_result_error(result)
+
     return QwenMessageResponse(
+        status=result.get("status", "ok"),
         session_id=result.get("session_id", ""),
         message=request.message,
         response=result.get("response", ""),
@@ -361,5 +435,9 @@ async def send_message(
         continue_count=result.get("continue_count", 0),
         can_continue=result.get("can_continue", False),
         auto_continue_performed=result.get("auto_continue_performed", False),
+        task_id=result.get("task_id"),
+        queued=result.get("queued"),
+        error_code=result.get("error_code"),
+        status_code=result.get("status_code"),
         error=result.get("error"),
     )

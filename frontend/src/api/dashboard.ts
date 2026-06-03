@@ -11,6 +11,7 @@ import type {
   DashboardServiceStatus,
   DashboardSourceStatus,
 } from "../types/dashboard";
+import type { CeleryTaskStatus } from "./papers";
 import type { ParseJob, ParseJobStatus } from "../utils/parseJobs";
 
 type ApiCounts = {
@@ -29,6 +30,8 @@ type ApiCounts = {
   vector_indexed?: number;
   vector_index_records?: number;
   rag_indexed?: number;
+  vector_ids_status?: "verified" | "unknown";
+  rag_ids_status?: "verified" | "unknown";
   processing_errors?: number;
   content_queued?: number;
 };
@@ -89,6 +92,8 @@ type ApiDashboardJob = {
   source?: string;
   query?: string;
   status?: string;
+  job_type?: string;
+  jobType?: string;
   celery_status?: Record<string, unknown>;
   progress_percent?: number;
   saved?: number;
@@ -167,6 +172,8 @@ function mapCounts(counts: ApiCounts | undefined): DashboardCounts {
     vectorIndexed: numberOrZero(counts?.vector_indexed),
     vectorIndexRecords: numberOrZero(counts?.vector_index_records),
     ragIndexed: numberOrZero(counts?.rag_indexed),
+    vectorIdsStatus: counts?.vector_ids_status === "unknown" ? "unknown" : "verified",
+    ragIdsStatus: counts?.rag_ids_status === "unknown" ? "unknown" : "verified",
     processingErrors: numberOrZero(counts?.processing_errors),
     contentQueued: numberOrZero(counts?.content_queued),
   };
@@ -242,9 +249,16 @@ function isPlaceholderJobId(jobId: string): boolean {
 
 function normalizeParseJobStatus(value: unknown): ParseJobStatus {
   const status = String(value || "").trim();
-  return ["in_progress", "completed", "cancelled", "failed", "expired"].includes(status)
+  if (["completed_with_errors", "partial_success", "warning"].includes(status)) return "partial";
+  return ["in_progress", "completed", "partial", "cancelled", "failed", "expired"].includes(status)
     ? (status as ParseJobStatus)
     : "in_progress";
+}
+
+function normalizeCeleryStatus(value: unknown): CeleryTaskStatus["status"] {
+  const status = String(value || "").trim().toUpperCase();
+  const allowed: CeleryTaskStatus["status"][] = ["PENDING", "RECEIVED", "STARTED", "PROGRESS", "RETRY", "FAILURE", "SUCCESS", "REVOKED", "UNKNOWN"];
+  return allowed.includes(status as CeleryTaskStatus["status"]) ? (status as CeleryTaskStatus["status"]) : "UNKNOWN";
 }
 
 function mapDashboardJob(job: ApiDashboardJob): ParseJob {
@@ -273,6 +287,7 @@ function mapDashboardJob(job: ApiDashboardJob): ParseJob {
     startedAt,
     query: String(job.query || ""),
     source: String(job.source || "all"),
+    jobType: String(job.jobType || job.job_type || job.celery_status?.job_type || job.celery_status?.dashboard_action || "parse"),
     initialCount: numberOrZero(job.initialCount),
     lastObservedCount: numberOrZero(job.lastObservedCount ?? job.initialCount),
     lastCountChangeAt: numberOrZero(job.lastCountChangeAt) || startedAt,
@@ -280,7 +295,7 @@ function mapDashboardJob(job: ApiDashboardJob): ParseJob {
     celeryStatus: {
       ...(job.celery_status || {}),
       task_id: jobId,
-      status: String(job.celery_status?.status || job.celery_status?.state || "UNKNOWN"),
+      status: normalizeCeleryStatus(job.celery_status?.status || job.celery_status?.state),
       result,
       progress: result,
       current,
@@ -348,6 +363,8 @@ export async function triggerDashboardAction(
     status?: string;
     source?: string | null;
     query?: string | null;
+    job_type?: string | null;
+    parse_admission?: Record<string, unknown> | null;
   }>(`/dashboard/actions/${encodeURIComponent(action)}`, payload);
 
   return {
@@ -357,5 +374,7 @@ export async function triggerDashboardAction(
     status: data.status || "queued",
     source: data.source ?? null,
     query: data.query ?? null,
+    jobType: data.job_type ?? null,
+    parseAdmission: data.parse_admission ?? null,
   };
 }

@@ -23,8 +23,12 @@ type QualityReport = {
 type KeywordStats = {
   total_papers: number;
   papers_with_keywords: number;
-  papers_with_10_plus_keywords: number;
-  papers_with_1_to_9_keywords: number;
+  papers_with_confirmed_keywords?: number;
+  papers_with_3_plus_keywords?: number;
+  papers_with_5_plus_keywords?: number;
+  papers_with_sparse_keywords?: number;
+  papers_with_10_plus_keywords?: number;
+  papers_with_1_to_9_keywords?: number;
   papers_without_keywords: number;
   total_keyword_mentions: number;
   unique_keywords: number;
@@ -137,9 +141,16 @@ export default function Metrics() {
   }
 
   const visibleKeywords = keywordsExpanded ? topKeywords : topKeywords.slice(0, 30);
+  const confirmedKeywords = keywordStats?.papers_with_confirmed_keywords ?? keywordStats?.papers_with_keywords ?? 0;
   const keywordCoverage = keywordStats && keywordStats.total_papers > 0
-    ? Math.round((keywordStats.papers_with_keywords / keywordStats.total_papers) * 100)
+    ? Math.round((confirmedKeywords / keywordStats.total_papers) * 100)
     : 0;
+  const papersWith3PlusKeywords = keywordStats?.papers_with_3_plus_keywords
+    ?? keywordStats?.papers_with_10_plus_keywords
+    ?? 0;
+  const papersWithSparseKeywords = keywordStats?.papers_with_sparse_keywords
+    ?? keywordStats?.papers_with_1_to_9_keywords
+    ?? 0;
 
   return (
     <div className="page">
@@ -170,19 +181,23 @@ export default function Metrics() {
               <p className="kpi-status">{keywordStats.total_keyword_mentions}</p>
             </div>
             <div>
-              <p className="muted">Статей с keywords</p>
+              <p className="muted">Документов с подтверждёнными keywords</p>
               <p className="kpi-status">{keywordCoverage}%</p>
             </div>
             <div>
-              <p className="muted">Статей с 10+ keywords</p>
-              <p className="kpi-status">{keywordStats.papers_with_10_plus_keywords}</p>
+              <p className="muted">Документов с 3+ keywords</p>
+              <p className="kpi-status">{papersWith3PlusKeywords}</p>
+            </div>
+            <div>
+              <p className="muted">Слабых списков 1–2 keywords</p>
+              <p className="kpi-status">{papersWithSparseKeywords}</p>
             </div>
             <div>
               <p className="muted">Редких терминов</p>
               <p className="kpi-status">{keywordStats.rare_keywords}</p>
             </div>
             <div>
-              <p className="muted">Максимум на статью</p>
+              <p className="muted">Максимум на документ</p>
               <p className="kpi-status">{keywordStats.max_keywords_per_paper}</p>
             </div>
           </div>
@@ -190,7 +205,7 @@ export default function Metrics() {
       )}
 
       <div className="panel">
-        <h3>Топ ключевых слов <span className="muted">({topKeywords.length} из 100)</span></h3>
+        <h3>Топ подтверждённых ключевых слов <span className="muted">({topKeywords.length} из 100)</span></h3>
         {topKeywords.length > 0 ? (
           <>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
@@ -230,7 +245,7 @@ export default function Metrics() {
               <p><strong>{(qualityReport.averages?.avg_abstract_length ?? 0).toFixed(0)}</strong> символов</p>
             </div>
             <div>
-              <p className="muted">Среднее количество ключевых слов</p>
+              <p className="muted">Среднее количество подтверждённых ключевых слов</p>
               <p><strong>{(qualityReport.averages?.avg_keywords_count ?? 0).toFixed(1)}</strong></p>
             </div>
             <div>

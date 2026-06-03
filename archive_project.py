@@ -40,8 +40,8 @@ from typing import Iterable
 DEFAULT_OUTPUT_PREFIX = "project_archive"
 DEFAULT_MAX_FILE_SIZE_MB = 50
 
-# Директории с таким именем выкидываются на любом уровне проекта.
-# ВАЖНО: не добавлять сюда обычное имя "models" — в проекте это может быть исходный код.
+
+
 DEFAULT_EXCLUDE_DIR_NAMES = {
     ".git",
     ".hg",
@@ -88,7 +88,7 @@ DEFAULT_EXCLUDE_DIR_NAMES = {
     "models_cache",
 }
 
-# Только директории верхнего уровня.
+
 ROOT_EXCLUDE_DIR_NAMES = {
     "archives",
     "data",
@@ -127,7 +127,7 @@ DEFAULT_EXCLUDE_FILE_NAMES = {
 }
 
 DEFAULT_EXCLUDE_PATTERNS = {
-    # Python/native artifacts
+
     "*.pyc",
     "*.pyc.*",
     "*.pyo",
@@ -139,13 +139,13 @@ DEFAULT_EXCLUDE_PATTERNS = {
     "*.dylib",
     "*.egg-info",
     "*.egg",
-    # Frontend artifacts
+
     "*.tsbuildinfo",
     "npm-debug.log*",
     "yarn-debug.log*",
     "yarn-error.log*",
     "pnpm-debug.log*",
-    # Temporary/backup files
+
     "*.log",
     "*.tmp",
     "*.temp",
@@ -156,7 +156,7 @@ DEFAULT_EXCLUDE_PATTERNS = {
     "*.orig",
     "*.old",
     "*.rej",
-    # Local DB / dumps / captures / generated datasets
+
     "*.sqlite",
     "*.sqlite3",
     "*.db",
@@ -175,21 +175,21 @@ DEFAULT_EXCLUDE_PATTERNS = {
     "*.csv",
     "*.parquet",
     "*.jsonl",
-    # Archives
+
     "*.zip",
     "*.tar",
     "*.tar.gz",
     "*.tgz",
     "*.rar",
     "*.7z",
-    # ML weights / large runtime models
+
     "*.pth",
     "*.pt",
     "*.onnx",
     "*.ckpt",
     "*.safetensors",
     "*.bin",
-    # Media / office docs / papers
+
     "*.mp4",
     "*.mov",
     "*.avi",
@@ -203,7 +203,7 @@ DEFAULT_EXCLUDE_PATTERNS = {
     "*.odt",
 }
 
-# Секретные/локальные файлы, кроме корневого .env.
+
 SECRET_FILE_PATTERNS = {
     ".env.*",
     "**/.env.*",
@@ -327,8 +327,8 @@ EXCLUDE_DIR_PATTERNS = {
     "parser_alpha/data/**",
 }
 
-# В llm-mode не режем код по расширениям слишком агрессивно,
-# но дополнительно запрещаем типичные локальные/бинарные артефакты.
+
+
 LLM_EXCLUDE_FILE_PATTERNS = {
     "*.har",
     "*.csv",
@@ -559,7 +559,7 @@ def match_gitignore_rule(rel_path: str, is_dir: bool, rule: IgnoreRule) -> bool:
 
     if matched:
         if rule.directory_only and not is_dir:
-            # Для файла проверяем его родителей ниже.
+
             pass
         else:
             return True
@@ -595,6 +595,19 @@ def matches_any(rel_path: str, patterns: Iterable[str]) -> bool:
 
 def name_matches_any(name: str, patterns: Iterable[str]) -> bool:
     return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+
+
+def is_runtime_cache_artifact(rel_path: str) -> bool:
+    """Hard guard against Python/runtime cache files even inside allow-listed dirs."""
+    rel_path = normalize_rel(rel_path)
+    if not rel_path:
+        return False
+    path = Path(rel_path)
+    parts = {part.lower() for part in path.parts}
+    if "__pycache__" in parts:
+        return True
+    suffix = path.suffix.lower()
+    return suffix in {".pyc", ".pyo"} or path.name.endswith((".pyc", ".pyo"))
 
 
 def is_root_env_file(rel_path: str) -> bool:
@@ -758,8 +771,8 @@ def should_include_dir(
     if not rel_dir:
         return True, "root"
 
-    # Hard-exclude должен быть сильнее always-include.
-    # Иначе tests/** мог протащить tests/**/__pycache__.
+
+
     if is_hard_excluded_dir(rel_dir, dir_name):
         return False, "hard-excluded-dir"
 
@@ -784,7 +797,9 @@ def should_include_file(
 ) -> tuple[bool, str]:
     rel_file = normalize_rel(rel_file)
 
-    # Жёсткое требование проекта: корневой .env всегда включается.
+    if is_runtime_cache_artifact(rel_file):
+        return False, "runtime-cache"
+
     if is_root_env_file(rel_file):
         return True, "root-env"
 
@@ -894,6 +909,8 @@ def make_zip(root: Path, output_path: Path, files: list[Path]) -> None:
     with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for abs_file in files:
             rel_file = normalize_rel(abs_file.relative_to(root))
+            if is_runtime_cache_artifact(rel_file):
+                continue
             zf.write(abs_file, arcname=rel_file)
 
 

@@ -9,6 +9,8 @@ from app.api.deps import get_current_user, require_admin_user
 from app.db.session import get_db
 from app.services.celery_cancel import clear_cancel_flag, set_cancel_flag
 from app.services.parse_job_history import list_parse_jobs, remove_parse_job, update_parse_job
+from app.services.parse_admission_service import clear_parse_admission_slots, release_parse_slot
+from app.services import task_lifecycle_status as lifecycle
 from app.services.alloy_analysis_service import (
     build_alloy_analysis_prompt,
     get_alloy_analysis_prompt,
@@ -105,23 +107,74 @@ def _result_payload_from_task_info(task_info: dict | None) -> dict | None:
     return result if isinstance(result, dict) else None
 
 
-def _parse_job_status_from_celery(celery_status: str | None) -> str:
-    if celery_status == "SUCCESS":
-        return "completed"
-    if celery_status == "FAILURE":
-        return "failed"
-    if celery_status == "REVOKED":
-        return "cancelled"
-    return "in_progress"
 
 
-def _build_parse_job_patch(task_id: str, task_info: dict | None) -> dict:
+def _compact_child_payload(payload: dict | None) -> dict | None:
+    return lifecycle.compact_child_payload(payload)
+
+
+def _result_is_partial(result: dict | None) -> bool:
+    return lifecycle.result_is_partial(result)
+
+
+def _related_statuses(task_info: dict | None) -> list[dict]:
+    return lifecycle.related_statuses(task_info)
+
+
+def _downstream_is_active(task_info: dict | None, *, stale_after_ms: int | None = None) -> bool:
+    return lifecycle.downstream_is_active(task_info, stale_after_ms=stale_after_ms)
+
+
+def _downstream_has_failure(task_info: dict | None) -> bool:
+    return lifecycle.downstream_has_failure(task_info)
+
+
+def _parse_job_status_from_celery(
+    celery_status: str | None,
+    result: dict | None = None,
+    task_info: dict | None = None,
+    *,
+    stale_after_ms: int | None = None,
+) -> str:
+    return lifecycle.parse_job_status_from_celery(celery_status, result, task_info, stale_after_ms=stale_after_ms)
+
+
+def _job_has_downstream_lifecycle(job: dict | None) -> bool:
+    celery = job.get("celeryStatus") if isinstance(job, dict) and isinstance(job.get("celeryStatus"), dict) else {}
+    return any(
+        celery.get(key)
+        for key in ("related_child_statuses", "related_task_ids", "stage_task_ids", "stage_tasks", "child_task_ids")
+    ) or bool(isinstance(job, dict) and (job.get("contentQueuedCount") or 0))
+
+
+def _should_sync_parse_job(job: dict | None) -> bool:
+    if not isinstance(job, dict):
+        return False
+    status = str(job.get("status") or "in_progress")
+    if status == "in_progress":
+        return True
+    if status not in {"completed", "partial"}:
+        return False
+    if not _job_has_downstream_lifecycle(job):
+        return False
+    now_ms = int(time.time() * 1000)
+    try:
+        started_ms = int(job.get("startedAt") or now_ms)
+    except (TypeError, ValueError):
+        started_ms = now_ms
+    return now_ms - started_ms <= 24 * 60 * 60 * 1000
+
+
+def _build_parse_job_patch(task_id: str, task_info: dict | None, job: dict | None = None) -> dict:
     result = _result_payload_from_task_info(task_info)
     celery_status = str((task_info or {}).get("status") or "UNKNOWN")
     now_ms = int(time.time() * 1000)
+    started_ms = int((job or {}).get("startedAt") or now_ms)
+    last_change_ms = int((job or {}).get("lastCountChangeAt") or started_ms)
+    stale_after_ms = max(0, now_ms - last_change_ms)
 
     patch = {
-        "status": _parse_job_status_from_celery(celery_status),
+        "status": lifecycle.parse_job_status_from_celery(celery_status, result, task_info, stale_after_ms=stale_after_ms),
         "lastPolledAt": now_ms,
         "celeryStatus": {
             "task_id": task_id,
@@ -145,10 +198,22 @@ def _build_parse_job_patch(task_id: str, task_info: dict | None) -> dict:
             "total_content_queued": _get_result_value(result, "total_content_queued", "content_queued_count"),
             "total_content_skipped": _get_result_value(result, "total_content_skipped", "content_skipped_count"),
             "errors": result.get("errors") if isinstance(result, dict) else None,
+            "pipeline_error": _get_result_value(result, "pipeline_error"),
+            "failed_stage": _get_result_value(result, "failed_stage", "first_failed_stage"),
+            "pipeline_error_message": _get_result_value(result, "pipeline_error_message", "error_message"),
+            "stage_errors": result.get("stage_errors") if isinstance(result, dict) else None,
+            "final_stage": _get_result_value(result, "final_stage"),
             "name": (task_info or {}).get("name"),
             "args": (task_info or {}).get("args"),
             "kwargs": (task_info or {}).get("kwargs"),
+            "child_task_ids": (task_info or {}).get("child_task_ids"),
+            "children": (task_info or {}).get("children"),
+            "related_child_statuses": (task_info or {}).get("related_child_statuses"),
+            "related_task_ids": (task_info or {}).get("related_task_ids"),
+            "stage_task_ids": (task_info or {}).get("stage_task_ids"),
+            "stage_tasks": (task_info or {}).get("stage_tasks"),
         },
+        "relatedTaskIds": (task_info or {}).get("related_task_ids"),
     }
 
     saved_count = _get_result_value(result, "saved_count", "total_saved")
@@ -173,10 +238,120 @@ def _build_parse_job_patch(task_id: str, task_info: dict | None) -> dict:
     return patch
 
 
-async def _sync_parse_job_from_celery(task_id: str, task_info: dict | None) -> dict | None:
+
+def _merge_related_task_ids(task_info: dict | None, extra_ids: set[str]) -> dict | None:
+    if not isinstance(task_info, dict):
+        return task_info
+    current = task_info.get("related_task_ids")
+    ids = {str(item).strip() for item in current or [] if str(item or "").strip()}
+    ids.update(extra_ids)
+    if ids:
+        task_info["related_task_ids"] = sorted(ids)[:500]
+    return task_info
+
+
+async def _enrich_task_info_with_related_children(task_info: dict | None, max_children: int = 120) -> dict | None:
+    """Load related content/Qwen stage statuses for parse-job details.
+
+    The content wrapper returns stage_task_ids after it queues the Celery chain.
+    We walk a few lightweight BFS rounds so root parse jobs can show real
+    download/extract/Qwen/embedding/finalize statuses instead of only wrapper ids.
+    """
+    if not isinstance(task_info, dict):
+        return task_info
+
+    root_id = str(task_info.get("task_id") or "").strip()
+    pending: list[str] = []
+    seen: set[str] = {root_id} if root_id else set()
+    discovered: set[str] = {str(item).strip() for item in task_info.get("related_task_ids") or [] if str(item or "").strip()}
+    discovered.update(str(item).strip() for item in task_info.get("child_task_ids") or [] if str(item or "").strip())
+
+    for item in sorted(discovered):
+        if item and item not in seen:
+            pending.append(item)
+            seen.add(item)
+
+    if not pending:
+        return task_info
+
+    get_celery_task_status = _get_celery_task_status_func()
+    child_statuses: list[dict] = []
+
+    while pending and len(child_statuses) < max_children:
+        child_id = pending.pop(0)
+        child_info = await asyncio.to_thread(get_celery_task_status, child_id)
+        if not isinstance(child_info, dict):
+            continue
+
+        result_payload = child_info.get("result") if isinstance(child_info.get("result"), dict) else None
+        info_payload = child_info.get("info") if isinstance(child_info.get("info"), dict) else None
+        stage_task_ids = None
+        stage_tasks = None
+        for payload in (result_payload, info_payload):
+            if not isinstance(payload, dict):
+                continue
+            if isinstance(payload.get("stage_task_ids"), dict):
+                stage_task_ids = payload.get("stage_task_ids")
+            if isinstance(payload.get("stage_tasks"), list):
+                stage_tasks = payload.get("stage_tasks")
+
+        child_statuses.append(
+            {
+                "task_id": child_id,
+                "status": child_info.get("status"),
+                "state": child_info.get("state"),
+                "name": child_info.get("name"),
+                "stage_task_ids": stage_task_ids,
+                "stage_tasks": stage_tasks,
+                "related_task_ids": child_info.get("related_task_ids"),
+                "child_task_ids": child_info.get("child_task_ids"),
+                "children": child_info.get("children"),
+                "result": lifecycle.compact_child_payload(result_payload),
+                "info": lifecycle.compact_child_payload(info_payload),
+            }
+        )
+
+        for nested_id in child_info.get("related_task_ids") or []:
+            nested_id = str(nested_id or "").strip()
+            if nested_id and nested_id not in seen:
+                discovered.add(nested_id)
+                pending.append(nested_id)
+                seen.add(nested_id)
+        for nested_id in child_info.get("child_task_ids") or []:
+            nested_id = str(nested_id or "").strip()
+            if nested_id and nested_id not in seen:
+                discovered.add(nested_id)
+                pending.append(nested_id)
+                seen.add(nested_id)
+        for payload in (result_payload, info_payload):
+            if not isinstance(payload, dict):
+                continue
+            for nested_id in (payload.get("stage_task_ids") or {}).values() if isinstance(payload.get("stage_task_ids"), dict) else []:
+                nested_id = str(nested_id or "").strip()
+                if nested_id and nested_id not in seen:
+                    discovered.add(nested_id)
+                    pending.append(nested_id)
+                    seen.add(nested_id)
+
+    if child_statuses:
+        task_info["related_child_statuses"] = child_statuses[:max_children]
+    task_info = _merge_related_task_ids(task_info, discovered)
+
+    # Promote stage metadata to root task_info so frontend does not have to dig
+    # into wrapper.result manually. Prefer the first wrapper payload with stages.
+    for child in child_statuses:
+        if not task_info.get("stage_task_ids") and isinstance(child.get("stage_task_ids"), dict):
+            task_info["stage_task_ids"] = child.get("stage_task_ids")
+        if not task_info.get("stage_tasks") and isinstance(child.get("stage_tasks"), list):
+            task_info["stage_tasks"] = child.get("stage_tasks")
+
+    return task_info
+
+
+async def _sync_parse_job_from_celery(task_id: str, task_info: dict | None, job: dict | None = None) -> dict | None:
     if task_info is None:
         return None
-    patch = _build_parse_job_patch(task_id, task_info)
+    patch = _build_parse_job_patch(task_id, task_info, job)
     return await asyncio.to_thread(update_parse_job, task_id, patch)
 
 
@@ -184,7 +359,7 @@ async def _sync_parse_job_from_celery(task_id: str, task_info: dict | None) -> d
 @router.post("/", response_model=TaskOut)
 async def create_patent_task(
     task: TaskCreate,
-    _current_user: UserResponse = Depends(get_current_user),
+    _current_user: UserResponse = Depends(require_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Создать задачу на обработку патента."""
@@ -206,12 +381,13 @@ async def get_shared_parse_jobs(
     synced_jobs = []
     for job in jobs:
         task_id = str(job.get("jobId") or "")
-        if not task_id or job.get("status") != "in_progress":
+        if not task_id or not _should_sync_parse_job(job):
             synced_jobs.append(job)
             continue
 
         task_info = await asyncio.to_thread(get_celery_task_status, task_id)
-        synced = await _sync_parse_job_from_celery(task_id, task_info)
+        task_info = await _enrich_task_info_with_related_children(task_info)
+        synced = await _sync_parse_job_from_celery(task_id, task_info, job)
         synced_jobs.append(synced or job)
 
     return {"jobs": synced_jobs[:limit]}
@@ -220,7 +396,7 @@ async def get_shared_parse_jobs(
 @router.delete("/parse-jobs/{job_id}")
 async def delete_shared_parse_job(
     job_id: str,
-    _current_user: UserResponse = Depends(get_current_user),
+    _current_user: UserResponse = Depends(require_admin_user),
 ):
     removed = await asyncio.to_thread(remove_parse_job, job_id)
     return {"job_id": job_id, "deleted": removed}
@@ -252,6 +428,7 @@ async def get_celery_task_status_endpoint(
     """
     get_celery_task_status = _get_celery_task_status_func()
     task_info = await asyncio.to_thread(get_celery_task_status, task_id)
+    task_info = await _enrich_task_info_with_related_children(task_info)
 
     if task_info is None:
         raise HTTPException(status_code=404, detail="Задача Celery не найдена")
@@ -282,9 +459,20 @@ async def get_celery_task_status_endpoint(
         total_content_queued=_get_result_value(result, "total_content_queued", "content_queued_count"),
         total_content_skipped=_get_result_value(result, "total_content_skipped", "content_skipped_count"),
         errors=result.get("errors") if isinstance(result, dict) else None,
+        pipeline_error=bool(result.get("pipeline_error")) if isinstance(result, dict) and result.get("pipeline_error") is not None else None,
+        failed_stage=_get_result_value(result, "failed_stage", "first_failed_stage"),
+        pipeline_error_message=_get_result_value(result, "pipeline_error_message", "error_message"),
+        stage_errors=result.get("stage_errors") if isinstance(result, dict) and isinstance(result.get("stage_errors"), list) else None,
+        final_stage=_get_result_value(result, "final_stage"),
         name=task_info.get("name"),
         args=task_info.get("args"),
         kwargs=task_info.get("kwargs"),
+        child_task_ids=task_info.get("child_task_ids"),
+        children=task_info.get("children"),
+        related_child_statuses=task_info.get("related_child_statuses"),
+        related_task_ids=task_info.get("related_task_ids"),
+        stage_task_ids=task_info.get("stage_task_ids"),
+        stage_tasks=task_info.get("stage_tasks"),
     )
 
     return response
@@ -293,7 +481,7 @@ async def get_celery_task_status_endpoint(
 @router.post("/celery/alloy-analysis")
 async def create_alloy_analysis_task(
     request: AlloyAnalysisRequest,
-    _current_user: UserResponse = Depends(get_current_user),
+    _current_user: UserResponse = Depends(require_admin_user),
 ):
     prompt = build_alloy_analysis_prompt(request.document_id, request.text)
     if len(prompt) > 50000:
@@ -314,7 +502,7 @@ async def create_alloy_analysis_task(
 @router.post("/celery/alloy-analysis/batch")
 async def create_alloy_batch_analysis_task(
     request: AlloyBatchAnalysisRequest,
-    _current_user: UserResponse = Depends(get_current_user),
+    _current_user: UserResponse = Depends(require_admin_user),
 ):
     analyze_papers_alloys_task, _ = _get_alloy_tasks()
     task = analyze_papers_alloys_task.delay(
@@ -352,7 +540,7 @@ async def get_alloy_prompt(
 @router.put("/celery/alloy-analysis/prompt")
 async def update_alloy_prompt(
     request: AlloyPromptUpdateRequest,
-    _current_user: UserResponse = Depends(get_current_user),
+    _current_user: UserResponse = Depends(require_admin_user),
 ):
     prompt = await asyncio.to_thread(save_alloy_analysis_prompt, request.prompt)
     return {"prompt": prompt, "status": "saved"}
@@ -379,17 +567,20 @@ async def stop_celery_queues(
                 task_id,
                 {"status": "cancelled", "lastPolledAt": int(time.time() * 1000), "lastCountChangeAt": int(time.time() * 1000)},
             )
+            await asyncio.to_thread(release_parse_slot, task_id)
             celery_app = _get_celery_app()
             await asyncio.to_thread(celery_app.control.revoke, task_id, terminate=terminate)
 
         celery_app = _get_celery_app()
         purged = await asyncio.to_thread(celery_app.control.purge)
+        cleared_parse_slots = await asyncio.to_thread(clear_parse_admission_slots)
 
         return {
             "status": "queues_purged",
             "revoked": len(task_ids),
             "task_ids": task_ids,
             "purged": int(purged or 0),
+            "cleared_parse_admission_slots": cleared_parse_slots,
             "terminate": terminate,
             "message": "Cancel requested for inspected tasks; waiting broker messages purged",
         }
@@ -401,7 +592,7 @@ async def stop_celery_queues(
 async def revoke_celery_task(
     task_id: str = Path(..., description="Celery task UUID"),
     terminate: bool = False,
-    _current_user: UserResponse = Depends(get_current_user),
+    _current_user: UserResponse = Depends(require_admin_user),
 ):
     """
     Отменить задачу Celery по task_id.
@@ -413,9 +604,11 @@ async def revoke_celery_task(
     current_state = await asyncio.to_thread(lambda: AsyncResult(task_id, app=celery_app).state)
 
     if current_state in {"SUCCESS", "FAILURE", "REVOKED"}:
+        parse_slot_released = await asyncio.to_thread(release_parse_slot, task_id)
         return {
             "task_id": task_id,
             "status": current_state,
+            "parse_slot_released": parse_slot_released,
             "message": "Task already finished",
         }
 
@@ -432,6 +625,7 @@ async def revoke_celery_task(
         },
     )
     await asyncio.to_thread(celery_app.control.revoke, task_id, terminate=terminate)
+    await asyncio.to_thread(release_parse_slot, task_id)
 
     return {
         "task_id": task_id,
@@ -444,7 +638,7 @@ async def revoke_celery_task(
 @router.delete("/celery/{task_id}")
 async def delete_celery_task(
     task_id: str = Path(..., description="Celery task UUID"),
-    _current_user: UserResponse = Depends(get_current_user),
+    _current_user: UserResponse = Depends(require_admin_user),
 ):
     """
     Удалить задачу Celery по task_id.
@@ -455,9 +649,11 @@ async def delete_celery_task(
     """
     try:
         await asyncio.to_thread(clear_cancel_flag, task_id)
+        parse_slot_released = await asyncio.to_thread(release_parse_slot, task_id)
         return {
             "task_id": task_id,
             "status": "deleted",
+            "parse_slot_released": parse_slot_released,
             "message": "Флаг отмены удалён из Redis",
         }
     except Exception as e:

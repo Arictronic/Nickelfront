@@ -170,7 +170,7 @@ class QwenTranslationAdapter:
             if exc.name == "celery":
                 logger.warning(
                     "Qwen queued translation skipped for '{}': celery is not installed in this environment. "
-                    "Install parser_alpha/requirements.txt or disable PARSER_TRANSLATE_QWEN_ENABLED.",
+                    "Install project root requirements.txt or disable PARSER_TRANSLATE_QWEN_ENABLED.",
                     raw,
                 )
             else:

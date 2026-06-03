@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -73,6 +74,10 @@ class AnalysisPipelineService:
         }
 
     async def run_analysis(self, paper_id: int, user_id: int | None = None) -> AnalysisResult:
+        context_data = await self.build_context(paper_id)
+        if not context_data:
+            raise ValueError("Статья не найдена")
+
         entry = AnalysisResult(
             paper_id=paper_id,
             user_id=user_id,
@@ -83,8 +88,7 @@ class AnalysisPipelineService:
         await self.db.refresh(entry)
 
         try:
-            context_data = await self.build_context(paper_id)
-            if not context_data or not context_data.get("content"):
+            if not context_data.get("content"):
                 entry.status = "failed"
                 entry.error_message = "Не удалось собрать контекст для анализа"
                 entry.completed_at = datetime.now(timezone.utc)
@@ -106,7 +110,7 @@ class AnalysisPipelineService:
             prompt_parts.append("\nВерни только JSON, без пояснений.")
 
             full_prompt = "\n".join(prompt_parts)
-            qwen_response = self.qwen.send_message(full_prompt)
+            qwen_response = await asyncio.to_thread(self.qwen.send_message, full_prompt)
 
             error = qwen_response.get("error")
             if error:

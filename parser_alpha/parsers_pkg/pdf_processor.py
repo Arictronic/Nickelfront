@@ -19,10 +19,13 @@ from loguru import logger
 PARSER_ALPHA_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PARSER_ALPHA_DIR.parent
 BACKEND_DIR = PROJECT_ROOT / "backend"
-for _path in (PROJECT_ROOT, BACKEND_DIR, PARSER_ALPHA_DIR):
-    _path_str = str(_path)
-    if _path.exists() and _path_str not in sys.path:
-        sys.path.insert(0, _path_str)
+
+# Keep project root first so backend imports use the canonical /shared package.
+_PATH_ORDER = (PROJECT_ROOT, BACKEND_DIR, PARSER_ALPHA_DIR)
+_path_strings = [str(_path) for _path in _PATH_ORDER if _path.exists()]
+if _path_strings:
+    sys.path[:] = [_existing for _existing in sys.path if _existing not in _path_strings]
+    sys.path[:0] = _path_strings
 
 
 def _is_missing_import_path(exc: ModuleNotFoundError, roots: tuple[str, ...]) -> bool:

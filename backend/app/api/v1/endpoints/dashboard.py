@@ -10,7 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_admin_user
 from app.db.session import get_db
-from app.services.dashboard_service import get_dashboard_jobs, get_dashboard_overview, trigger_dashboard_action
+from app.services.dashboard_service import (
+    DashboardActionConflictError,
+    DashboardActionUnavailableError,
+    get_dashboard_jobs,
+    get_dashboard_overview,
+    trigger_dashboard_action,
+)
 from shared.schemas.auth import UserResponse
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -54,9 +60,18 @@ async def dashboard_action(
     action: str,
     payload: DashboardActionRequest | None = None,
     _current_user: UserResponse = Depends(require_admin_user),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Queue a heavy dashboard action. Admin-only by design."""
     try:
-        return await trigger_dashboard_action(action, (payload or DashboardActionRequest()).model_dump(exclude_none=True))
+        return await trigger_dashboard_action(
+            action,
+            (payload or DashboardActionRequest()).model_dump(exclude_none=True),
+            db=db,
+        )
+    except DashboardActionConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except DashboardActionUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

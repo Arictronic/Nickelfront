@@ -4,6 +4,7 @@ import type { PaperSource } from "../types/paper";
 export type ParseJobStatus =
   | "in_progress"
   | "completed"
+  | "partial"
   | "cancelled"
   | "failed"
   | "expired";
@@ -13,6 +14,7 @@ export type ParseJob = {
   startedAt: number;
   query: string;
   source: PaperSource | "all" | string;
+  jobType?: string;
   initialCount: number;
   lastObservedCount: number;
   lastCountChangeAt: number;
@@ -37,8 +39,10 @@ const LEGACY_LS_KEYS = [
   "parseJobs.reset.v3",
 ];
 const STALE_PENDING_TASK_MS = 30 * 60_000;
+const DOWNSTREAM_UNKNOWN_STALE_MS = 60 * 60_000;
 const TERMINAL_STATUSES: ParseJobStatus[] = [
   "completed",
+  "partial",
   "cancelled",
   "failed",
   "expired",
@@ -81,9 +85,40 @@ function clampPercent(value: number): number {
 
 function normalizeStatus(value: unknown): ParseJobStatus {
   const status = String(value || "").trim();
+  if ([
+    "completed_with_errors",
+    "partial_success",
+    "warning",
+    "stage_failed",
+    "qwen_stage_failed",
+    "pipeline_stage_failed",
+    "ready_with_fallback",
+    "completed_with_warnings",
+    "completed_with_fallback",
+    "partial_success_with_errors",
+  ].includes(status)) return "partial";
   return (["in_progress", ...TERMINAL_STATUSES] as string[]).includes(status)
     ? (status as ParseJobStatus)
     : "in_progress";
+}
+
+function isPartialCeleryResult(status: CeleryTaskStatus | null | undefined): boolean {
+  const meta = getCeleryStatusMeta(status);
+  const resultStatus = String(meta.status || meta.result_status || "").trim();
+  const errorsCount = toFiniteNumber(meta.errors_count, 0);
+  const errors = Array.isArray(meta.errors) ? meta.errors : [];
+  return [
+    "completed_with_errors",
+    "partial_success",
+    "warning",
+    "partial",
+    "stage_failed",
+    "qwen_stage_failed",
+    "pipeline_stage_failed",
+    "ready_with_fallback",
+    "completed_with_warnings",
+    "completed_with_fallback",
+  ].includes(resultStatus) || errorsCount > 0 || errors.length > 0 || hasPipelineWarnings(status);
 }
 
 export function normalizeJobs(jobs: unknown): ParseJob[] {
@@ -101,6 +136,7 @@ export function normalizeJobs(jobs: unknown): ParseJob[] {
       startedAt,
       query: String(job.query || ""),
       source: String(job.source || "all") as PaperSource | "all" | string,
+      jobType: String((job as Record<string, unknown>).jobType || (job as Record<string, unknown>).job_type || "parse"),
       initialCount,
       lastObservedCount,
       lastCountChangeAt: toFiniteNumber(job.lastCountChangeAt, startedAt),
@@ -200,13 +236,121 @@ export function isExpiredPendingTask(job: ParseJob, now: number): boolean {
 export function getCeleryStatusMeta(
   status: CeleryTaskStatus | null | undefined,
 ): Record<string, unknown> {
+  const top = status && typeof status === "object" ? status as unknown as Record<string, unknown> : {};
   const progress =
     status?.progress && typeof status.progress === "object"
       ? status.progress
       : {};
   const result =
     status?.result && typeof status.result === "object" ? status.result : {};
-  return { ...progress, ...result };
+  return { ...top, ...progress, ...result };
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function boolish(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (value === null || value === undefined || value === "" || value === 0) return false;
+  const text = String(value).trim().toLowerCase();
+  return !["0", "false", "no", "none", "null"].includes(text);
+}
+
+const SOFT_FAIL_STATUSES = new Set([
+  "stage_failed",
+  "qwen_stage_failed",
+  "pipeline_stage_failed",
+  "ready_with_fallback",
+  "completed_with_errors",
+  "completed_with_warnings",
+  "completed_with_fallback",
+  "partial_success",
+  "partial_success_with_errors",
+  "warning",
+  "partial",
+]);
+
+const PIPELINE_WARNING_KEYS = [
+  "pipeline_error",
+  "failed_stage",
+  "first_failed_stage",
+  "failed_task_id",
+  "pipeline_error_message",
+  "error_message",
+  "retry_allowed",
+  "fallback_used",
+  "markdown_error",
+  "keywords_error",
+  "embedding_error",
+  "qwen_fallback_reason",
+  "qwen_used_fallback",
+];
+
+function payloadHasPipelineWarning(payload: unknown): boolean {
+  const record = asRecord(payload);
+  const resultStatus = String(record.status || record.result_status || "").trim();
+  const finalStage = String(record.final_stage || "").trim();
+  if ([
+    "completed_with_errors",
+    "completed_with_warnings",
+    "completed_with_fallback",
+    "partial_success",
+    "partial_success_with_errors",
+    "warning",
+    "partial",
+  ].includes(resultStatus)) return true;
+  if (SOFT_FAIL_STATUSES.has(resultStatus) || finalStage === "ready_with_fallback") return true;
+  if (toFiniteNumber(record.errors_count, 0) > 0) return true;
+  if (Array.isArray(record.errors) && record.errors.length > 0) return true;
+  if (Array.isArray(record.stage_errors) && record.stage_errors.length > 0) return true;
+  return PIPELINE_WARNING_KEYS.some((key) => key in record && boolish(record[key]));
+}
+
+function relatedPayloads(item: unknown): Record<string, unknown>[] {
+  const record = asRecord(item);
+  return [record.result, record.info].map(asRecord).filter((payload) => Object.keys(payload).length > 0);
+}
+
+function hasFinalizeResult(status: CeleryTaskStatus | null | undefined): boolean {
+  const topLevelResult = asRecord(status?.result);
+  if (topLevelResult.final_stage) return true;
+
+  const related = Array.isArray(status?.related_child_statuses) ? status.related_child_statuses : [];
+  return related.some((item) => {
+    const record = asRecord(item);
+    const text = [record.name, record.stage, ...relatedPayloads(item).map((payload) => payload.stage)]
+      .map((value) => String(value || '').toLowerCase())
+      .join(' ');
+    if (!text.includes('finalize')) return false;
+
+    const state = String(record.status || record.state || '').toUpperCase();
+    return ['SUCCESS', 'FAILURE', 'REVOKED'].includes(state) || relatedPayloads(item).length > 0;
+  });
+}
+
+function hasPipelineWarnings(status: CeleryTaskStatus | null | undefined): boolean {
+  if (payloadHasPipelineWarning(status) || payloadHasPipelineWarning(status?.result) || payloadHasPipelineWarning(status?.progress)) return true;
+  const related = Array.isArray(status?.related_child_statuses) ? status.related_child_statuses : [];
+  return related.some((item) => relatedPayloads(item).some(payloadHasPipelineWarning));
+}
+
+function hasActiveDownstream(
+  status: CeleryTaskStatus | null | undefined,
+  staleAfterMs?: number,
+): boolean {
+  const finalized = hasFinalizeResult(status);
+  const related = Array.isArray(status?.related_child_statuses) ? status.related_child_statuses : [];
+  return related.some((item) => {
+    const record = asRecord(item);
+    const state = String(record.status || record.state || "UNKNOWN").toUpperCase();
+    if (!["PENDING", "RECEIVED", "STARTED", "PROGRESS", "RETRY", "UNKNOWN"].includes(state)) return false;
+    if (["PENDING", "UNKNOWN"].includes(state)) {
+      if (finalized) return false;
+      if (staleAfterMs !== undefined && staleAfterMs >= DOWNSTREAM_UNKNOWN_STALE_MS) return false;
+    }
+    return true;
+  });
 }
 
 export function getSavedCountFromStatus(
@@ -229,7 +373,7 @@ export function getParseJobSavedCount(job: ParseJob): number {
 }
 
 export function getParseJobProgressPercent(job: ParseJob): number {
-  if (job.status === "completed") return 100;
+  if (job.status === "completed" || job.status === "partial") return 100;
   if (
     job.status === "failed" ||
     job.status === "expired" ||
@@ -290,6 +434,7 @@ export function getParseJobProgressPercent(job: ParseJob): number {
 }
 
 export function getParseJobStatusText(job: ParseJob): string {
+  if (job.status === "partial") return "⚠ Завершено с ошибками";
   if (job.status === "completed") return "✓ Завершено";
   if (job.status === "failed") return "✕ Ошибка";
   if (job.status === "cancelled") return "Отменено";
@@ -303,7 +448,10 @@ export function getParseJobStatusText(job: ParseJob): string {
     meta.status || meta.stage_label || celeryStatus.state || "",
   ).trim();
 
-  if (celeryStatus.status === "SUCCESS") return "✓ Завершено";
+  if (celeryStatus.status === "SUCCESS") {
+    if (hasActiveDownstream(celeryStatus, Date.now() - job.lastCountChangeAt)) return "Выполняются downstream-этапы…";
+    return isPartialCeleryResult(celeryStatus) ? "⚠ Завершено с ошибками" : "✓ Завершено";
+  }
   if (celeryStatus.status === "FAILURE")
     return stateText ? `✕ ${stateText}` : "✕ Ошибка";
   if (celeryStatus.status === "REVOKED") return "Отменено";
@@ -319,6 +467,10 @@ export function getParseJobStatusText(job: ParseJob): string {
 }
 
 export function getParseJobStatusClass(job: ParseJob): string {
+  if (job.status === "partial" || (job.celeryStatus?.status === "SUCCESS" && isPartialCeleryResult(job.celeryStatus)))
+    return "warning";
+  if (job.status === "in_progress" && job.celeryStatus?.status === "SUCCESS" && hasActiveDownstream(job.celeryStatus, Date.now() - job.lastCountChangeAt))
+    return "processing";
   if (job.status === "completed" || job.celeryStatus?.status === "SUCCESS")
     return "active";
   if (job.status === "failed" || job.celeryStatus?.status === "FAILURE")
@@ -336,6 +488,8 @@ export function buildUpdatedJobFromCelery(
 ): ParseJob {
   const now = Date.now();
   const isSuccess = celeryStatus.status === "SUCCESS";
+  const isPartial = isSuccess && isPartialCeleryResult(celeryStatus);
+  const isDownstreamActive = isSuccess && hasActiveDownstream(celeryStatus, now - job.lastCountChangeAt);
   const isFailure = celeryStatus.status === "FAILURE";
   const isRevoked = celeryStatus.status === "REVOKED";
   const savedCount = getSavedCountFromStatus(celeryStatus);
@@ -381,9 +535,13 @@ export function buildUpdatedJobFromCelery(
       ? "cancelled"
       : isFailure
         ? "failed"
-        : isSuccess
-          ? "completed"
-          : "in_progress",
+        : isDownstreamActive
+          ? "in_progress"
+          : isPartial
+            ? "partial"
+            : isSuccess
+              ? "completed"
+              : "in_progress",
     savedCount: savedCount ?? job.savedCount,
   };
 }

@@ -94,7 +94,7 @@ function isFullTextIndexed(paper: FullTextSearchResult) {
 function getStatusTone(status: string | null | undefined) {
   const key = getProcessingStatusKey(status);
   if (!key) return "unknown";
-  if (["ready", "ready_with_fallback", "completed", "embedding_ready"].includes(key)) {
+  if (["ready", "ready_with_fallback", "completed"].includes(key)) {
     return "success";
   }
   if (["failed", "markdown_failed", "pdf_download_failed", "keywords_failed", "qwen_auth_failed"].includes(key)) {
@@ -204,7 +204,7 @@ export default function FullTextSearch() {
       if (hasPdf(paper)) withPdf += 1;
       if (hasExtractedText(paper)) withExtractedText += 1;
       if (isFullTextIndexed(paper)) indexed += 1;
-      if (["ready", "ready_with_fallback", "completed", "embedding_ready"].includes(getProcessingStatusKey(paper.processingStatus))) {
+      if (["ready", "ready_with_fallback", "completed"].includes(getProcessingStatusKey(paper.processingStatus))) {
         ready += 1;
       }
     }

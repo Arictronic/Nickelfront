@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.db.models.paper_content_part import PaperContentPart
 
@@ -321,6 +322,7 @@ class PaperContentPartService:
     async def list_parts(self, paper_id: int) -> list[PaperContentPart]:
         result = await self.db.execute(
             select(PaperContentPart)
+            .options(selectinload(PaperContentPart.translations))
             .where(PaperContentPart.paper_id == paper_id)
             .order_by(PaperContentPart.part_index.asc(), PaperContentPart.id.asc())
         )
@@ -339,7 +341,9 @@ class PaperContentPartService:
 
     async def get_part(self, paper_id: int, part_id: int) -> PaperContentPart | None:
         result = await self.db.execute(
-            select(PaperContentPart).where(
+            select(PaperContentPart)
+            .options(selectinload(PaperContentPart.translations))
+            .where(
                 PaperContentPart.paper_id == paper_id,
                 PaperContentPart.id == part_id,
             )
@@ -354,6 +358,7 @@ class PaperContentPartService:
     ) -> PaperContentPart | None:
         result = await self.db.execute(
             select(PaperContentPart)
+            .options(selectinload(PaperContentPart.translations))
             .where(
                 PaperContentPart.paper_id == paper_id,
                 PaperContentPart.page_start == page_start,

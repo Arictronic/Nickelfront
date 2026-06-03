@@ -55,6 +55,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, rootEnvDir, '')
   const apiUrl = String(env.VITE_API_URL || '/api/v1').trim()
   const backendPort = String(env.API_PORT || env.VITE_API_PORT || '8001').trim()
+  const frontendPort = Number.parseInt(String(env.FRONTEND_PORT || env.VITE_PORT || '5173').trim(), 10) || 5173
 
   function normalizeProxyTarget(value) {
     const raw = String(value || '').trim()
@@ -86,14 +87,14 @@ export default defineConfig(({ mode }) => {
     `http://127.0.0.1:${backendPort || '8001'}`
   )
 
-  writeFrontendLog('INFO', `Vite API base: ${apiUrl}; proxy target: ${proxyTarget}`)
+  writeFrontendLog('INFO', `Vite API base: ${apiUrl}; proxy target: ${proxyTarget}; port: ${frontendPort}`)
 
   return {
     customLogger,
     envDir: rootEnvDir,
     plugins: [uriGuardPlugin, react()],
     server: {
-      port: 5173,
+      port: frontendPort,
       host: true,
       allowedHosts: true,
       proxy: {

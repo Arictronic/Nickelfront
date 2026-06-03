@@ -22,7 +22,7 @@ const PRESETS = [
 ];
 
 const PDF_MODE_LABELS: Record<PdfProcessingMode, string> = {
-  auto: "Авто PDF/content",
+  auto: "Авто: PDF и текст",
   ai: "AI-анализ PDF",
   mypdf: "MyPDF — быстрый текст",
 };
@@ -39,6 +39,7 @@ interface Props {
   selectedSourceDisabled: boolean;
   sourceLimit: number;
   startingParse: boolean;
+  isAdmin: boolean;
   error: string | null;
   onQueryChange: (query: string) => void;
   onSourceChange: (source: PaperSource | "all") => void;
@@ -65,6 +66,7 @@ export default function ParserLaunchPanel({
   selectedSourceDisabled,
   sourceLimit,
   startingParse,
+  isAdmin,
   error,
   onQueryChange,
   onSourceChange,
@@ -75,6 +77,7 @@ export default function ParserLaunchPanel({
   const guidance = sourceGuidance[source];
   const effectiveLimit = Math.min(limit, sourceLimit || 100);
   const parserDisabled = parserSettings?.enabled === false;
+  const launchDisabled = startingParse || selectedSourceDisabled || parserDisabled || !isAdmin;
   return (
     <section className="panel dashboard-launch-panel">
       <div className="dashboard-panel-head">
@@ -83,7 +86,7 @@ export default function ParserLaunchPanel({
           <h3>Запуск сбора</h3>
         </div>
         <span className={`status ${parserDisabled ? "failed" : "active"}`}>
-          {parserDisabled ? "Парсинг отключён" : "Парсинг доступен"}
+          {parserDisabled ? "Парсинг отключён" : isAdmin ? "Парсинг доступен" : "Только админ"}
         </span>
       </div>
 
@@ -101,9 +104,10 @@ export default function ParserLaunchPanel({
           className="btn btn-primary dashboard-launch-button"
           type="button"
           onClick={onStart}
-          disabled={startingParse || selectedSourceDisabled || parserDisabled}
+          disabled={launchDisabled}
+          title={!isAdmin ? "Запуск парсинга доступен только администратору" : undefined}
         >
-          {startingParse ? "Запускаю..." : "Запустить"}
+          {startingParse ? "Запускаю..." : isAdmin ? "Запустить" : "Только админ"}
         </button>
       </div>
 
@@ -131,7 +135,7 @@ export default function ParserLaunchPanel({
           />
         </label>
         <label>
-          PDF/content режим
+          Режим обработки PDF
           <select value={pdfMode} onChange={(event) => onPdfModeChange(event.target.value as PdfProcessingMode)}>
             <option value="auto">{PDF_MODE_LABELS.auto}</option>
             <option value="mypdf">{PDF_MODE_LABELS.mypdf}</option>
@@ -164,6 +168,11 @@ export default function ParserLaunchPanel({
       {source === "all" && (
         <p className="dashboard-inline-warning">
           Будет создана тяжёлая Celery-задача по всем включённым источникам. Лимит применяется к каждому источнику отдельно.
+        </p>
+      )}
+      {!isAdmin && (
+        <p className="dashboard-inline-warning">
+          Запуск парсинга и массовых задач доступен только администратору. Просмотр статей, PDF, статусов и истории остаётся доступен.
         </p>
       )}
       {selectedSourceDisabled && <p className="error">Источник отключён в технических настройках.</p>}

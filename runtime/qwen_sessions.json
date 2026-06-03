@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "updated_at": 1780454676913,
+  "sessions": {
+    "832ce798-a955-43bb-b122-356055b16ea8": {
+      "session_id": "832ce798-a955-43bb-b122-356055b16ea8",
+      "title": "Файловый чат",
+      "created_at": "2026-06-02T07:15:30.551095+00:00",
+      "updated_at": "2026-06-02T07:15:30.551095+00:00",
+      "last_used_at": "2026-06-02T07:15:30.551095+00:00",
+      "source": "upload_and_send"
+    },
+    "71654d43-8e35-417b-9568-6918833ca15f": {
+      "session_id": "71654d43-8e35-417b-9568-6918833ca15f",
+      "title": "Файловый чат",
+      "created_at": "2026-06-02T07:21:51.278600+00:00",
+      "updated_at": "2026-06-02T07:21:51.278600+00:00",
+      "last_used_at": "2026-06-02T07:21:51.278600+00:00",
+      "source": "upload_and_send"
+    },
+    "9a4e62ab-3623-48ae-ad1b-200947140bec": {
+      "session_id": "9a4e62ab-3623-48ae-ad1b-200947140bec",
+      "title": "paper-24: Evolution of the intertwining correlated topological phases in iron-based superc",
+      "created_at": "2026-06-02T07:24:31.202376+00:00",
+      "updated_at": "2026-06-02T07:24:31.202376+00:00",
+      "last_used_at": "2026-06-02T07:24:31.202376+00:00",
+      "source": "create_session"
+    },
+    "c91a955c-f09c-4437-8e5c-6cd29d0257d4": {
+      "session_id": "c91a955c-f09c-4437-8e5c-6cd29d0257d4",
+      "title": "paper-23: Phase-dependent parametric amplification of propagating spin waves in YIG nanost",
+      "created_at": "2026-06-02T07:24:31.228035+00:00",
+      "updated_at": "2026-06-02T07:25:37.976753+00:00",
+      "last_used_at": "2026-06-02T07:25:37.976753+00:00",
+      "source": "create_session"
+    },
+    "8bb4066b-6f68-4e8b-953c-100090a7dedf": {
+      "session_id": "8bb4066b-6f68-4e8b-953c-100090a7dedf",
+      "title": "paper-22: Size limits on tidal debris around white dwarfs: the km-size barrier",
+      "created_at": "2026-06-02T07:24:31.270163+00:00",
+      "updated_at": "2026-06-02T07:24:31.270163+00:00",
+      "last_used_at": "2026-06-02T07:24:31.270163+00:00",
+      "source": "create_session"
+    },
+    "4d629dca-5ea8-47ce-8d59-cbc8c3b7f70a": {
+      "session_id": "4d629dca-5ea8-47ce-8d59-cbc8c3b7f70a",
+      "title": "paper-26: Kinetic phase transition modeling for metals",
+      "created_at": "2026-06-02T07:24:31.275561+00:00",
+      "updated_at": "2026-06-02T07:25:32.853300+00:00",
+      "last_used_at": "2026-06-02T07:25:32.853300+00:00",
+      "source": "create_session"
+    },
+    "882c8dcf-e2af-4da6-8b09-959855b4b243": {
+      "session_id": "882c8dcf-e2af-4da6-8b09-959855b4b243",
+      "title": "paper-25: Coupling dynamical accretion and chemical differentiation: a unified framework f",
+      "created_at": "2026-06-02T07:24:31.406341+00:00",
+      "updated_at": "2026-06-02T07:24:31.406341+00:00",
+      "last_used_at": "2026-06-02T07:24:31.406341+00:00",
+      "source": "create_session"
+    },
+    "3ca88491-6875-4453-9863-c750fdeeebe7": {
+      "session_id": "3ca88491-6875-4453-9863-c750fdeeebe7",
+      "title": "paper-1: Two-orbital $e_g$ model with bond-dependent spin-orbit coupling: A playground fo",
+      "created_at": "2026-06-03T02:29:23.568691+00:00",
+      "updated_at": "2026-06-03T02:44:36.913030+00:00",
+      "last_used_at": "2026-06-03T02:44:36.913030+00:00",
+      "source": "create_session"
+    },
+    "0751fd3f-dbd3-448e-a210-ff1d456a8f23": {
+      "session_id": "0751fd3f-dbd3-448e-a210-ff1d456a8f23",
+      "title": "Файловый чат",
+      "created_at": "2026-06-03T02:29:23.605611+00:00",
+      "updated_at": "2026-06-03T02:40:54.319303+00:00",
+      "last_used_at": "2026-06-03T02:40:54.319303+00:00",
+      "source": "create_session"
+    },
+    "7fd8d2e7-0a73-42e0-b8eb-eae8ed8d2008": {
+      "session_id": "7fd8d2e7-0a73-42e0-b8eb-eae8ed8d2008",
+      "title": "Файловый чат",
+      "created_at": "2026-06-03T02:29:36.920928+00:00",
+      "updated_at": "2026-06-03T02:43:29.275723+00:00",
+      "last_used_at": "2026-06-03T02:43:29.275723+00:00",
+      "source": "create_session"
+    },
+    "9be32367-064f-41b0-9ff7-0bff9d6af0ca": {
+      "session_id": "9be32367-064f-41b0-9ff7-0bff9d6af0ca",
+      "title": "Файловый чат",
+      "created_at": "2026-06-03T02:31:13.419415+00:00",
+      "updated_at": "2026-06-03T02:31:13.419415+00:00",
+      "last_used_at": "2026-06-03T02:31:13.419415+00:00",
+      "source": "upload_and_send"
+    },
+    "0616de5e-b5eb-44b3-b794-99a5f5c18bf7": {
+      "session_id": "0616de5e-b5eb-44b3-b794-99a5f5c18bf7",
+      "title": "Файловый чат",
+      "created_at": "2026-06-03T02:32:03.133733+00:00",
+      "updated_at": "2026-06-03T02:32:03.133733+00:00",
+      "last_used_at": "2026-06-03T02:32:03.133733+00:00",
+      "source": "upload_and_send"
+    }
+  }
+}

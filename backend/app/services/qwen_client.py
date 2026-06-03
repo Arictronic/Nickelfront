@@ -8,10 +8,17 @@ Qwen Service Client - Клиент для standalone Qwen Service.
 import logging
 import os
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
 from app.core.config import settings
+from app.services.qwen_document.results import (
+    classify_qwen_service_error,
+    format_error_result,
+    qwen_error_code,
+    qwen_error_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -123,36 +130,81 @@ class QwenServiceClient:
             return None, "timeout"
         except httpx.HTTPStatusError as e:
             detail: Any = None
+            detail_payload: dict[str, Any] = {}
             try:
                 payload = e.response.json()
                 detail = payload.get("detail") if isinstance(payload, dict) else payload
+                if isinstance(detail, dict):
+                    detail_payload = detail
             except Exception:
                 detail = e.response.text
 
-            detail_text = detail if isinstance(detail, str) else str(detail or e)
-            lowered = detail_text.lower()
             status_code = getattr(e.response, "status_code", None)
-            if "qwen_token_expired" in lowered or "token has expired" in lowered or "please log in again" in lowered:
-                logger.error("Qwen auth error on %s: token expired", endpoint)
+            effective_status_code = int(detail_payload.get("status_code") or status_code or 0) or None
+            detail_text = (
+                str(detail_payload.get("message") or detail_payload.get("detail") or "").strip()
+                if detail_payload
+                else (detail if isinstance(detail, str) else str(detail or e))
+            )
+            error_code = str(
+                detail_payload.get("error_code")
+                or detail_payload.get("error")
+                or detail_payload.get("code")
+                or ""
+            ).strip()
+            lowered = f"{error_code} {detail_text}".lower()
+
+            if error_code:
+                logger.error(
+                    "Qwen Service structured error on %s: code=%s status=%s message=%s",
+                    endpoint,
+                    error_code,
+                    effective_status_code,
+                    detail_text,
+                )
+
+            if (
+                error_code in {"qwen_token_expired", "qwen_auth_failed"}
+                or "qwen_token_expired" in lowered
+                or "token has expired" in lowered
+                or "please log in again" in lowered
+            ):
+                logger.error("Qwen auth error on %s: token expired/auth failed", endpoint)
                 return {
-                    "error": "qwen_token_expired",
-                    "message": "Qwen токен истёк. Обновите QWEN_TOKEN.",
+                    "error": error_code or "qwen_token_expired",
+                    "error_code": error_code or "qwen_token_expired",
+                    "message": detail_text or "Qwen токен истёк. Обновите QWEN_TOKEN.",
                     "response": "",
                     "thinking": "",
                     "can_continue": False,
+                    "status_code": effective_status_code,
+                    "detail": detail_text,
                 }, "auth_expired"
-            if status_code == 429 or "too many requests" in lowered or "rate limit" in lowered:
+            if effective_status_code == 429 or error_code == "qwen_rate_limited" or "too many requests" in lowered or "rate limit" in lowered:
                 logger.warning("Qwen provider rate limit on %s: %s", endpoint, detail_text)
                 return {
                     "error": "qwen_rate_limited",
-                    "message": "Qwen ограничил частоту запросов. Токен может быть действительным, но нагрузку нужно снизить.",
+                    "error_code": "qwen_rate_limited",
+                    "message": detail_text or "Qwen ограничил частоту запросов. Токен может быть действительным, но нагрузку нужно снизить.",
                     "response": "",
                     "thinking": "",
                     "can_continue": False,
+                    "status_code": effective_status_code,
+                    "detail": detail_text,
                 }, "rate_limited"
 
-            logger.error(f"HTTP ошибка запроса к {endpoint}: {e}; detail={detail_text}")
-            return None, "http"
+            provider_error = error_code or classify_qwen_service_error(detail_text, status_code=effective_status_code)
+            logger.error("HTTP ошибка запроса к %s: %s; detail=%s", endpoint, e, detail_text)
+            return {
+                "error": provider_error,
+                "error_code": provider_error,
+                "message": detail_text or f"HTTP {effective_status_code} from qwen_service",
+                "detail": detail_payload or detail_text,
+                "status_code": effective_status_code,
+                "response": "",
+                "thinking": "",
+                "can_continue": False,
+            }, "http"
         except httpx.HTTPError as e:
             logger.error(f"HTTP ошибка запроса к {endpoint}: {e}")
             return None, "http"
@@ -186,15 +238,223 @@ class QwenServiceClient:
 
     def health_check(self) -> dict[str, Any]:
         """
-        Проверка здоровья сервиса.
+        Проверка здоровья standalone qwen_service.
 
         Returns:
-            Статус сервиса.
+            Raw /health payload or a compact unavailable payload.
         """
 
         result = self._request("GET", "/health", timeout=3.0)
-        return result or {"status": "error", "available": False}
+        return result or {
+            "status": "error",
+            "available": False,
+            "service_alive": False,
+            "model": settings.QWEN_MODEL,
+        }
 
+    def health_status(self) -> dict[str, Any]:
+        """Backend-facing health payload used by API endpoints and dashboard.
+
+        This mirrors the legacy QwenService.health_status() contract but uses
+        the same HTTP client that sends messages/files, so /qwen/health and
+        /qwen/messages no longer check different client stacks.
+        """
+        health, error_type = self._request_with_error("GET", "/health", timeout=3.0)
+
+        if not health:
+            reason = "Qwen Service не отвечает"
+            if error_type == "timeout":
+                reason = "Qwen Service не ответил на /health за 3 секунды"
+            elif error_type == "http":
+                reason = "HTTP-ошибка при обращении к Qwen Service /health"
+            return {
+                "status": "unavailable",
+                "model": settings.QWEN_MODEL,
+                "available": False,
+                "base_url": self.base_url,
+                "reason": reason,
+                "error_type": error_type or "unknown",
+                "service_alive": False,
+            }
+
+        available = bool(health.get("available")) if "available" in health else str(health.get("status", "")).lower() == "ok"
+        reason: str | None = None
+        if health.get("auth_valid_known") is False:
+            available = False
+            reason = "Последняя проверка Qwen auth завершилась ошибкой. Обновите QWEN_TOKEN/session."
+        if not available and not reason:
+            if health.get("has_token") is False or health.get("token_configured") is False:
+                reason = "Qwen Service запущен, но QWEN_TOKEN в нём не загружен"
+            elif health.get("auth_required") is True and health.get("has_api_key") is False:
+                reason = "Qwen Service требует Bearer API key, но QWEN_API_KEY не настроен"
+            else:
+                reason = (
+                    "Qwen Service вернул недоступный статус: "
+                    f"status={health.get('status')!r}, available={health.get('available')!r}"
+                )
+
+        return {
+            "status": "ok" if available else "unavailable",
+            "model": health.get("model", settings.QWEN_MODEL),
+            "available": available,
+            "base_url": self.base_url,
+            "reason": reason,
+            "error_type": None,
+            "has_token": health.get("has_token"),
+            "token_configured": health.get("token_configured", health.get("has_token")),
+            "has_api_key": health.get("has_api_key"),
+            "auth_required": health.get("auth_required"),
+            "auth_valid_known": health.get("auth_valid_known"),
+            "auth_checked_at": health.get("auth_checked_at"),
+            "service_alive": health.get("service_alive", True),
+        }
+
+
+    def get_readiness(self) -> dict[str, Any]:
+        """Return local qwen_service readiness diagnostics without external provider calls."""
+        result, error_type = self._request_with_error("GET", "/diagnostics/readiness", timeout=5.0)
+        if result:
+            result.setdefault("base_url", self.base_url)
+            return result
+        return {
+            "status": "unavailable",
+            "ok": False,
+            "service_alive": False,
+            "base_url": self.base_url,
+            "error_type": error_type or "unknown",
+            "check_count": 0,
+            "error_count": 1,
+            "warning_count": 0,
+            "checks": [
+                {
+                    "name": "qwen_service_http",
+                    "status": "error",
+                    "ok": False,
+                    "message": "backend не смог получить /diagnostics/readiness от qwen_service.",
+                    "action": "Проверь scripts\\run_qwen_service.bat, QWEN_SERVICE_HOST/PORT и QWEN_API_KEY.",
+                }
+            ],
+            "recommendations": ["Проверь, что qwen_service запущен и backend использует тот же QWEN_API_KEY."],
+        }
+
+    def run_cache_maintenance(
+        self,
+        *,
+        dry_run: bool = True,
+        prune_file_metadata: bool = True,
+        prune_session_registry: bool = True,
+        file_max_age_days: int | None = None,
+        session_max_age_days: int | None = None,
+        clear_file_metadata: bool = False,
+        clear_session_registry: bool = False,
+    ) -> dict[str, Any]:
+        """Run provider-safe maintenance for qwen_service runtime JSON caches."""
+        payload: dict[str, Any] = {
+            "dry_run": dry_run,
+            "prune_file_metadata": prune_file_metadata,
+            "prune_session_registry": prune_session_registry,
+            "clear_file_metadata": clear_file_metadata,
+            "clear_session_registry": clear_session_registry,
+        }
+        if file_max_age_days is not None:
+            payload["file_max_age_days"] = file_max_age_days
+        if session_max_age_days is not None:
+            payload["session_max_age_days"] = session_max_age_days
+
+        result, error_type = self._request_with_error(
+            "POST",
+            "/diagnostics/cache-maintenance",
+            json_data=payload,
+            timeout=10.0,
+        )
+        if result:
+            result.setdefault("base_url", self.base_url)
+            return result
+        return {
+            "status": "unavailable",
+            "dry_run": dry_run,
+            "provider_called": False,
+            "base_url": self.base_url,
+            "error_type": error_type or "unknown",
+            "total_candidates": 0,
+            "total_removed": 0,
+            "message": "backend не смог выполнить cache-maintenance в qwen_service.",
+        }
+
+    def get_event_journal(
+        self,
+        *,
+        limit: int = 50,
+        event: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        """Return recent local qwen_service events without calling external Qwen."""
+        params: dict[str, Any] = {"limit": max(1, min(500, int(limit or 50)))}
+        if event:
+            params["event"] = event
+        if status:
+            params["status"] = status
+        endpoint = "/diagnostics/events?" + urlencode(params)
+        result, error_type = self._request_with_error("GET", endpoint, timeout=5.0)
+        if result:
+            result.setdefault("base_url", self.base_url)
+            return result
+        return {
+            "status": "unavailable",
+            "enabled": False,
+            "provider_called": False,
+            "base_url": self.base_url,
+            "error_type": error_type or "unknown",
+            "events": [],
+            "count": 0,
+            "message": "backend не смог получить журнал событий qwen_service.",
+        }
+
+    def clear_event_journal(self) -> dict[str, Any]:
+        """Clear local qwen_service event journal without touching provider state."""
+        result, error_type = self._request_with_error("POST", "/diagnostics/events/clear", timeout=5.0)
+        if result:
+            result.setdefault("base_url", self.base_url)
+            return result
+        return {
+            "status": "unavailable",
+            "enabled": False,
+            "provider_called": False,
+            "base_url": self.base_url,
+            "error_type": error_type or "unknown",
+            "cleared": 0,
+            "message": "backend не смог очистить журнал событий qwen_service.",
+        }
+
+    def get_stats(self) -> dict[str, Any]:
+        """Return backend-facing qwen_service runtime stats from the same HTTP client stack.
+
+        This intentionally does not use the legacy ``QwenService`` request
+        counters because qwen_service is the actual runtime owner for sessions,
+        provider slots and auth state.
+        """
+        health = self.health_check()
+        available = self.is_available()
+        active_sessions = health.get("active_sessions")
+        return {
+            "is_busy": bool(active_sessions or 0),
+            "active_requests": active_sessions or 0,
+            "requests_last_minute": None,
+            "total_requests": None,
+            "session_id": self._session_id,
+            "model": health.get("model", settings.QWEN_MODEL),
+            "is_available": available,
+            "available": available,
+            "service_alive": health.get("service_alive", False),
+            "base_url": self.base_url,
+            "active_sessions": active_sessions,
+            "max_active_sessions": health.get("max_active_sessions"),
+            "provider_max_concurrent_requests": health.get("provider_max_concurrent_requests"),
+            "auth_required": health.get("auth_required"),
+            "has_token": health.get("has_token", health.get("token_configured")),
+            "has_api_key": health.get("has_api_key"),
+            "auth_valid_known": health.get("auth_valid_known"),
+        }
 
     def get_auth_status(self, *, force: bool = False) -> dict[str, Any]:
         """Return current in-memory Qwen token status from qwen_service.
@@ -244,11 +504,14 @@ class QwenServiceClient:
         filename: str = "qwen.har",
         *,
         validate: bool = True,
+        require_file_api: bool = False,
     ) -> dict[str, Any]:
-        """Upload HAR to qwen_service so it extracts and applies QWEN_TOKEN itself."""
+        """Upload HAR to qwen_service so it extracts and applies QWEN_TOKEN/session itself."""
         url = f"{self.base_url}/config/token/update-from-har"
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         params = {"validate": str(validate).lower()}
+        if require_file_api:
+            params["require_file_api"] = "true"
         safe_filename = filename or "qwen.har"
 
         try:
@@ -275,14 +538,41 @@ class QwenServiceClient:
             return {"status": "error", "message": str(exc)}
 
     def get_config(self) -> dict[str, Any]:
-        """
-        Получить конфигурацию сервиса.
+        """Получить эффективную конфигурацию standalone qwen_service.
 
-        Returns:
-            Конфигурация сервиса.
+        Response model on backend requires ``is_available`` and ``base_url`` even
+        when qwen_service is down, so do not return an empty dict on failure.
         """
-        result = self._request("GET", "/config")
-        return result or {}
+        result = self._request("GET", "/config", timeout=5.0) or {}
+        health = self.health_status()
+        return {
+            "model": result.get("model", settings.QWEN_MODEL),
+            "thinking_enabled": result.get("thinking_enabled", settings.QWEN_THINKING_ENABLED),
+            "search_enabled": result.get("search_enabled", settings.QWEN_SEARCH_ENABLED),
+            "auto_continue_enabled": result.get("auto_continue_enabled", settings.QWEN_AUTO_CONTINUE_ENABLED),
+            "max_continues": result.get("max_continues", settings.QWEN_MAX_CONTINUES),
+            "stream_retries": result.get("stream_retries"),
+            "history_recovery_attempts": result.get("history_recovery_attempts"),
+            "history_recovery_interval_sec": result.get("history_recovery_interval_sec"),
+            "has_token": result.get("has_token", health.get("has_token")),
+            "has_api_key": result.get("has_api_key", health.get("has_api_key")),
+            "auth_required": result.get("auth_required", health.get("auth_required")),
+            "allow_unauth_without_api_key": result.get("allow_unauth_without_api_key"),
+            "file_metadata_cache_enabled": result.get("file_metadata_cache_enabled"),
+            "file_metadata_cache_path": result.get("file_metadata_cache_path"),
+            "file_metadata_cache_entries": result.get("file_metadata_cache_entries"),
+            "file_metadata_cache_max_age_days": result.get("file_metadata_cache_max_age_days"),
+            "session_registry_cache_enabled": result.get("session_registry_cache_enabled"),
+            "session_registry_cache_path": result.get("session_registry_cache_path"),
+            "session_registry_cache_entries": result.get("session_registry_cache_entries"),
+            "session_registry_cache_max_age_days": result.get("session_registry_cache_max_age_days"),
+            "event_journal_enabled": result.get("event_journal_enabled"),
+            "event_journal_path": result.get("event_journal_path"),
+            "event_journal_entries": result.get("event_journal_entries"),
+            "event_journal_max_entries": result.get("event_journal_max_entries"),
+            "is_available": bool(health.get("available")),
+            "base_url": self.base_url,
+        }
 
     def update_config(
         self,
@@ -294,6 +584,8 @@ class QwenServiceClient:
         stream_retries: int | None = None,
         history_recovery_attempts: int | None = None,
         history_recovery_interval_sec: float | None = None,
+        file_metadata_cache_max_age_days: int | None = None,
+        session_registry_cache_max_age_days: int | None = None,
     ) -> dict[str, Any]:
         """
         Обновить конфигурацию сервиса.
@@ -307,6 +599,8 @@ class QwenServiceClient:
             stream_retries: Количество retry для нестабильного SSE stream.
             history_recovery_attempts: Попытки восстановления ответа из истории.
             history_recovery_interval_sec: Интервал между попытками восстановления.
+            file_metadata_cache_max_age_days: Возраст stale uploaded-file metadata для maintenance.
+            session_registry_cache_max_age_days: Возраст stale локальных sessions для maintenance.
 
         Returns:
             Новая конфигурация.
@@ -328,9 +622,17 @@ class QwenServiceClient:
             json_data["history_recovery_attempts"] = history_recovery_attempts
         if history_recovery_interval_sec is not None:
             json_data["history_recovery_interval_sec"] = history_recovery_interval_sec
+        if file_metadata_cache_max_age_days is not None:
+            json_data["file_metadata_cache_max_age_days"] = file_metadata_cache_max_age_days
+        if session_registry_cache_max_age_days is not None:
+            json_data["session_registry_cache_max_age_days"] = session_registry_cache_max_age_days
 
-        result = self._request("POST", "/config", json_data=json_data)
-        return result or {}
+        if json_data:
+            result = self._request("POST", "/config", json_data=json_data, timeout=10.0)
+            if not result:
+                logger.warning("Failed to update standalone qwen_service config; returning current effective config")
+
+        return self.get_config()
 
     def create_session(self, title: str | None = None) -> str | None:
         """
@@ -428,6 +730,48 @@ class QwenServiceClient:
             return False
         return True
 
+    @staticmethod
+    def _normalize_file_ids(file_ids: list[str] | None) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in file_ids or []:
+            fid = str(item or "").strip()
+            if not fid or fid in seen:
+                continue
+            seen.add(fid)
+            normalized.append(fid)
+        return normalized
+
+    @staticmethod
+    def _service_error_payload(
+        *,
+        code: str,
+        message: str,
+        session_id: str | None = None,
+        request_error_type: str | None = None,
+        status_code: int | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": "error",
+            "error": code,
+            "error_code": code,
+            "message": message,
+            "response": "",
+            "thinking": "",
+            "session_id": session_id or "",
+            "message_id": 0,
+            "continue_count": 0,
+            "can_continue": False,
+        }
+        if request_error_type:
+            payload["_request_error_type"] = request_error_type
+        if status_code:
+            payload["status_code"] = status_code
+        if extra:
+            payload.update(extra)
+        return payload
+
     def send_message(
         self,
         message: str,
@@ -447,19 +791,28 @@ class QwenServiceClient:
         - очередь qwen получает ровно тот session_id, который передал вызывающий код;
         - при timeout прямого запроса к qwen_service выполняется один retry в новой сессии.
         """
-        sid = session_id
+        clean_message = str(message or "").strip()
+        sid = str(session_id or "").strip() or None
+        clean_file_ids = self._normalize_file_ids(file_ids)
         effective_timeout = self._chat_timeout(timeout)
+
+        if not clean_message:
+            return self._service_error_payload(
+                code="qwen_empty_message",
+                message="Сообщение для Qwen не должно быть пустым.",
+                session_id=sid,
+            )
 
         if self._should_use_queue():
             try:
                 from app.services.qwen_queue_client import send_qwen_message_via_queue
 
                 result = send_qwen_message_via_queue(
-                    message=message,
+                    message=clean_message,
                     session_id=sid,
                     thinking_enabled=thinking_enabled,
                     search_enabled=search_enabled,
-                    file_ids=file_ids or [],
+                    file_ids=clean_file_ids,
                     auto_continue=auto_continue,
                     timeout=effective_timeout,
                     purpose="backend-qwen-client",
@@ -469,38 +822,32 @@ class QwenServiceClient:
                 return result
             except Exception as exc:
                 logger.exception("Failed to enqueue Qwen request")
-                return {
-                    "error": f"Failed to enqueue Qwen request: {exc}",
-                    "response": "",
-                    "thinking": "",
-                    "message_id": 0,
-                    "continue_count": 0,
-                    "can_continue": False,
-                }
+                return self._service_error_payload(
+                    code="qwen_queue_enqueue_failed",
+                    message=f"Failed to enqueue Qwen request: {exc}",
+                    session_id=sid,
+                )
 
         if not sid:
             sid = self.create_session()
             if not sid:
-                return {
-                    "error": "Не удалось создать сессию",
-                    "response": "",
-                    "thinking": "",
-                    "message_id": 0,
-                    "continue_count": 0,
-                    "can_continue": False,
-                }
+                return self._service_error_payload(
+                    code="qwen_session_create_failed",
+                    message="Не удалось создать сессию",
+                )
 
         result = self._send_message_once(
-            message=message,
+            message=clean_message,
             sid=sid,
             thinking_enabled=thinking_enabled,
             search_enabled=search_enabled,
-            file_ids=file_ids,
+            file_ids=clean_file_ids,
             auto_continue=auto_continue,
             timeout=effective_timeout,
         )
 
-        if self._retry_on_timeout_enabled() and result.get("_request_error_type") == "timeout":
+        retry_safe = not clean_file_ids
+        if retry_safe and self._retry_on_timeout_enabled() and result.get("_request_error_type") == "timeout":
             old_sid = sid
             new_sid = self.create_session()
             if new_sid:
@@ -510,11 +857,11 @@ class QwenServiceClient:
                     new_sid[-6:],
                 )
                 retry_result = self._send_message_once(
-                    message=message,
+                    message=clean_message,
                     sid=new_sid,
                     thinking_enabled=thinking_enabled,
                     search_enabled=search_enabled,
-                    file_ids=file_ids,
+                    file_ids=clean_file_ids,
                     auto_continue=auto_continue,
                     timeout=effective_timeout,
                 )
@@ -530,6 +877,12 @@ class QwenServiceClient:
         if result.get("session_id"):
             self._session_id = str(result["session_id"])
         result.pop("_request_error_type", None)
+        if result.get("error"):
+            result.setdefault("status", "error")
+            result.setdefault("error_code", qwen_error_code(result) or "qwen_message_failed")
+            result.setdefault("message", qwen_error_text(result, fallback="Qwen вернул ошибку"))
+        else:
+            result.setdefault("status", "ok")
         return result
 
     def _send_message_once(
@@ -567,19 +920,19 @@ class QwenServiceClient:
         )
 
         if not result:
-            return {
-                "error": "Timeout запроса к Qwen Service" if error_type == "timeout" else "Ошибка запроса к Qwen Service",
-                "response": "",
-                "thinking": "",
-                "session_id": sid,
-                "message_id": 0,
-                "continue_count": 0,
-                "can_continue": False,
-                "_request_error_type": error_type,
-            }
+            code = "qwen_service_timeout" if error_type == "timeout" else "qwen_service_unavailable"
+            return self._service_error_payload(
+                code=code,
+                message="Timeout запроса к Qwen Service" if error_type == "timeout" else "Ошибка запроса к Qwen Service",
+                session_id=sid,
+                request_error_type=error_type,
+            )
 
         result.setdefault("session_id", sid)
         if result.get("error"):
+            result.setdefault("status", "error")
+            result.setdefault("error_code", qwen_error_code(result) or "qwen_message_failed")
+            result.setdefault("message", qwen_error_text(result, fallback="Qwen вернул ошибку"))
             result.setdefault("response", "")
             result.setdefault("thinking", "")
             result.setdefault("message_id", 0)
@@ -590,6 +943,7 @@ class QwenServiceClient:
         if not result.get("message_id") and result.get("last_message_id"):
             result["message_id"] = result.get("last_message_id")
 
+        result.setdefault("status", "ok")
         logger.info(
             f"Ответ получен: session={sid[-6:]}, len={len(result.get('response', ''))}, "
             f"continues={result.get('continue_count', 0)}"
@@ -621,7 +975,7 @@ class QwenServiceClient:
             "thinking_enabled": thinking_enabled,
         }
 
-        result = self._request(
+        result, error_type = self._request_with_error(
             "POST",
             "/messages/continue",
             json_data=json_data,
@@ -631,26 +985,51 @@ class QwenServiceClient:
         if result and not result.get("message_id") and result.get("last_message_id"):
             result["message_id"] = result.get("last_message_id")
 
-        return result or {
-            "error": "Ошибка продолжения сообщения",
-            "response": "",
-            "thinking": "",
-            "message_id": 0,
-            "can_continue": False,
-        }
+        if not result or result.get("error"):
+            code = qwen_error_code(result, error_type=error_type) or "qwen_continue_failed"
+            return format_error_result(
+                result,
+                fallback_error=code,
+                fallback_message="Ошибка продолжения сообщения",
+                extra={"message_id": 0, "can_continue": False, "session_id": session_id},
+            )
+
+        result.setdefault("status", "ok")
+        return result
 
     def upload_file(self, file_path: str, timeout: float = 180.0) -> dict[str, Any]:
-        """Upload one file through standalone qwen_service.
-
-        qwen_service performs provider upload retries internally.
-        """
-        result = self._request(
+        """Upload one file through standalone qwen_service and wait for parse success."""
+        result, error_type = self._request_with_error(
             "POST",
             "/files/upload",
             json_data={"file_path": file_path},
             timeout=timeout,
         )
-        return result or {"error": "Ошибка загрузки файла в Qwen Service", "file_id": None}
+        if not result or result.get("error"):
+            return format_error_result(
+                result,
+                fallback_error="qwen_file_upload_failed" if error_type != "timeout" else "qwen_file_upload_timeout",
+                fallback_message="Ошибка загрузки файла в Qwen Service",
+                extra={"file_id": None},
+            )
+        return result
+
+    def upload_files(self, file_paths: list[str], timeout: float = 300.0) -> dict[str, Any]:
+        """Upload 1..5 files through standalone qwen_service and wait for parse success."""
+        result, error_type = self._request_with_error(
+            "POST",
+            "/files/upload-many",
+            json_data={"file_paths": file_paths},
+            timeout=timeout,
+        )
+        if not result or result.get("error"):
+            return format_error_result(
+                result,
+                fallback_error="qwen_file_upload_failed" if error_type != "timeout" else "qwen_file_upload_timeout",
+                fallback_message="Ошибка загрузки файлов в Qwen Service",
+                extra={"file_ids": [], "files": [], "file_infos": []},
+            )
+        return result
 
     def upload_file_and_send_message(
         self,
@@ -664,16 +1043,36 @@ class QwenServiceClient:
         timeout: float = 240.0,
         session_prompt: str | None = None,
     ) -> dict[str, Any]:
-        """Upload file and send it with optional message.
+        """Upload one file and send one prompt with that file attached."""
+        return self.upload_files_and_send_message(
+            file_paths=[file_path],
+            message=message,
+            session_id=session_id,
+            thinking_enabled=thinking_enabled,
+            search_enabled=search_enabled,
+            auto_continue=auto_continue,
+            timeout=timeout,
+            session_prompt=session_prompt,
+        )
 
-        Standalone qwen_service retries file upload 3 times and creates a new
-        chat session if upload/send fails in the current session.
-        """
-        result = self._request(
+    def upload_files_and_send_message(
+        self,
+        *,
+        file_paths: list[str],
+        message: str = "",
+        session_id: str | None = None,
+        thinking_enabled: bool = True,
+        search_enabled: bool = False,
+        auto_continue: bool | None = None,
+        timeout: float = 300.0,
+        session_prompt: str | None = None,
+    ) -> dict[str, Any]:
+        """Upload 1..5 files and send one prompt with all files attached."""
+        result, error_type = self._request_with_error(
             "POST",
-            "/files/upload-and-send",
+            "/files/upload-many-and-send",
             json_data={
-                "file_path": file_path,
+                "file_paths": file_paths,
                 "message": message or "",
                 "session_id": session_id,
                 "thinking_enabled": thinking_enabled,
@@ -685,13 +1084,14 @@ class QwenServiceClient:
         )
         if result and result.get("session_id"):
             self._session_id = str(result["session_id"])
-        return result or {
-            "error": "Ошибка отправки файла в Qwen Service",
-            "response": "",
-            "thinking": "",
-            "file_id": None,
-            "session_id": session_id,
-        }
+        if not result or result.get("error"):
+            return format_error_result(
+                result,
+                fallback_error="qwen_file_message_failed" if error_type != "timeout" else "qwen_file_message_timeout",
+                fallback_message="Ошибка отправки файлов в Qwen Service",
+                extra={"file_id": None, "file_ids": [], "session_id": session_id},
+            )
+        return result
 
     def is_available(self) -> bool:
         """

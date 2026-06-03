@@ -27,6 +27,14 @@ function compactPeriod(value: string): string {
   return value.slice(0, 7);
 }
 
+const chartTick = { fontSize: 11, fill: "var(--muted)" };
+const chartTooltipStyle = {
+  background: "var(--surface)",
+  border: "1px solid var(--border)",
+  borderRadius: "12px",
+  color: "var(--text)",
+};
+
 export default function DashboardMiniAnalytics({ trend, keywords, sources }: Props) {
   const sourceBars = sources
     .filter((source) => source.papersCount > 0)
@@ -50,11 +58,11 @@ export default function DashboardMiniAnalytics({ trend, keywords, sources }: Pro
           {trendData.length ? (
             <ResponsiveContainer width="100%" height={190}>
               <BarChart data={trendData}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="periodLabel" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} />
-                <Tooltip />
-                <Bar dataKey="count" />
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" />
+                <XAxis dataKey="periodLabel" tick={chartTick} axisLine={{ stroke: "var(--border)" }} tickLine={false} />
+                <YAxis tick={chartTick} axisLine={{ stroke: "var(--border)" }} tickLine={false} />
+                <Tooltip contentStyle={chartTooltipStyle} cursor={{ fill: "var(--primary-muted)" }} />
+                <Bar dataKey="count" fill="var(--primary)" radius={[8, 8, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           ) : <p className="muted">Нет данных по тренду.</p>}
@@ -64,11 +72,11 @@ export default function DashboardMiniAnalytics({ trend, keywords, sources }: Pro
           {sourceBars.length ? (
             <ResponsiveContainer width="100%" height={190}>
               <BarChart data={sourceBars} layout="vertical" margin={{ left: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-                <XAxis type="number" tick={{ fontSize: 11 }} />
-                <YAxis dataKey="name" type="category" width={90} tick={{ fontSize: 11 }} />
-                <Tooltip />
-                <Bar dataKey="count" />
+                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="var(--border)" />
+                <XAxis type="number" tick={chartTick} axisLine={{ stroke: "var(--border)" }} tickLine={false} />
+                <YAxis dataKey="name" type="category" width={90} tick={chartTick} axisLine={{ stroke: "var(--border)" }} tickLine={false} />
+                <Tooltip contentStyle={chartTooltipStyle} cursor={{ fill: "var(--success-bg)" }} />
+                <Bar dataKey="count" fill="var(--success)" radius={[0, 8, 8, 0]} />
               </BarChart>
             </ResponsiveContainer>
           ) : <p className="muted">Нет данных по источникам.</p>}

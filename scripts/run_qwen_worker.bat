@@ -4,6 +4,14 @@ setlocal EnableExtensions
 set "ROOT=%~dp0.."
 for %%I in ("%ROOT%") do set "ROOT=%%~fI"
 cd /d "%ROOT%"
+set "NF_CONSOLE_STARTED_AT=%DATE% %TIME%"
+title Nickelfront Qwen Worker
+
+echo ============================================================
+echo Nickelfront Qwen worker console
+echo Console started at: %NF_CONSOLE_STARTED_AT%
+echo Project root: %ROOT%
+echo ============================================================
 
 if exist "%ROOT%\scripts\load_env.bat" call "%ROOT%\scripts\load_env.bat" "%ROOT%\.env"
 
@@ -34,5 +42,7 @@ set "NICKELFRONT_WORKER_QUEUES=%QWEN_QUEUE_NAME%"
 set "WORKER_NAME=qwen-%QWEN_SLOT%-%QWEN_NODE_SUFFIX%@%COMPUTERNAME%"
 echo Qwen gateway worker %WORKER_NAME% listens queue %QWEN_QUEUE_NAME%.
 echo concurrency=%QWEN_WORKER_CONCURRENCY%, pool=%QWEN_WORKER_POOL%
+echo Qwen worker command started at: %DATE% %TIME%
+echo ============================================================
 python -m celery -A app.tasks.celery_app worker --loglevel=info -n "%WORKER_NAME%" -Q "%QWEN_QUEUE_NAME%" -E --pool=%QWEN_WORKER_POOL% --concurrency=%QWEN_WORKER_CONCURRENCY% --without-gossip --without-mingle
 endlocal

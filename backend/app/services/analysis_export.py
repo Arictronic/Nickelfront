@@ -2,8 +2,6 @@ import io
 import json
 import logging
 
-from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,10 +10,24 @@ from app.db.models.analysis_result import AnalysisResult
 logger = logging.getLogger(__name__)
 
 
-async def export_analysis_to_excel(analysis_id: int, db: AsyncSession) -> io.BytesIO:
-    result = await db.execute(
-        select(AnalysisResult).where(AnalysisResult.id == analysis_id)
-    )
+async def export_analysis_to_excel(
+    analysis_id: int,
+    db: AsyncSession,
+    user_id: int | None = None,
+) -> io.BytesIO:
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font
+    except ImportError as exc:
+        raise ImportError(
+            "openpyxl is required for Excel export. Install dependencies from requirements.txt."
+        ) from exc
+
+    stmt = select(AnalysisResult).where(AnalysisResult.id == analysis_id)
+    if user_id is not None:
+        stmt = stmt.where(AnalysisResult.user_id == user_id)
+
+    result = await db.execute(stmt)
     entry = result.scalar_one_or_none()
     if not entry:
         raise ValueError(f"AnalysisResult {analysis_id} не найден")

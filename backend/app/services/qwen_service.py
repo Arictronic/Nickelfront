@@ -157,7 +157,10 @@ class QwenService:
             available = str(health.get("status", "")).lower() == "ok"
 
         reason: str | None = None
-        if not available:
+        if health.get("auth_valid_known") is False and not available:
+            available = False
+            reason = "Последняя проверка Qwen auth завершилась ошибкой. Обновите QWEN_TOKEN/session."
+        if not available and not reason:
             if health.get("has_token") is False:
                 reason = "Qwen Service запущен, но QWEN_TOKEN в нём не загружен"
             else:
@@ -174,6 +177,12 @@ class QwenService:
             "reason": reason,
             "error_type": None,
             "has_token": health.get("has_token"),
+            "token_configured": health.get("token_configured", health.get("has_token")),
+            "has_api_key": health.get("has_api_key"),
+            "auth_required": health.get("auth_required"),
+            "auth_valid_known": health.get("auth_valid_known"),
+            "auth_checked_at": health.get("auth_checked_at"),
+            "service_alive": health.get("service_alive", True),
         }
 
     @property
@@ -740,6 +749,8 @@ class QwenService:
             "history_recovery_interval_sec": remote.get("history_recovery_interval_sec"),
             "has_token": remote.get("has_token"),
             "has_api_key": remote.get("has_api_key"),
+            "auth_required": remote.get("auth_required"),
+            "allow_unauth_without_api_key": remote.get("allow_unauth_without_api_key"),
             "is_available": self.is_available,
             "base_url": self.base_url,
         }

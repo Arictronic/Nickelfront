@@ -29,7 +29,7 @@ const adminActions: Array<{
     label: "Обработать PDF и текст",
     hint: "Поставить документы с PDF/ссылкой/текстовым fallback в очередь Celery",
     payload: { limit: 100, pdf_mode: "auto" },
-    confirm: "Поставить до 100 документов в очередь обработки PDF и контента?",
+    confirm: "Поставить до 100 документов в очередь обработки PDF и текстового контента?",
   },
   {
     name: "retry_failed_content",
@@ -82,6 +82,11 @@ export default function QuickActionsPanel({
     onRunAction(action, payload);
   };
 
+  const safeRecommendedActions = recommendedActions
+    .filter((action) => isAdmin || !action.actionName)
+    .filter((action) => isAdmin || !["/settings", "/database", "/celery"].includes(action.actionTo || ""))
+    .slice(0, 3);
+
   return (
     <section className="panel dashboard-actions-panel">
       <div className="dashboard-panel-head">
@@ -94,10 +99,10 @@ export default function QuickActionsPanel({
       {actionStatus && <div className="dashboard-action-status success">{actionStatus}</div>}
       {actionError && <div className="dashboard-action-status danger">{actionError}</div>}
 
-      {recommendedActions.length > 0 && (
+      {safeRecommendedActions.length > 0 && (
         <div className="dashboard-recommended-actions">
           <strong>Что исправить первым</strong>
-          {recommendedActions.slice(0, 3).map((action) => {
+          {safeRecommendedActions.map((action) => {
             if (action.actionName) {
               const running = runningAction === action.actionName;
               const blocked = !isAdmin;
@@ -149,12 +154,7 @@ export default function QuickActionsPanel({
             })}
           </div>
         </div>
-      ) : (
-        <div className="dashboard-admin-locked">
-          <strong>Администрирование скрыто</strong>
-          <small>Пересборка PDF и контента, эмбеддингов, векторного индекса и RAG-индекса доступна только администратору.</small>
-        </div>
-      )}
+      ) : null}
 
     </section>
   );

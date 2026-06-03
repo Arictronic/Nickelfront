@@ -55,6 +55,7 @@ REDIS_RUNTIME_PATTERNS = (
 
 @dataclass
 class CleanupStats:
+    dry_run: bool = False
     deleted_dirs: int = 0
     deleted_files: int = 0
     redis_keys_deleted: int = 0
@@ -74,7 +75,13 @@ def _safe_clear_dir_contents(target: Path, stats: CleanupStats, keep_names: set[
         return
 
     keep_names = keep_names or set()
-    for child in target.iterdir():
+    try:
+        children = list(target.iterdir())
+    except Exception:
+        stats.skipped_locked += 1
+        return
+
+    for child in children:
         if child.name in keep_names:
             continue
         if child.is_dir():
@@ -110,10 +117,24 @@ def _delete_dir_if_exists(path: Path, stats: CleanupStats) -> None:
 
 
 def _clear_python_caches(project_root: Path, stats: CleanupStats) -> None:
-    for cache_dir in project_root.rglob("__pycache__"):
-        if cache_dir.is_dir():
-            _delete_dir_if_exists(cache_dir, stats)
-    for pyc_file in project_root.rglob("*.pyc"):
+    try:
+        cache_dirs = list(project_root.rglob("__pycache__"))
+    except Exception:
+        stats.skipped_locked += 1
+        cache_dirs = []
+    for cache_dir in cache_dirs:
+        try:
+            if cache_dir.is_dir():
+                _delete_dir_if_exists(cache_dir, stats)
+        except Exception:
+            stats.skipped_locked += 1
+
+    try:
+        pyc_files = list(project_root.rglob("*.pyc"))
+    except Exception:
+        stats.skipped_locked += 1
+        pyc_files = []
+    for pyc_file in pyc_files:
         _delete_file_if_exists(pyc_file, stats)
 
 
@@ -123,7 +144,13 @@ def _clear_alloy_analysis_results(project_root: Path, stats: CleanupStats) -> No
     if not target.exists() or not target.is_dir():
         return
 
-    for child in target.iterdir():
+    try:
+        children = list(target.iterdir())
+    except Exception:
+        stats.skipped_locked += 1
+        return
+
+    for child in children:
 
         if child == prompt_path:
             continue
@@ -257,7 +284,11 @@ async def _count_table(conn, table_name: str, dialect_name: str) -> int:
     return int(result.scalar() or 0)
 
 
-async def _reset_database_runtime(stats: CleanupStats, preserve_tables: set[str]) -> None:
+async def _reset_database_runtime(
+    stats: CleanupStats,
+    preserve_tables: set[str],
+    dry_run: bool = False,
+) -> None:
     dialect_name = engine.dialect.name
 
     async with engine.begin() as conn:
@@ -280,6 +311,12 @@ async def _reset_database_runtime(stats: CleanupStats, preserve_tables: set[str]
         if not cleanup_tables:
             return
 
+        stats.db_tables_cleaned = cleanup_tables
+        if dry_run:
+            for table in cleanup_tables:
+                stats.db_rows_after[table] = stats.db_rows_before.get(table, -1)
+            return
+
         if dialect_name == "postgresql":
             table_list = ", ".join(_table_sql(table, dialect_name) for table in cleanup_tables)
             await conn.execute(text(f"TRUNCATE TABLE {table_list} RESTART IDENTITY CASCADE"))
@@ -293,8 +330,6 @@ async def _reset_database_runtime(stats: CleanupStats, preserve_tables: set[str]
             for table in cleanup_tables:
                 await conn.execute(text(f"DELETE FROM {_table_sql(table, dialect_name)}"))
 
-        stats.db_tables_cleaned = cleanup_tables
-
         for table in cleanup_tables:
             try:
                 stats.db_rows_after[table] = await _count_table(conn, table, dialect_name)
@@ -302,18 +337,25 @@ async def _reset_database_runtime(stats: CleanupStats, preserve_tables: set[str]
                 stats.db_rows_after[table] = -1
 
 
-async def reset_runtime_data(include_users: bool = False, include_settings: bool = False) -> CleanupStats:
+async def reset_runtime_data(
+    include_users: bool = False,
+    include_settings: bool = False,
+    dry_run: bool = False,
+) -> CleanupStats:
     preserve_tables = set(DEFAULT_PRESERVE_TABLES)
     if include_users:
         preserve_tables.discard("users")
         preserve_tables.discard("refresh_tokens")
     if include_settings:
         preserve_tables.discard("system_settings")
-    stats = CleanupStats()
+    stats = CleanupStats(dry_run=dry_run)
 
-    await _reset_database_runtime(stats, preserve_tables=preserve_tables)
+    await _reset_database_runtime(stats, preserve_tables=preserve_tables, dry_run=dry_run)
 
     project_root = _project_root()
+    if dry_run:
+        return stats
+
     _clear_runtime_files(project_root, stats)
     _flush_redis_runtime(stats)
     _clear_papers_count_cache()
@@ -322,7 +364,10 @@ async def reset_runtime_data(include_users: bool = False, include_settings: bool
 
 
 def _print_stats(stats: CleanupStats, include_users: bool, include_settings: bool) -> None:
-    print("\nОчистка завершена:")
+    if stats.dry_run:
+        print("\nDRY RUN: очистка не выполнялась.")
+    else:
+        print("\nОчистка завершена:")
     mode_parts = []
     if include_users:
         mode_parts.append("пользователи очищаются")
@@ -336,7 +381,7 @@ def _print_stats(stats: CleanupStats, include_users: bool, include_settings: boo
 
     print("\nБаза данных:")
     if stats.db_tables_cleaned:
-        print("- очищенные таблицы:")
+        print("- таблицы к очистке:" if stats.dry_run else "- очищенные таблицы:")
         for table in stats.db_tables_cleaned:
             before = stats.db_rows_before.get(table, "?")
             after = stats.db_rows_after.get(table, "?")
@@ -349,8 +394,10 @@ def _print_stats(stats: CleanupStats, include_users: bool, include_settings: boo
         for table, count in stats.db_tables_preserved.items():
             print(f"  - {table}: строк={count}")
 
-    bad_tables = [table for table, count in stats.db_rows_after.items() if count not in (0, -1)]
-    if bad_tables:
+    bad_tables = [] if stats.dry_run else [table for table, count in stats.db_rows_after.items() if count not in (0, -1)]
+    if stats.dry_run:
+        print("- проверка: dry-run завершён без удаления данных")
+    elif bad_tables:
         print("\nПРЕДУПРЕЖДЕНИЕ: некоторые очищенные таблицы не пустые после очистки:")
         for table in bad_tables:
             print(f"  - {table}: строк={stats.db_rows_after.get(table)}")
@@ -392,13 +439,18 @@ def parse_args() -> argparse.Namespace:
             "Qwen-настройки, сохраняются."
         ),
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Показать, что будет очищено в БД, но ничего не удалять.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
 
-    if not args.yes:
+    if not args.yes and not args.dry_run:
         print("Будут УДАЛЕНЫ runtime-данные:")
         print("1. по умолчанию все таблицы БД, кроме `users`, `refresh_tokens`, `system_settings` и `alembic_version`")
         print("2. истории задач, статьи, patent_tasks, статистика парсеров")
@@ -412,7 +464,13 @@ def main() -> int:
             return 1
 
     try:
-        stats = asyncio.run(reset_runtime_data(include_users=bool(args.include_users), include_settings=bool(args.include_settings)))
+        stats = asyncio.run(
+            reset_runtime_data(
+                include_users=bool(args.include_users),
+                include_settings=bool(args.include_settings),
+                dry_run=bool(args.dry_run),
+            )
+        )
     except SQLAlchemyError as exc:
         print(f"Ошибка очистки БД: {exc}")
         return 2

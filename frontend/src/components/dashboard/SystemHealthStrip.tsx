@@ -35,7 +35,17 @@ function detailText(name: string, service: DashboardServiceStatus): string | nul
     return `${workers} воркеров · активных ${active} · в очереди ${queued}`;
   }
   if (name === "redis" && service.memory) return `память ${service.memory}`;
-  if ((name === "vector" || name === "rag") && service.indexed !== undefined) {
+  if (name === "rag") {
+    const ready = service.ready ?? 0;
+    const candidates = service.candidates ?? 0;
+    const chunks = service.indexed ?? service.count ?? 0;
+    if (service.ids_status === "unknown") return `чанков ${chunks} · проверка статей недоступна`;
+    if (candidates > 0) return `статей ${ready}/${candidates} · чанков ${chunks}`;
+    if (chunks > 0) return `чанков в индексе ${chunks}`;
+    return service.index_status === "empty" ? "индекс пуст" : null;
+  }
+  if (name === "vector" && service.indexed !== undefined) {
+    if (service.ids_status === "unknown") return `записей ${service.indexed ?? service.count ?? 0} · проверка статей недоступна`;
     return `в индексе ${service.indexed ?? service.count ?? 0}`;
   }
   if (name === "qwen") {

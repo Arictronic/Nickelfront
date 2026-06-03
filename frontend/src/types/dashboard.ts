@@ -20,6 +20,8 @@ export interface DashboardCounts {
   vectorIndexed: number;
   vectorIndexRecords: number;
   ragIndexed: number;
+  vectorIdsStatus: "verified" | "unknown";
+  ragIdsStatus: "verified" | "unknown";
   processingErrors: number;
   contentQueued: number;
 }
@@ -52,6 +54,11 @@ export interface DashboardServiceStatus {
   model?: string | null;
   path?: string | null;
   collection?: string | null;
+  index_status?: string | null;
+  ids_status?: "verified" | "unknown" | null;
+  candidates?: number;
+  ready?: number;
+  gap?: number | null;
   reason?: string | null;
   error?: string | null;
   available?: boolean;
@@ -123,6 +130,8 @@ export interface DashboardActionResult {
   status: string;
   source?: string | null;
   query?: string | null;
+  jobType?: string | null;
+  parseAdmission?: Record<string, unknown> | null;
 }
 
 export interface DashboardOverview {

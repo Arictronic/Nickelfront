@@ -22,7 +22,15 @@ from app.core.config import settings
 from app.db.models.paper import Paper as PaperModel
 from app.db.models.paper_content_part import PaperContentPart
 from app.services.parse_job_history import add_parse_job, list_parse_jobs, update_parse_job
+from app.services.parse_admission_service import (
+    ParseAdmissionLimitError,
+    ParseAdmissionUnavailableError,
+    get_parse_admission_snapshot,
+    release_parse_slot,
+    reserve_parse_slot,
+)
 from app.services.system_settings_service import SystemSettingsService
+from app.services import task_lifecycle_status as lifecycle
 
 PAPER_SOURCES = (
     "CORE",
@@ -39,7 +47,7 @@ PAPER_SOURCES = (
 )
 
 API_SOURCES = {"CORE", "arXiv", "OpenAlex", "Crossref", "EuropePMC"}
-TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled", "expired"}
+TERMINAL_JOB_STATUSES = {"completed", "partial", "failed", "cancelled", "expired"}
 ERROR_STATUSES = {
     "failed",
     "pdf_download_failed",
@@ -70,44 +78,109 @@ DASHBOARD_ACTIONS: dict[str, dict[str, str]] = {
         "task": "app.tasks.dashboard.process_pdf_backlog",
         "source": "dashboard",
         "query": "обработка очереди PDF и контента",
+        "job_type": "content_backlog",
     },
     "retry_failed_content": {
         "title": "Повторить задачи контента с ошибками",
         "task": "app.tasks.dashboard.retry_failed_content",
         "source": "dashboard",
         "query": "повтор ошибок обработки контента",
+        "job_type": "content_backlog",
     },
     "rebuild_embeddings": {
         "title": "Пересобрать недостающие эмбеддинги",
         "task": "app.tasks.dashboard.rebuild_embeddings",
         "source": "dashboard",
         "query": "пересборка недостающих эмбеддингов",
+        "job_type": "vector_rebuild",
     },
     "reindex_vector_store": {
         "title": "Синхронизировать векторный индекс",
         "task": "app.tasks.dashboard.reindex_vector_store",
         "source": "dashboard",
         "query": "синхронизация векторного индекса со всеми эмбеддингами из PostgreSQL",
+        "job_type": "vector_rebuild",
     },
     "rebuild_vector_store_full": {
         "title": "Полностью пересобрать векторный индекс",
         "task": "app.tasks.dashboard.rebuild_vector_store_full",
         "source": "dashboard",
         "query": "полная пересборка векторного индекса из PostgreSQL",
+        "job_type": "vector_rebuild",
     },
     "rebuild_rag_index": {
         "title": "Полностью пересобрать RAG-индекс",
         "task": "app.tasks.dashboard.rebuild_rag_index",
         "source": "dashboard",
         "query": "полная пересборка RAG-индекса из контента статей",
+        "job_type": "rag_rebuild",
     },
     "rerun_source": {
         "title": "Запустить источник заново",
         "task": "app.tasks.parse_tasks.parse_papers_task",
         "source": "all",
         "query": "повторный запуск источника",
+        "job_type": "parse",
     },
 }
+
+
+class DashboardActionConflictError(ValueError):
+    """Dashboard action was rejected because a safe runtime limit was reached."""
+
+
+class DashboardActionUnavailableError(RuntimeError):
+    """Dashboard action cannot be safely queued because infrastructure is unavailable."""
+
+
+def _max_parallel_parse_jobs(parser_settings: dict[str, Any]) -> int:
+    try:
+        return int(parser_settings.get("max_parallel_parse_jobs") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _reserve_dashboard_parse_slot(
+    *,
+    parser_settings: dict[str, Any],
+    task_name: str,
+    source: str,
+    query: str,
+):
+    max_parallel = _max_parallel_parse_jobs(parser_settings)
+    try:
+        return reserve_parse_slot(
+            max_parallel=max_parallel,
+            task_name=task_name,
+            source=source,
+            query=query,
+        )
+    except ParseAdmissionLimitError as exc:
+        raise DashboardActionConflictError(
+            f"Достигнут лимит parse-задач: {exc.occupied}/{exc.max_parallel}. "
+            "Учитываются ожидающие, зарезервированные и выполняющиеся root parse-задачи."
+        ) from exc
+    except ParseAdmissionUnavailableError as exc:
+        raise DashboardActionUnavailableError(
+            f"Redis недоступен для безопасной постановки parse-задачи: {exc}"
+        ) from exc
+
+
+
+def _safe_add_dashboard_job(job: dict[str, Any]) -> bool:
+    try:
+        add_parse_job(job)
+        return True
+    except Exception as exc:
+        logger.warning("Failed to record dashboard job {} in shared history: {}", job.get("jobId"), exc)
+        return False
+
+
+def _safe_patch_dashboard_job(task_id: str, patch: dict[str, Any]) -> None:
+    try:
+        update_parse_job(task_id, patch)
+    except Exception as exc:
+        logger.warning("Failed to patch dashboard job {} in shared history: {}", task_id, exc)
 
 
 def invalidate_dashboard_overview_cache() -> None:
@@ -228,14 +301,41 @@ def _result_payload_from_task_info(task_info: dict[str, Any] | None) -> dict[str
     return result if isinstance(result, dict) else None
 
 
-def _parse_job_status_from_celery(celery_status: str | None) -> str:
-    if celery_status == "SUCCESS":
-        return "completed"
-    if celery_status == "FAILURE":
-        return "failed"
-    if celery_status == "REVOKED":
-        return "cancelled"
-    return "in_progress"
+
+
+def _compact_child_payload(payload: dict | None) -> dict | None:
+    return lifecycle.compact_child_payload(payload)
+
+
+def _result_is_partial(result: dict[str, Any] | None) -> bool:
+    return lifecycle.result_is_partial(result)
+
+
+def _related_statuses_from_info(task_info: dict[str, Any] | None) -> list[dict[str, Any]]:
+    return lifecycle.related_statuses(task_info)
+
+
+def _downstream_is_active(task_info: dict[str, Any] | None, *, stale_after_ms: int | None = None) -> bool:
+    return lifecycle.downstream_is_active(task_info, stale_after_ms=stale_after_ms)
+
+
+def _downstream_has_failure(task_info: dict[str, Any] | None) -> bool:
+    return lifecycle.downstream_has_failure(task_info)
+
+
+def _parse_job_status_from_celery(
+    celery_status: str | None,
+    result: dict[str, Any] | None = None,
+    task_info: dict[str, Any] | None = None,
+    *,
+    stale_after_ms: int | None = None,
+) -> str:
+    return lifecycle.parse_job_status_from_celery(celery_status, result, task_info, stale_after_ms=stale_after_ms)
+
+
+def _task_result_payload(job: dict[str, Any]) -> dict[str, Any]:
+    celery = _as_dict(job.get("celeryStatus"))
+    return _as_dict(celery.get("result"))
 
 
 def _job_status(job: dict[str, Any]) -> str:
@@ -243,7 +343,9 @@ def _job_status(job: dict[str, Any]) -> str:
     celery = _as_dict(job.get("celeryStatus"))
     celery_status = str(celery.get("status") or "").strip()
     if celery_status in {"SUCCESS", "FAILURE", "REVOKED"}:
-        return _parse_job_status_from_celery(celery_status)
+        return lifecycle.parse_job_status_from_celery(celery_status, _task_result_payload(job), celery, stale_after_ms=max(0, int(time.time() * 1000) - _safe_int(job.get("lastCountChangeAt"), _safe_int(job.get("startedAt"), int(time.time() * 1000)))))
+    if status in lifecycle.PARTIAL_RESULT_STATUSES or status == "partial":
+        return "partial"
     if status in {"in_progress", *TERMINAL_JOB_STATUSES}:
         return status
     return "in_progress"
@@ -251,6 +353,17 @@ def _job_status(job: dict[str, Any]) -> str:
 
 def _job_error(job: dict[str, Any]) -> str | None:
     meta = _job_meta(job)
+    pipeline_error = lifecycle.payload_error_text(meta)
+    if pipeline_error:
+        return pipeline_error
+    celery = _as_dict(job.get("celeryStatus"))
+    for child in celery.get("related_child_statuses") or []:
+        if not isinstance(child, dict):
+            continue
+        for payload in lifecycle.child_payloads(child):
+            pipeline_error = lifecycle.payload_error_text(payload)
+            if pipeline_error:
+                return pipeline_error
     for key in ("error", "exc_message", "traceback"):
         value = meta.get(key)
         if value:
@@ -273,7 +386,7 @@ def _job_counter(job: dict[str, Any], *keys: str) -> int:
 
 def _job_progress_percent(job: dict[str, Any]) -> int:
     status = _job_status(job)
-    if status == "completed":
+    if status in {"completed", "partial"}:
         return 100
     if status in {"failed", "cancelled", "expired"}:
         return 0
@@ -304,10 +417,13 @@ def _job_progress_percent(job: dict[str, Any]) -> int:
     return 8
 
 
-def _build_parse_job_patch(task_id: str, task_info: dict[str, Any] | None) -> dict[str, Any]:
+def _build_parse_job_patch(task_id: str, task_info: dict[str, Any] | None, job: dict[str, Any] | None = None) -> dict[str, Any]:
     result = _result_payload_from_task_info(task_info)
     celery_status = str((task_info or {}).get("status") or "UNKNOWN")
     now_ms = int(time.time() * 1000)
+    started_ms = _safe_int((job or {}).get("startedAt"), now_ms)
+    last_change_ms = _safe_int((job or {}).get("lastCountChangeAt"), started_ms)
+    stale_after_ms = max(0, now_ms - last_change_ms)
 
     def result_value(*keys: str) -> Any:
         return _first_present(result, *keys)
@@ -332,9 +448,15 @@ def _build_parse_job_patch(task_id: str, task_info: dict[str, Any] | None) -> di
         "name": (task_info or {}).get("name"),
         "args": (task_info or {}).get("args"),
         "kwargs": (task_info or {}).get("kwargs"),
+        "child_task_ids": (task_info or {}).get("child_task_ids"),
+        "children": (task_info or {}).get("children"),
+        "related_child_statuses": (task_info or {}).get("related_child_statuses"),
+        "related_task_ids": (task_info or {}).get("related_task_ids"),
+        "stage_task_ids": (task_info or {}).get("stage_task_ids"),
+        "stage_tasks": (task_info or {}).get("stage_tasks"),
     }
     patch: dict[str, Any] = {
-        "status": _parse_job_status_from_celery(celery_status),
+        "status": lifecycle.parse_job_status_from_celery(celery_status, result, task_info, stale_after_ms=stale_after_ms),
         "lastPolledAt": now_ms,
         "celeryStatus": celery_payload,
     }
@@ -356,9 +478,114 @@ def _build_parse_job_patch(task_id: str, task_info: dict[str, Any] | None) -> di
     return patch
 
 
+async def _enrich_task_info_with_related_children(task_info: dict[str, Any] | None, max_children: int = 120) -> dict[str, Any] | None:
+    if not isinstance(task_info, dict):
+        return task_info
+    root_id = str(task_info.get("task_id") or "").strip()
+    discovered = {str(item).strip() for item in task_info.get("related_task_ids") or [] if str(item or "").strip()}
+    discovered.update(str(item).strip() for item in task_info.get("child_task_ids") or [] if str(item or "").strip())
+    seen: set[str] = {root_id} if root_id else set()
+    pending = [item for item in sorted(discovered) if item and item not in seen]
+    seen.update(pending)
+    if not pending:
+        return task_info
+
+    from app.tasks.tasks import get_celery_task_status
+
+    child_statuses: list[dict[str, Any]] = []
+    while pending and len(child_statuses) < max_children:
+        child_id = pending.pop(0)
+        child_info = await asyncio.to_thread(get_celery_task_status, child_id)
+        if not isinstance(child_info, dict):
+            continue
+        result_payload = child_info.get("result") if isinstance(child_info.get("result"), dict) else None
+        info_payload = child_info.get("info") if isinstance(child_info.get("info"), dict) else None
+        stage_task_ids = None
+        stage_tasks = None
+        for payload in (result_payload, info_payload):
+            if not isinstance(payload, dict):
+                continue
+            if isinstance(payload.get("stage_task_ids"), dict):
+                stage_task_ids = payload.get("stage_task_ids")
+            if isinstance(payload.get("stage_tasks"), list):
+                stage_tasks = payload.get("stage_tasks")
+
+        child_statuses.append({
+            "task_id": child_id,
+            "status": child_info.get("status"),
+            "state": child_info.get("state"),
+            "name": child_info.get("name"),
+            "stage_task_ids": stage_task_ids,
+            "stage_tasks": stage_tasks,
+            "related_task_ids": child_info.get("related_task_ids"),
+            "child_task_ids": child_info.get("child_task_ids"),
+            "children": child_info.get("children"),
+            "result": lifecycle.compact_child_payload(result_payload),
+            "info": lifecycle.compact_child_payload(info_payload),
+        })
+
+        for nested_id in child_info.get("related_task_ids") or []:
+            nested_id = str(nested_id or "").strip()
+            if nested_id and nested_id not in seen:
+                discovered.add(nested_id)
+                pending.append(nested_id)
+                seen.add(nested_id)
+        for nested_id in child_info.get("child_task_ids") or []:
+            nested_id = str(nested_id or "").strip()
+            if nested_id and nested_id not in seen:
+                discovered.add(nested_id)
+                pending.append(nested_id)
+                seen.add(nested_id)
+        for payload in (result_payload, info_payload):
+            if not isinstance(payload, dict) or not isinstance(payload.get("stage_task_ids"), dict):
+                continue
+            for nested_id in payload["stage_task_ids"].values():
+                nested_id = str(nested_id or "").strip()
+                if nested_id and nested_id not in seen:
+                    discovered.add(nested_id)
+                    pending.append(nested_id)
+                    seen.add(nested_id)
+
+    if child_statuses:
+        task_info["related_child_statuses"] = child_statuses[:max_children]
+    if discovered:
+        current = {str(item).strip() for item in task_info.get("related_task_ids") or [] if str(item or "").strip()}
+        task_info["related_task_ids"] = sorted(current | discovered)[:500]
+    for child in child_statuses:
+        if not task_info.get("stage_task_ids") and isinstance(child.get("stage_task_ids"), dict):
+            task_info["stage_task_ids"] = child.get("stage_task_ids")
+        if not task_info.get("stage_tasks") and isinstance(child.get("stage_tasks"), list):
+            task_info["stage_tasks"] = child.get("stage_tasks")
+    return task_info
+
+
+def _job_has_downstream_lifecycle(job: dict[str, Any]) -> bool:
+    celery = _as_dict(job.get("celeryStatus"))
+    return any(
+        celery.get(key)
+        for key in ("related_child_statuses", "related_task_ids", "stage_task_ids", "stage_tasks", "child_task_ids")
+    ) or _safe_int(job.get("contentQueuedCount"), 0) > 0
+
+
+def _should_sync_job_from_celery(job: dict[str, Any]) -> bool:
+    status = _job_status(job)
+    if status == "in_progress":
+        return True
+    if status not in {"completed", "partial"}:
+        return False
+    if not _job_has_downstream_lifecycle(job):
+        return False
+    now_ms = int(time.time() * 1000)
+    started_ms = _safe_int(job.get("startedAt"), now_ms)
+    # Re-evaluate recent terminal jobs so soft-failed downstream stages can
+    # downgrade old green SUCCESS records to partial/warning. Do not keep polling
+    # very old history forever.
+    return now_ms - started_ms <= 24 * 60 * 60 * 1000
+
+
 async def _sync_job_from_celery(job: dict[str, Any]) -> dict[str, Any]:
     task_id = str(job.get("jobId") or "")
-    if not task_id or _job_status(job) != "in_progress":
+    if not task_id or not _should_sync_job_from_celery(job):
         return job
     try:
         from app.tasks.tasks import get_celery_task_status
@@ -366,7 +593,8 @@ async def _sync_job_from_celery(job: dict[str, Any]) -> dict[str, Any]:
         task_info = await asyncio.to_thread(get_celery_task_status, task_id)
         if not task_info:
             return job
-        patch = _build_parse_job_patch(task_id, task_info)
+        task_info = await _enrich_task_info_with_related_children(task_info)
+        patch = _build_parse_job_patch(task_id, task_info, job)
         synced = await asyncio.to_thread(update_parse_job, task_id, patch)
         return synced or {**job, **patch}
     except Exception as exc:
@@ -386,6 +614,7 @@ def _normalize_dashboard_job(job: dict[str, Any]) -> dict[str, Any]:
         "source": str(job.get("source") or meta.get("source") or "all"),
         "query": str(job.get("query") or meta.get("query") or ""),
         "status": _job_status(job),
+        "job_type": str(job.get("jobType") or job.get("job_type") or meta.get("job_type") or meta.get("dashboard_action") or "parse"),
         "celery_status": _as_dict(job.get("celeryStatus")),
         "progress_percent": _job_progress_percent(job),
         "saved": _job_counter(job, "savedCount", "saved_count", "total_saved"),
@@ -412,15 +641,21 @@ def _normalize_dashboard_job(job: dict[str, Any]) -> dict[str, Any]:
         "contentQueuedCount": _job_counter(job, "contentQueuedCount", "content_queued_count", "total_content_queued"),
         "contentSkippedCount": _job_counter(job, "contentSkippedCount", "content_skipped_count", "total_content_skipped"),
         "lastPolledAt": _safe_int(job.get("lastPolledAt"), 0) or None,
+        "jobType": str(job.get("jobType") or job.get("job_type") or meta.get("job_type") or meta.get("dashboard_action") or "parse"),
+        "celeryStatus": _as_dict(job.get("celeryStatus")),
     }
 
 
-async def get_dashboard_jobs(limit: int = 20) -> dict[str, Any]:
-    """Return parse jobs normalized for the dashboard cards."""
+async def _load_synced_parse_jobs(limit: int) -> list[dict[str, Any]]:
     raw_jobs = await asyncio.to_thread(list_parse_jobs, max(limit * 3, limit))
     raw_jobs = [job for job in raw_jobs if not _is_placeholder_job_id(job.get("jobId"))]
-    synced_jobs = await asyncio.gather(*[_sync_job_from_celery(job) for job in raw_jobs[:limit]]) if raw_jobs else []
-    normalized = [_normalize_dashboard_job(job) for job in synced_jobs]
+    if not raw_jobs:
+        return []
+    return list(await asyncio.gather(*[_sync_job_from_celery(job) for job in raw_jobs[:limit]]))
+
+
+def _jobs_payload_from_synced_jobs(jobs: list[dict[str, Any]], limit: int = 20) -> dict[str, Any]:
+    normalized = [_normalize_dashboard_job(job) for job in jobs[:limit]]
     return {
         "jobs": normalized[:limit],
         "summary": {
@@ -429,6 +664,12 @@ async def get_dashboard_jobs(limit: int = 20) -> dict[str, Any]:
             "failed_recent": sum(1 for job in normalized[:20] if job["status"] == "failed"),
         },
     }
+
+
+async def get_dashboard_jobs(limit: int = 20) -> dict[str, Any]:
+    """Return parse jobs normalized for the dashboard cards."""
+    synced_jobs = await _load_synced_parse_jobs(limit)
+    return _jobs_payload_from_synced_jobs(synced_jobs, limit)
 
 
 
@@ -608,24 +849,26 @@ async def _build_services(db: AsyncSession, total_papers: int) -> dict[str, dict
     }
 
 
-async def _get_vector_indexed_paper_ids() -> set[int]:
+async def _get_vector_indexed_paper_ids() -> tuple[set[int], bool, str | None]:
     try:
         from app.services.vector_service import get_vector_service
 
-        return await asyncio.wait_for(asyncio.to_thread(get_vector_service().get_indexed_paper_ids), timeout=8.0)
+        ids = await asyncio.wait_for(asyncio.to_thread(get_vector_service().get_indexed_paper_ids), timeout=8.0)
+        return {int(value) for value in ids if value is not None}, True, None
     except Exception as exc:
         logger.warning("Dashboard could not read Vector indexed paper ids: {}", exc)
-        return set()
+        return set(), False, str(exc)[:300]
 
 
-async def _get_rag_indexed_paper_ids() -> set[int]:
+async def _get_rag_indexed_paper_ids() -> tuple[set[int], bool, str | None]:
     try:
         from app.services.rag_vector_store import get_rag_vector_store
 
-        return await asyncio.wait_for(asyncio.to_thread(get_rag_vector_store().get_indexed_paper_ids), timeout=8.0)
+        ids = await asyncio.wait_for(asyncio.to_thread(get_rag_vector_store().get_indexed_paper_ids), timeout=8.0)
+        return {int(value) for value in ids if value is not None}, True, None
     except Exception as exc:
         logger.warning("Dashboard could not read RAG indexed paper ids: {}", exc)
-        return set()
+        return set(), False, str(exc)[:300]
 
 
 async def _select_paper_ids(db: AsyncSession, expr) -> set[int]:
@@ -638,13 +881,66 @@ async def _select_paper_ids(db: AsyncSession, expr) -> set[int]:
 
 
 
+def _source_payload_from_all_job(job: dict[str, Any] | None, source: str) -> dict[str, Any] | None:
+    if not job:
+        return None
+    result = _task_result_payload(job)
+    meta = _job_meta(job)
+    sources = _as_dict(result.get("sources_status") or result.get("sources") or meta.get("sources_status") or meta.get("sources"))
+    item = _as_dict(sources.get(source))
+    return item or None
+
+
+def _source_status_to_job_status(value: Any) -> str:
+    status = str(value or "").strip()
+    if status in {"failed", "error", "FAILURE"}:
+        return "failed"
+    if status in {"revoked", "cancelled", "REVOKED"}:
+        return "cancelled"
+    if status in lifecycle.PARTIAL_RESULT_STATUSES or status == "partial":
+        return "partial"
+    if status in {"pending", "in_progress", "STARTED", "PROGRESS"}:
+        return "in_progress"
+    if status in {"completed", "success", "SUCCESS"}:
+        return "completed"
+    return "completed" if status else "in_progress"
+
+
+def _all_job_for_source(job: dict[str, Any] | None, source: str) -> dict[str, Any] | None:
+    item = _source_payload_from_all_job(job, source)
+    if not item:
+        return None
+    celery = _as_dict(job.get("celeryStatus")) if job else {}
+    status_key = item.get("status_key") or item.get("status")
+    normalized_status = _source_status_to_job_status(status_key)
+    return {
+        **(job or {}),
+        "source": source,
+        "status": normalized_status,
+        "celeryStatus": {
+            **celery,
+            "result": {**item, "status": status_key, "result_status": status_key},
+            "progress": item,
+            "status": "SUCCESS" if normalized_status in TERMINAL_JOB_STATUSES else celery.get("status", "PENDING"),
+        },
+    }
+
+
 def _source_success_rate(source: str, jobs: list[dict[str, Any]]) -> dict[str, Any]:
-    source_jobs = [job for job in jobs if str(job.get("source") or "") in {source, "all"}]
+    source_jobs: list[dict[str, Any]] = []
+    for job in jobs:
+        job_source = str(job.get("source") or "")
+        if job_source == source:
+            source_jobs.append(job)
+        elif job_source == "all":
+            source_job = _all_job_for_source(job, source)
+            if source_job:
+                source_jobs.append(source_job)
     terminal = [job for job in source_jobs if _job_status(job) in TERMINAL_JOB_STATUSES]
     if not terminal:
         return {"success_rate": None, "error_rate": None, "last_duration_sec": None}
     success = sum(1 for job in terminal if _job_status(job) == "completed")
-    failed = sum(1 for job in terminal if _job_status(job) == "failed")
+    failed = sum(1 for job in terminal if _job_status(job) in {"failed", "partial"})
     latest = terminal[0]
     started_at = _safe_int(latest.get("startedAt"), 0)
     finished_at = _safe_int(latest.get("lastCountChangeAt"), started_at)
@@ -659,7 +955,7 @@ def _source_success_rate(source: str, jobs: list[dict[str, Any]]) -> dict[str, A
 def _build_diagnostics(
     *,
     total: int,
-    counts: dict[str, int],
+    counts: dict[str, Any],
     services: dict[str, Any],
     jobs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -686,9 +982,11 @@ def _build_diagnostics(
         reason = services.get("qwen", {}).get("reason") or "AI-анализ PDF и русские выводы могут быть недоступны."
         add("warning", "Qwen не готов", str(reason), "Настройки", "/settings")
     if services.get("rag", {}).get("status") in {"offline", "unknown"}:
-        add("warning", "RAG-индекс не подтверждён", "Вопросы по базе и RAG-проекции могут работать неполно.", "RAG", "/rag")
-    elif counts.get("rag_candidates", 0) and counts.get("rag_ready", 0) < counts.get("rag_candidates", 0) * 0.5:
+        add("warning", "RAG-индекс не подтверждён", "Вопросы по базе и RAG-проекции могут работать неполно.", "Векторный поиск", "/search")
+    elif counts.get("rag_ids_status") == "verified" and counts.get("rag_candidates", 0) and counts.get("rag_ready", 0) < counts.get("rag_candidates", 0) * 0.5:
         add("info", "Низкая готовность RAG", f"К RAG готово примерно {counts.get('rag_ready', 0)} из {counts.get('rag_candidates', 0)} кандидатов.", "Векторный поиск", "/search")
+    elif counts.get("rag_ids_status") == "unknown":
+        add("warning", "RAG-индекс не удалось проверить", "Сервис отвечает, но dashboard не смог прочитать paper_id из индекса. Не запускайте пересборку только по этому признаку.", "Векторный поиск", "/search")
 
     missing_full_text = max(0, total - counts.get("with_full_text", 0))
     if total and missing_full_text:
@@ -713,6 +1011,17 @@ def _build_diagnostics(
             "error",
             f"Последняя ошибка парсинга: {latest.get('source') or 'source'}",
             _job_error(latest) or f"Задача {latest.get('jobId')} завершилась ошибкой.",
+            "Подробнее",
+            "/jobs",
+        )
+
+    partial_jobs = [job for job in jobs if _job_status(job) == "partial"]
+    if partial_jobs:
+        latest = partial_jobs[0]
+        add(
+            "warning",
+            f"Задача завершилась с ошибками: {latest.get('source') or 'source'}",
+            _job_error(latest) or f"Задача {latest.get('jobId')} завершена частично. Проверьте детали в статусе задач.",
             "Подробнее",
             "/jobs",
         )
@@ -797,24 +1106,48 @@ async def _build_dashboard_overview(db: AsyncSession, timezone_offset_minutes: i
 
 
 
-    vector_indexed_ids, rag_indexed_ids = await asyncio.gather(
+    vector_check, rag_check = await asyncio.gather(
         _get_vector_indexed_paper_ids(),
         _get_rag_indexed_paper_ids(),
     )
-    embedding_ids = await _select_paper_ids(db, embedding_expr) if vector_indexed_ids else set()
-    rag_candidate_ids = await _select_paper_ids(db, rag_candidate_expr) if rag_indexed_ids else set()
+    vector_indexed_ids, vector_ids_ok, vector_ids_error = vector_check
+    rag_indexed_ids, rag_ids_ok, rag_ids_error = rag_check
 
-    counts["vector_indexed"] = len(embedding_ids & vector_indexed_ids)
-    counts["rag_ready"] = len(rag_candidate_ids & rag_indexed_ids)
-    counts["rag_indexed"] = len(rag_indexed_ids)
-    counts["vector_index_records"] = len(vector_indexed_ids)
+    if vector_ids_ok:
+        embedding_ids = await _select_paper_ids(db, embedding_expr)
+        counts["vector_indexed"] = len(embedding_ids & vector_indexed_ids)
+        counts["vector_index_records"] = len(vector_indexed_ids)
+        counts["vector_ids_status"] = "verified"
+        if isinstance(services.get("vector"), dict):
+            services["vector"]["ids_status"] = "verified"
+    else:
+        counts["vector_indexed"] = 0
+        counts["vector_index_records"] = _safe_int(services.get("vector", {}).get("indexed"), 0)
+        counts["vector_ids_status"] = "unknown"
+        if isinstance(services.get("vector"), dict):
+            services["vector"]["ids_status"] = "unknown"
+            services["vector"]["reason"] = vector_ids_error or services["vector"].get("reason")
+
+    if rag_ids_ok:
+        rag_candidate_ids = await _select_paper_ids(db, rag_candidate_expr)
+        counts["rag_ready"] = len(rag_candidate_ids & rag_indexed_ids)
+        counts["rag_indexed"] = len(rag_indexed_ids)
+        counts["rag_ids_status"] = "verified"
+    else:
+        counts["rag_ready"] = 0
+        counts["rag_indexed"] = _safe_int(services.get("rag", {}).get("indexed"), 0)
+        counts["rag_ids_status"] = "unknown"
+
     if isinstance(services.get("rag"), dict):
         rag_service = services["rag"]
-        rag_gap = max(0, counts["rag_candidates"] - counts["rag_ready"])
+        rag_service["ids_status"] = counts["rag_ids_status"]
         rag_service["candidates"] = counts["rag_candidates"]
         rag_service["ready"] = counts["rag_ready"]
-        rag_service["gap"] = rag_gap
-        if rag_service.get("status") == "online":
+        rag_service["gap"] = max(0, counts["rag_candidates"] - counts["rag_ready"]) if rag_ids_ok else None
+        if not rag_ids_ok:
+            rag_service["index_status"] = "unknown"
+            rag_service["reason"] = rag_ids_error or rag_service.get("reason")
+        elif rag_service.get("status") == "online":
             rag_service["index_status"] = "ready" if counts["rag_ready"] > 0 else ("empty" if counts["rag_candidates"] > 0 else "not_applicable")
 
     parser_settings = await SystemSettingsService(db).get_parser_settings()
@@ -842,8 +1175,7 @@ async def _build_dashboard_overview(db: AsyncSession, timezone_offset_minutes: i
         for row in source_rows
     }
 
-    raw_jobs = await asyncio.to_thread(list_parse_jobs, 50)
-    raw_jobs = [job for job in raw_jobs if not _is_placeholder_job_id(job.get("jobId"))]
+    raw_jobs = await _load_synced_parse_jobs(50)
     latest_job_by_source: dict[str, dict[str, Any]] = {}
     latest_all_job: dict[str, Any] | None = None
     for job in raw_jobs:
@@ -861,7 +1193,7 @@ async def _build_dashboard_overview(db: AsyncSession, timezone_offset_minutes: i
     sources = []
     for source in PAPER_SOURCES:
         stats = source_stats.get(source, {})
-        latest_job = latest_job_by_source.get(source) or latest_all_job
+        latest_job = latest_job_by_source.get(source) or _all_job_for_source(latest_all_job, source)
         rate = _source_success_rate(source, raw_jobs)
         sources.append(
             {
@@ -883,7 +1215,7 @@ async def _build_dashboard_overview(db: AsyncSession, timezone_offset_minutes: i
             }
         )
 
-    jobs_payload = await get_dashboard_jobs(limit=20)
+    jobs_payload = _jobs_payload_from_synced_jobs(raw_jobs, limit=20)
     normalized_jobs = jobs_payload["jobs"]
     diagnostics = _build_diagnostics(total=total, counts=counts, services=services, jobs=raw_jobs)
 
@@ -894,9 +1226,9 @@ async def _build_dashboard_overview(db: AsyncSession, timezone_offset_minutes: i
             _percent(counts["with_full_text"], total),
             _percent(counts["with_embeddings"], total),
         ])
-    if counts["with_embeddings"] > 0:
+    if counts["with_embeddings"] > 0 and counts.get("vector_ids_status") == "verified":
         quality_components.append(_percent(counts["vector_indexed"], counts["with_embeddings"]))
-    if counts["rag_candidates"] > 0:
+    if counts["rag_candidates"] > 0 and counts.get("rag_ids_status") == "verified":
         quality_components.append(_percent(counts["rag_ready"], counts["rag_candidates"]))
     quality_percent = round(sum(quality_components) / len(quality_components), 1) if quality_components else 0.0
 
@@ -911,8 +1243,8 @@ async def _build_dashboard_overview(db: AsyncSession, timezone_offset_minutes: i
             "content_parts_percent": _percent(counts["with_content_parts"], total),
             "content_ready_percent": _percent(counts["content_ready"], total),
             "embedding_percent": _percent(counts["with_embeddings"], total),
-            "vector_percent": _percent(counts["vector_indexed"], counts["with_embeddings"]),
-            "rag_percent": _percent(counts["rag_ready"], counts["rag_candidates"]),
+            "vector_percent": _percent(counts["vector_indexed"], counts["with_embeddings"]) if counts.get("vector_ids_status") == "verified" else 0.0,
+            "rag_percent": _percent(counts["rag_ready"], counts["rag_candidates"]) if counts.get("rag_ids_status") == "verified" else 0.0,
             "qwen_percent": _percent(counts["qwen_ready"], total),
             "quality_percent": quality_percent,
         },
@@ -929,7 +1261,7 @@ async def _build_dashboard_overview(db: AsyncSession, timezone_offset_minutes: i
     }
 
 
-def _build_recommended_actions(*, counts: dict[str, int], services: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_recommended_actions(*, counts: dict[str, Any], services: dict[str, Any]) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
 
     def add(
@@ -956,7 +1288,7 @@ def _build_recommended_actions(*, counts: dict[str, int], services: dict[str, An
     if services.get("redis", {}).get("status") == "offline":
         add("error", "Запустить Redis", "Без Redis очереди парсинга, обработки контента и Celery будут нестабильны.", "Инструкция", "/celery")
     if services.get("celery", {}).get("status") in {"offline", "unknown", "warning"}:
-        add("warning", "Запустить worker", "Главная видит очередь, но не подтверждает активный Celery worker.", "Worker status", "/jobs")
+        add("warning", "Запустить worker", "Главная видит очередь, но не подтверждает активный Celery worker.", "Статус задач", "/jobs")
     if counts.get("content_queued", 0) > 0:
         add("info", "Проверить обработку контента", f"В очереди или обработке: {counts['content_queued']} документов.", "Открыть задачи", "/jobs")
 
@@ -995,7 +1327,7 @@ def _build_recommended_actions(*, counts: dict[str, int], services: dict[str, An
             {"limit": min(100, counts["processing_errors"]), "pdf_mode": "auto"},
         )
 
-    indexed_gap = max(0, counts.get("with_embeddings", 0) - counts.get("vector_indexed", 0))
+    indexed_gap = max(0, counts.get("with_embeddings", 0) - counts.get("vector_indexed", 0)) if counts.get("vector_ids_status") == "verified" else 0
     if indexed_gap > 0:
         add(
             "warning",
@@ -1007,7 +1339,7 @@ def _build_recommended_actions(*, counts: dict[str, int], services: dict[str, An
             {},
         )
 
-    rag_gap = max(0, counts.get("rag_candidates", 0) - counts.get("rag_ready", 0))
+    rag_gap = max(0, counts.get("rag_candidates", 0) - counts.get("rag_ready", 0)) if counts.get("rag_ids_status") == "verified" else 0
     if rag_gap > 0:
         add(
             "warning",
@@ -1061,7 +1393,7 @@ def _action_pdf_mode(payload: dict[str, Any]) -> str:
     return mode if mode in {"auto", "ai", "mypdf"} else "auto"
 
 
-async def trigger_dashboard_action(action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+async def trigger_dashboard_action(action: str, payload: dict[str, Any] | None = None, *, db: AsyncSession | None = None) -> dict[str, Any]:
     """Validate and enqueue a heavy dashboard action through Celery."""
     payload = payload or {}
     action = str(action or "").strip()
@@ -1070,6 +1402,8 @@ async def trigger_dashboard_action(action: str, payload: dict[str, Any] | None =
 
     invalidate_dashboard_overview_cache()
     spec = DASHBOARD_ACTIONS[action]
+    history_recorded = False
+    parser_settings_for_snapshot: dict[str, Any] | None = None
 
     if action == "process_pdf_backlog":
         from app.tasks.dashboard_actions import process_pdf_backlog_task
@@ -1096,14 +1430,12 @@ async def trigger_dashboard_action(action: str, payload: dict[str, Any] | None =
     elif action == "rebuild_embeddings":
         from app.tasks.dashboard_actions import rebuild_embeddings_task
 
-
         args = [None, _action_source(payload)]
         async_result = rebuild_embeddings_task.apply_async(args=args, queue=settings.CONTENT_QUEUE_NAME)
         source = _action_source(payload) or "dashboard"
         query = spec["query"]
     elif action == "reindex_vector_store":
         from app.tasks.dashboard_actions import reindex_vector_store_task
-
 
         async_result = reindex_vector_store_task.apply_async(args=[None, _action_source(payload)], queue=settings.CONTENT_QUEUE_NAME)
         source = _action_source(payload) or "dashboard"
@@ -1123,45 +1455,130 @@ async def trigger_dashboard_action(action: str, payload: dict[str, Any] | None =
     elif action == "rerun_source":
         from app.tasks.parse_tasks import parse_all_sources_task, parse_papers_task
 
+        if db is None:
+            raise DashboardActionUnavailableError("Для повторного запуска источника нужен доступ к настройкам парсера")
+
+        parser_settings = await SystemSettingsService(db).get_parser_settings()
+        parser_settings_for_snapshot = parser_settings
+        if not parser_settings.get("enabled", True):
+            raise DashboardActionConflictError("Парсинг временно отключён в технических настройках")
+
         query = str(payload.get("query") or "nickel-based superalloys").strip()
         source_payload = str(payload.get("source") or "all").strip() or "all"
         limit = _action_limit(payload, default=25, maximum=100)
         pdf_mode = _action_pdf_mode(payload)
+        enabled_sources = parser_settings.get("enabled_sources") or {}
+        if source_payload != "all" and enabled_sources.get(source_payload, True) is False:
+            raise DashboardActionConflictError(f"Источник {source_payload} отключён в технических настройках")
+
         if source_payload == "all":
-            async_result = parse_all_sources_task.apply_async(
-                kwargs={"limit_per_query": limit, "query": query, "pdf_mode": pdf_mode},
-                queue="celery",
-            )
+            task_name = "app.tasks.parse_tasks.parse_all_sources_task"
+            task_kwargs = {"limit_per_query": limit, "query": query, "pdf_mode": pdf_mode}
+            task_proxy = parse_all_sources_task
+            slot_source = "all"
         else:
-            async_result = parse_papers_task.apply_async(
-                args=[query, limit, source_payload, pdf_mode],
-                queue="celery",
+            task_name = "app.tasks.parse_tasks.parse_papers_task"
+            task_kwargs = {"query": query, "limit": limit, "source": source_payload, "pdf_mode": pdf_mode}
+            task_proxy = parse_papers_task
+            slot_source = source_payload
+
+        slot = _reserve_dashboard_parse_slot(
+            parser_settings=parser_settings,
+            task_name=task_name,
+            source=slot_source,
+            query=query,
+        )
+        reserved_at = int(time.time() * 1000)
+        if not _safe_add_dashboard_job(
+            {
+                "jobId": slot.task_id,
+                "startedAt": reserved_at,
+                "query": query,
+                "source": source_payload,
+                "initialCount": 0,
+                "lastObservedCount": 0,
+                "lastCountChangeAt": reserved_at,
+                "status": "in_progress",
+                "jobType": spec.get("job_type", "parse"),
+                "celeryStatus": {
+                    "task_id": slot.task_id,
+                    "status": "RESERVED",
+                    "state": "RESERVED",
+                    "name": task_name,
+                    "dashboard_action": action,
+                    "job_type": spec.get("job_type", "parse"),
+                    "parse_admission_reserved": True,
+                },
+            }
+        ):
+            release_parse_slot(slot.task_id)
+            raise DashboardActionUnavailableError(
+                "Не удалось записать повторный запуск в историю задач. Celery-задача не поставлена, слот освобождён."
             )
+        history_recorded = True
+        try:
+            async_result = task_proxy.apply_async(kwargs=task_kwargs, task_id=slot.task_id, queue="celery")
+        except Exception as exc:
+            release_parse_slot(slot.task_id)
+            _safe_patch_dashboard_job(
+                slot.task_id,
+                {
+                    "status": "failed",
+                    "celeryStatus": {
+                        "task_id": slot.task_id,
+                        "status": "PUBLISH_FAILED",
+                        "state": "PUBLISH_FAILED",
+                        "error": str(exc)[:1000],
+                        "dashboard_action": action,
+                        "job_type": spec.get("job_type", "parse"),
+                    },
+                },
+            )
+            raise
+
         source = source_payload
+        _safe_patch_dashboard_job(
+            str(async_result.id),
+            {
+                "status": "in_progress",
+                "celeryStatus": {
+                    "task_id": str(async_result.id),
+                    "status": "PENDING",
+                    "state": "PENDING",
+                    "name": task_name,
+                    "dashboard_action": action,
+                    "job_type": spec.get("job_type", "parse"),
+                    "parse_admission_reserved": True,
+                },
+            },
+        )
     else:
         raise ValueError(f"Unsupported dashboard action: {action}")
 
     now_ms = int(time.time() * 1000)
     task_id = str(async_result.id)
-    add_parse_job(
-        {
-            "jobId": task_id,
-            "startedAt": now_ms,
-            "query": query,
-            "source": source,
-            "initialCount": 0,
-            "lastObservedCount": 0,
-            "lastCountChangeAt": now_ms,
-            "status": "in_progress",
-            "celeryStatus": {
-                "task_id": task_id,
-                "status": "PENDING",
-                "state": "PENDING",
-                "name": spec["task"],
-                "dashboard_action": action,
-            },
-        }
-    )
+    if not history_recorded:
+        _safe_add_dashboard_job(
+            {
+                "jobId": task_id,
+                "startedAt": now_ms,
+                "query": query,
+                "source": source,
+                "initialCount": 0,
+                "lastObservedCount": 0,
+                "lastCountChangeAt": now_ms,
+                "status": "in_progress",
+                "jobType": spec.get("job_type", "maintenance"),
+                "celeryStatus": {
+                    "task_id": task_id,
+                    "status": "PENDING",
+                    "state": "PENDING",
+                    "name": spec["task"],
+                    "dashboard_action": action,
+                    "job_type": spec.get("job_type", "maintenance"),
+                },
+            }
+        )
 
     return {
         "action": action,
@@ -1170,4 +1587,11 @@ async def trigger_dashboard_action(action: str, payload: dict[str, Any] | None =
         "status": "queued",
         "source": source,
         "query": query,
+        "job_type": spec.get("job_type", "maintenance"),
+        "parse_admission": (
+            get_parse_admission_snapshot(_max_parallel_parse_jobs(parser_settings_for_snapshot))
+            if parser_settings_for_snapshot is not None
+            else None
+        ),
     }
+

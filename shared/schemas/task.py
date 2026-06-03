@@ -46,8 +46,19 @@ class CeleryTaskStatus(BaseModel):
     total_content_queued: int | None = None
     total_content_skipped: int | None = None
     errors: list[str] | None = None
+    pipeline_error: bool | None = None
+    failed_stage: str | None = None
+    pipeline_error_message: str | None = None
+    stage_errors: list[dict[str, Any]] | None = None
+    final_stage: str | None = None
 
 
     name: str | None = None
     args: list | None = None
     kwargs: dict[str, Any] | None = None
+    child_task_ids: list[str] | None = None
+    children: list[dict[str, Any]] | None = None
+    related_child_statuses: list[dict[str, Any]] | None = None
+    related_task_ids: list[str] | None = None
+    stage_task_ids: dict[str, str] | None = None
+    stage_tasks: list[dict[str, Any]] | None = None

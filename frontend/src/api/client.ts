@@ -28,6 +28,26 @@ function serializeParams(params: Record<string, unknown>): string {
   return searchParams.toString();
 }
 
+
+function extractApiErrorMessage(payload: any): string | null {
+  const detail = payload?.detail ?? payload?.message ?? payload?.error ?? payload?.details;
+
+  if (typeof detail === "string" && detail.trim()) return detail;
+
+  if (detail && typeof detail === "object") {
+    const nested = detail.message ?? detail.error ?? detail.reason ?? detail.detail?.message;
+    const code = detail.code ?? detail.error_code ?? detail.status;
+    if (typeof nested === "string" && nested.trim()) {
+      return code ? `${nested} (${code})` : nested;
+    }
+  }
+
+  const direct = payload?.message ?? payload?.error;
+  if (typeof direct === "string" && direct.trim()) return direct;
+
+  return null;
+}
+
 export const apiClient = axios.create({
   baseURL,
   timeout: 30000,
@@ -138,9 +158,9 @@ apiClient.interceptors.response.use(
     }
 
     const payload = error.response?.data;
-    const detail = payload?.detail ?? payload?.message ?? payload?.error ?? payload?.details;
-    if (detail) {
-      error.message = typeof detail === "string" ? detail : JSON.stringify(detail);
+    const apiMessage = extractApiErrorMessage(payload);
+    if (apiMessage) {
+      error.message = apiMessage;
     }
 
     return Promise.reject(error);

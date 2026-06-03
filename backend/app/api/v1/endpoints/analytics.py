@@ -361,8 +361,9 @@ async def get_keyword_stats(
 
         counter, labels = _count_normalized_items(keyword_values)
         with_keywords = sum(1 for count in per_paper_counts if count > 0)
-        rich_keywords = sum(1 for count in per_paper_counts if count >= 10)
-        sparse_keywords = sum(1 for count in per_paper_counts if 0 < count < 10)
+        papers_with_3_plus = sum(1 for count in per_paper_counts if count >= 3)
+        papers_with_5_plus = sum(1 for count in per_paper_counts if count >= 5)
+        sparse_keywords = sum(1 for count in per_paper_counts if 0 < count < 3)
         keywordless = total - with_keywords
 
         rare_keywords = sum(1 for count in counter.values() if count == 1)
@@ -371,7 +372,13 @@ async def get_keyword_stats(
         return {
             "total_papers": total,
             "papers_with_keywords": with_keywords,
-            "papers_with_10_plus_keywords": rich_keywords,
+            "papers_with_confirmed_keywords": with_keywords,
+            "papers_with_3_plus_keywords": papers_with_3_plus,
+            "papers_with_5_plus_keywords": papers_with_5_plus,
+            "papers_with_sparse_keywords": sparse_keywords,
+
+
+            "papers_with_10_plus_keywords": papers_with_5_plus,
             "papers_with_1_to_9_keywords": sparse_keywords,
             "papers_without_keywords": keywordless,
             "total_keyword_mentions": sum(counter.values()),
@@ -442,11 +449,6 @@ async def get_quality_report(
             (_text_present_expr(PaperModel.abstract), func.length(cast(PaperModel.abstract, String))),
             else_=None,
         )
-        keyword_count_expr = case(
-            (_json_list_present_expr(PaperModel.keywords), 1),
-            else_=0,
-        )
-
         query = select(
             func.count().label("total"),
             _count_if(_text_present_expr(PaperModel.abstract)).label("with_abstract"),
@@ -456,7 +458,6 @@ async def get_quality_report(
             _count_if(_json_list_present_expr(PaperModel.authors)).label("with_authors"),
             _count_if(_json_list_present_expr(PaperModel.embedding)).label("with_embedding"),
             func.coalesce(func.avg(abstract_len_expr), 0).label("avg_abstract_length"),
-            func.coalesce(func.avg(keyword_count_expr), 0).label("avg_keywords_count"),
             func.coalesce(func.avg(score_expr), 0).label("avg_quality"),
             func.coalesce(func.min(score_expr), 0).label("min_quality"),
             func.coalesce(func.max(score_expr), 0).label("max_quality"),
@@ -468,6 +469,17 @@ async def get_quality_report(
         result = await db.execute(query)
         row = result.one()
         total = int(row.total or 0)
+
+        keyword_query = select(PaperModel.keywords)
+        if source and source != "all":
+            keyword_query = keyword_query.where(PaperModel.source == source)
+        keyword_result = await db.execute(keyword_query)
+        keyword_counts: list[int] = []
+        for raw_keywords in keyword_result.scalars().all():
+            normalized = [_normalize_metric_item(item) for item in _as_list(raw_keywords)]
+            normalized = [item for item in normalized if item]
+            keyword_counts.append(len(set(_counter_key(item) for item in normalized)))
+        avg_keywords_count = round(sum(keyword_counts) / total, 2) if total else 0
 
         if not total:
             empty_completeness = {
@@ -502,7 +514,7 @@ async def get_quality_report(
             },
             "averages": {
                 "avg_abstract_length": round(float(row.avg_abstract_length or 0), 2),
-                "avg_keywords_count": round(float(row.avg_keywords_count or 0), 2),
+                "avg_keywords_count": avg_keywords_count,
             },
             "quality_score": {
                 "avg": round(float(row.avg_quality or 0), 2),

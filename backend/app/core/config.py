@@ -130,7 +130,7 @@ class Settings(BaseSettings):
 
 
     QWEN_TOKEN: str | None = None
-    QWEN_MODEL: str = "qwen-coder"
+    QWEN_MODEL: str = "qwen3.6-plus"
     QWEN_USE_STANDALONE: bool = False
     QWEN_THINKING_ENABLED: bool = True
     QWEN_SEARCH_ENABLED: bool = True
@@ -251,10 +251,10 @@ class Settings(BaseSettings):
             if not raw:
                 return default
 
-            # Windows cmd SET syntax may double inner quotes when loading JSON
-            # arrays from .env, for example [""*""] instead of ["*"].
-            # Normalize this before JSON parsing, but keep the original as a
-            # fallback for plain CSV values.
+
+
+
+
             json_candidates = [raw]
             if '""' in raw:
                 json_candidates.append(raw.replace('""', '"'))

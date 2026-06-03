@@ -33,7 +33,10 @@ async def run_analysis(
     db: AsyncSession = Depends(get_db),
 ):
     service = AnalysisPipelineService(db)
-    result = await service.run_analysis(paper_id, user_id=current_user.id)
+    try:
+        result = await service.run_analysis(paper_id, user_id=current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     return {
         "id": result.id,
         "paper_id": result.paper_id,
@@ -79,7 +82,7 @@ async def export_analysis(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        buffer = await export_analysis_to_excel(analysis_id, db)
+        buffer = await export_analysis_to_excel(analysis_id, db, user_id=current_user.id)
         return Response(
             content=buffer.getvalue(),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

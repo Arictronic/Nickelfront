@@ -193,6 +193,14 @@ class PaperBase(BaseModel):
     abstract: str | None = Field(None, description="Аннотация")
     full_text: str | None = Field(None, description="Полный текст статьи")
     keywords: list[str] = Field(default_factory=list, description="Ключевые слова")
+    language_code: str | None = Field(None, description="ISO 639-1 код основного языка документа")
+    language_name: str | None = Field(None, description="Название основного языка документа")
+    language_confidence: float | None = Field(None, ge=0.0, le=1.0, description="Уверенность определения языка")
+    language_source: str | None = Field(None, description="Источник определения языка")
+    available_language_codes: list[str] = Field(default_factory=list, description="Доступные языковые слои текста статьи")
+    translation_status: str | None = Field(None, description="Статус перевода текста статьи")
+    translation_task_id: str | None = Field(None, description="ID Celery задачи перевода текста статьи")
+    translation_error: str | None = Field(None, description="Ошибка перевода текста статьи")
     source: str = Field(..., description="Источник (CORE, arXiv, etc.)")
     source_id: str | None = Field(None, description="ID в источнике")
     canonical_patent_id: str | None = Field(None, description="Canonical cross-source patent identifier")
@@ -215,6 +223,12 @@ class PaperBase(BaseModel):
         "journal",
         "abstract",
         "full_text",
+        "language_code",
+        "language_name",
+        "language_source",
+        "translation_status",
+        "translation_task_id",
+        "translation_error",
         "source",
         "source_id",
         "canonical_patent_id",
@@ -240,7 +254,7 @@ class PaperBase(BaseModel):
     def _normalize_doi(cls, value):
         return _normalize_doi_value(value)
 
-    @field_validator("authors", "keywords", "quality_flags", mode="before")
+    @field_validator("authors", "keywords", "quality_flags", "available_language_codes", mode="before")
     @classmethod
     def _normalize_list_fields(cls, value, info: ValidationInfo):
 
@@ -253,9 +267,9 @@ class PaperBase(BaseModel):
     def _normalize_provenance(cls, value):
         return _coerce_json_dict(value)
 
-    @field_validator("parse_confidence", mode="before")
+    @field_validator("parse_confidence", "language_confidence", mode="before")
     @classmethod
-    def _normalize_parse_confidence(cls, value):
+    def _normalize_confidence(cls, value):
         if value in (None, ""):
             return None
         try:
@@ -300,6 +314,14 @@ class PaperListItem(BaseModel):
     abstract: str | None = None
     full_text: str | None = None
     keywords: list[str] = Field(default_factory=list)
+    language_code: str | None = None
+    language_name: str | None = None
+    language_confidence: float | None = None
+    language_source: str | None = None
+    available_language_codes: list[str] = Field(default_factory=list)
+    translation_status: str | None = None
+    translation_task_id: str | None = None
+    translation_error: str | None = None
     source: str
     source_id: str | None = None
     canonical_patent_id: str | None = None
@@ -324,7 +346,7 @@ class PaperListItem(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    @field_validator("title", "journal", "abstract", "source", "source_id", "canonical_patent_id", "url", "pdf_url", "pdf_local_path", "processing_status", "content_task_id", "processing_error", "summary_ru", "analysis_ru", "translation_ru", "schema_version", mode="before")
+    @field_validator("title", "journal", "abstract", "language_code", "language_name", "language_source", "translation_status", "translation_task_id", "translation_error", "source", "source_id", "canonical_patent_id", "url", "pdf_url", "pdf_local_path", "processing_status", "content_task_id", "processing_error", "summary_ru", "analysis_ru", "translation_ru", "schema_version", mode="before")
     @classmethod
     def _normalize_scalar_text_fields(cls, value, info: ValidationInfo):
         if info.field_name in {"title", "source"} and isinstance(value, str) and value.strip() == "":
@@ -336,7 +358,20 @@ class PaperListItem(BaseModel):
     def _normalize_doi(cls, value):
         return _normalize_doi_value(value)
 
-    @field_validator("authors", "keywords", "quality_flags", mode="before")
+    @field_validator("parse_confidence", "language_confidence", mode="before")
+    @classmethod
+    def _normalize_confidence(cls, value):
+        if value in (None, ""):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if number > 1 and number <= 100:
+            number = number / 100
+        return max(0.0, min(1.0, number))
+
+    @field_validator("authors", "keywords", "quality_flags", "available_language_codes", mode="before")
     @classmethod
     def _normalize_list_fields(cls, value, info: ValidationInfo):
         return _coerce_json_list(value, split_commas=info.field_name != "authors")
@@ -363,6 +398,63 @@ class PaperProcessingStatusInfo(BaseModel):
     label: str
     group: str = "unknown"
     final: bool = False
+    stage: str = "unknown"
+    stage_label: str = "Неизвестный этап"
+
+
+class PaperPipelineStageInfo(BaseModel):
+    """Нормализованное состояние одного этапа content/Qwen pipeline.
+
+    Это вычисляемая API-модель, не поле БД: она разделяет stage-status
+    (skipped/failed/fallback/success) и итоговый статус документа.
+    """
+
+    key: str = Field(..., description="Ключ этапа: pdf, ocr, markdown, ru_analysis, keywords, embedding, final")
+    label: str = Field(..., description="Человекочитаемое название этапа")
+    status: str = Field(default="unknown", description="pending/processing/success/warning/error/skipped/unknown")
+    status_label: str = Field(default="Нет данных", description="Короткое описание состояния этапа")
+    progress: int = Field(default=0, ge=0, le=100, description="Локальный прогресс этапа")
+    final: bool = Field(default=False, description="Этап больше не ожидает работы")
+    enabled: bool | None = Field(default=None, description="Этап включён настройками, если это известно")
+    skipped: bool = Field(default=False, description="Этап осознанно пропущен, а не упал")
+    fallback_used: bool = Field(default=False, description="Этап использовал резервный сценарий")
+    error: str | None = Field(default=None, description="Короткая ошибка этапа")
+    source: str = Field(default="derived", description="Источник вывода: status/content_parts/paper_fields/settings/derived")
+    details: dict = Field(default_factory=dict, description="Компактная диагностика без больших текстов/PDF")
+
+
+class PaperProcessingPipelineStatus(BaseModel):
+    """Сводная модель AI/PDF/Qwen обработки для карточки статьи."""
+
+    aggregate_status: str = Field(default="unknown", description="success/warning/error/processing/pending/unknown")
+    aggregate_label: str = Field(default="Нет данных", description="Краткий итог по всей цепочке")
+    aggregate_progress: int = Field(default=0, ge=0, le=100, description="Агрегированный прогресс")
+    has_errors: bool = False
+    has_warnings: bool = False
+    pdf_stage: PaperPipelineStageInfo
+    ocr_stage: PaperPipelineStageInfo
+    markdown_stage: PaperPipelineStageInfo
+    ru_analysis_stage: PaperPipelineStageInfo
+    keywords_stage: PaperPipelineStageInfo
+    embedding_stage: PaperPipelineStageInfo
+    final_stage: PaperPipelineStageInfo
+    stages: list[PaperPipelineStageInfo] = Field(default_factory=list)
+
+
+class PaperProcessingQualityInfo(BaseModel):
+    """Итоговая оценка качества обработки файла для карточки статьи."""
+
+    mode: str = "unknown"
+    score: float | None = None
+    label: str = "Нет данных обработки файла"
+    basis: str = "Качество появится после завершения обработки PDF и сохранения частей документа."
+    status: str = "unknown"
+    pages_total: int | None = None
+    pages_success: int | None = None
+    pages_failed: int | None = None
+    fallback_used: bool = False
+    requested_mode: str | None = None
+    actual_mode: str | None = None
 
 
 class PaperDetailResponse(BaseModel):
@@ -376,6 +468,30 @@ class PaperDetailResponse(BaseModel):
     paper: Paper
     content_parts: list["PaperContentPart"] = Field(default_factory=list)
     status_info: PaperProcessingStatusInfo
+    processing_quality: PaperProcessingQualityInfo | None = None
+    pipeline_status: PaperProcessingPipelineStatus | None = None
+
+
+class PaperContentPartTranslation(BaseModel):
+    """Переведённый Markdown для одной части статьи."""
+
+    id: int
+    paper_id: int
+    part_id: int
+    language_code: str
+    language_name: str | None = None
+    source_language_code: str | None = None
+    translated_markdown_text: str | None = None
+    status: str = "pending"
+    error: str | None = None
+    qwen_model: str | None = None
+    qwen_prompt_version: str | None = None
+    source_chars: int = 0
+    translated_chars: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PaperContentPart(BaseModel):
@@ -405,6 +521,7 @@ class PaperContentPart(BaseModel):
     extraction_quality_score: float | None = None
     extraction_warnings: list[str] = Field(default_factory=list)
     extraction_metadata: dict = Field(default_factory=dict)
+    translations: list[PaperContentPartTranslation] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -421,6 +538,38 @@ class PaperContentPartRegenerateResponse(BaseModel):
     page_start: int
     page_end: int
     mode: str = "text"
+
+
+class PaperTranslateRequest(BaseModel):
+    """Запрос на перевод Markdown-текста статьи по частям."""
+
+    target_language_code: str = Field(default="ru", min_length=2, max_length=20)
+    target_language_name: str | None = Field(default="Русский", max_length=100)
+    source_layer: str = Field(default="markdown", description="Сейчас поддерживается только markdown")
+    scope: str = Field(default="displayed_pages", description="Переводятся все сохранённые отображаемые части")
+    force: bool = Field(default=False, description="Перегенерировать уже готовый перевод")
+
+    @field_validator("target_language_code", mode="before")
+    @classmethod
+    def _normalize_language_code(cls, value):
+        return (_coerce_text_scalar(value, default="ru") or "ru").strip().lower()
+
+    @field_validator("target_language_name", "source_layer", "scope", mode="before")
+    @classmethod
+    def _normalize_text_fields(cls, value):
+        return _coerce_text_scalar(value)
+
+
+class PaperTranslateResponse(BaseModel):
+    """Ответ постановки перевода статьи в очередь."""
+
+    paper_id: int
+    task_id: str
+    status: str = "queued"
+    target_language_code: str
+    target_language_name: str | None = None
+    parts_total: int
+    parts_ready: int = 0
 
 
 class PaperSearchRequest(BaseModel):
@@ -470,6 +619,14 @@ class FullTextSearchItem(BaseModel):
     abstract: str | None = None
     full_text: str | None = None
     keywords: list[str] = Field(default_factory=list)
+    language_code: str | None = None
+    language_name: str | None = None
+    language_confidence: float | None = None
+    language_source: str | None = None
+    available_language_codes: list[str] = Field(default_factory=list)
+    translation_status: str | None = None
+    translation_task_id: str | None = None
+    translation_error: str | None = None
     source: str
     source_id: str | None = None
     canonical_patent_id: str | None = None
@@ -607,10 +764,42 @@ class QwenMessageRequest(BaseModel):
     file_ids: list[str] = Field(default_factory=list, description="ID файлов для ссылки")
     auto_continue: bool = Field(default=True, description="Авто-продолжение ответов")
 
+    @field_validator("message", mode="before")
+    @classmethod
+    def _strip_message(cls, value: object) -> str:
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("message must not be empty")
+        return text
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def _strip_optional_session_id(cls, value: object) -> str | None:
+        text = str(value or "").strip()
+        return text or None
+
+    @field_validator("file_ids", mode="before")
+    @classmethod
+    def _normalize_file_ids(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("file_ids must be a list")
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            fid = str(item or "").strip()
+            if not fid or fid in seen:
+                continue
+            seen.add(fid)
+            normalized.append(fid)
+        return normalized
+
 
 class QwenMessageResponse(BaseModel):
     """Ответ на сообщение Qwen."""
 
+    status: str = Field(default="ok", description="Статус ответа: ok/error")
     session_id: str = Field(..., description="ID сессии")
     message: str = Field(..., description="Исходное сообщение")
     response: str = Field(..., description="Текст ответа")
@@ -621,6 +810,10 @@ class QwenMessageResponse(BaseModel):
     continue_count: int = Field(default=0, description="Количество продолжений")
     can_continue: bool = Field(default=False, description="Можно ли продолжить")
     auto_continue_performed: bool = Field(default=False, description="Авто-продолжение выполнено")
+    task_id: str | None = Field(None, description="Celery task_id, если запрос шёл через очередь")
+    queued: bool | None = Field(None, description="Признак обработки через Qwen queue")
+    error_code: str | None = Field(None, description="Стабильный код ошибки Qwen")
+    status_code: int | None = Field(None, description="HTTP/provider status code, если доступен")
     error: str | None = Field(None, description="Текст ошибки")
 
 
@@ -628,6 +821,11 @@ class QwenSessionCreateRequest(BaseModel):
     """Запрос на создание сессии."""
 
     title: str | None = Field(default="Новый чат", description="Заголовок сессии")
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _strip_title(cls, value: object) -> str:
+        return str(value or "Новый чат").strip() or "Новый чат"
 
 
 class QwenSessionCreateResponse(BaseModel):
@@ -655,6 +853,14 @@ class QwenRenameRequest(BaseModel):
     """Запрос на переименование сессии."""
 
     title: str = Field(..., min_length=1, max_length=100, description="Новый заголовок")
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _strip_title(cls, value: object) -> str:
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("title must not be empty")
+        return text
 
 
 class QwenRenameResponse(BaseModel):
@@ -684,6 +890,20 @@ class QwenConfigResponse(BaseModel):
     history_recovery_interval_sec: float | None = Field(None, description="Интервал восстановления истории, сек")
     has_token: bool | None = Field(None, description="Настроен ли QWEN_TOKEN")
     has_api_key: bool | None = Field(None, description="Настроен ли QWEN_API_KEY")
+    auth_required: bool | None = Field(None, description="Требуется ли Bearer API key для qwen_service")
+    allow_unauth_without_api_key: bool | None = Field(None, description="Включён ли явный unauth-режим без QWEN_API_KEY")
+    file_metadata_cache_enabled: bool | None = Field(None, description="Включён ли runtime-cache metadata загруженных Qwen файлов")
+    file_metadata_cache_path: str | None = Field(None, description="Путь к runtime-cache metadata загруженных Qwen файлов")
+    file_metadata_cache_entries: int | None = Field(None, description="Количество файловых metadata-записей в qwen_service cache")
+    file_metadata_cache_max_age_days: int | None = Field(None, description="Возраст stale metadata uploaded files для maintenance, дней")
+    session_registry_cache_enabled: bool | None = Field(None, description="Включён ли runtime-cache локального реестра Qwen-сессий")
+    session_registry_cache_path: str | None = Field(None, description="Путь к runtime-cache локального реестра Qwen-сессий")
+    session_registry_cache_entries: int | None = Field(None, description="Количество локальных Qwen-сессий в cache")
+    session_registry_cache_max_age_days: int | None = Field(None, description="Возраст stale локальных Qwen-сессий для maintenance, дней")
+    event_journal_enabled: bool | None = Field(None, description="Включён ли локальный журнал событий qwen_service")
+    event_journal_path: str | None = Field(None, description="Путь к локальному журналу событий qwen_service")
+    event_journal_entries: int | None = Field(None, description="Количество записей в журнале событий qwen_service")
+    event_journal_max_entries: int | None = Field(None, description="Максимум записей в журнале событий qwen_service")
     is_available: bool = Field(..., description="Сервис доступен")
     base_url: str | None = Field(None, description="URL сервиса")
 
@@ -699,6 +919,8 @@ class QwenConfigUpdateRequest(BaseModel):
     stream_retries: int | None = Field(None, ge=0, le=10, description="Retry для нестабильного Qwen SSE stream")
     history_recovery_attempts: int | None = Field(None, ge=1, le=60, description="Попытки восстановления ответа из истории")
     history_recovery_interval_sec: float | None = Field(None, ge=0.2, le=30.0, description="Интервал восстановления истории, сек")
+    file_metadata_cache_max_age_days: int | None = Field(None, ge=1, le=3650, description="Возраст stale metadata uploaded files для maintenance, дней")
+    session_registry_cache_max_age_days: int | None = Field(None, ge=1, le=3650, description="Возраст stale локальных Qwen-сессий для maintenance, дней")
 
 
 class QwenHealthResponse(BaseModel):
@@ -711,3 +933,9 @@ class QwenHealthResponse(BaseModel):
     reason: str | None = Field(None, description="Причина недоступности")
     error_type: str | None = Field(None, description="Тип ошибки проверки здоровья")
     has_token: bool | None = Field(None, description="Загружен ли QWEN_TOKEN в qwen_service")
+    token_configured: bool | None = Field(None, description="Настроен ли QWEN_TOKEN в qwen_service")
+    has_api_key: bool | None = Field(None, description="Настроен ли QWEN_API_KEY в qwen_service")
+    auth_required: bool | None = Field(None, description="Требуется ли Bearer API key")
+    auth_valid_known: bool | None = Field(None, description="Последняя известная валидность Qwen auth")
+    auth_checked_at: float | None = Field(None, description="monotonic-время последней auth-проверки")
+    service_alive: bool | None = Field(None, description="Жив ли HTTP-сервис qwen_service")

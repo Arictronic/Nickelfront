@@ -70,7 +70,6 @@ exit /b %FRONTEND_RC%
 
 :ensure_frontend_deps
 if exist "node_modules\.bin\vite.cmd" exit /b 0
-if exist "node_modules\vite\package.json" exit /b 0
 
 echo [WARN] Vite executable not found in frontend\node_modules.
 echo [INFO] Installing frontend dependencies before starting dev server...
@@ -91,9 +90,9 @@ if errorlevel 1 (
 )
 
 :deps_ok
-if not exist "node_modules\.bin\vite.cmd" if not exist "node_modules\vite\package.json" (
-  echo [ERROR] Frontend dependencies installed, but vite is still missing.
-  echo Check frontend\package.json dependencies/devDependencies.
+if not exist "node_modules\.bin\vite.cmd" (
+  echo [ERROR] Frontend dependencies installed, but node_modules\.bin\vite.cmd is still missing.
+  echo Check frontend\package.json dependencies/devDependencies and reinstall node_modules.
   exit /b 1
 )
 

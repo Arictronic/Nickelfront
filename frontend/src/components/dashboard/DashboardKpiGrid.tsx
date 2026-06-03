@@ -21,7 +21,7 @@ export default function DashboardKpiGrid({ counts, pipeline, jobs }: Props) {
     { label: "Контент-блоки", value: formatNumber(counts.withContentParts), hint: percent(pipeline.contentPartsPercent), tone: "neutral" },
     { label: "Эмбеддинги", value: formatNumber(counts.withEmbeddings), hint: percent(pipeline.embeddingPercent), tone: "success" },
     { label: "Векторный индекс", value: formatNumber(counts.vectorIndexed), hint: `${percent(pipeline.vectorPercent)} от эмбеддингов`, tone: "primary" },
-    { label: "RAG-индексе", value: formatNumber(counts.ragReady), hint: `${percent(pipeline.ragPercent)} кандидатов`, tone: "primary" },
+    { label: "В RAG-индексе", value: formatNumber(counts.ragReady), hint: `${percent(pipeline.ragPercent)} кандидатов`, tone: "primary" },
     { label: "Qwen-анализ", value: formatNumber(counts.qwenReady), hint: percent(pipeline.qwenPercent), tone: "neutral" },
     { label: "Активных задач", value: formatNumber(jobs.active), hint: `очередь: ${formatNumber(jobs.queued)}`, tone: jobs.active ? "warning" : "neutral" },
     { label: "Ошибок обработки", value: formatNumber(counts.processingErrors + jobs.failedRecent), hint: `${formatNumber(counts.contentQueued)} в обработке`, tone: counts.processingErrors || jobs.failedRecent ? "danger" : "success" },

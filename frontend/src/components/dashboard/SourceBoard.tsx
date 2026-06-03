@@ -3,6 +3,7 @@ import type { DashboardSourceStatus } from "../../types/dashboard";
 function statusClass(status: string | null): string {
   if (!status) return "neutral";
   if (["completed", "success", "SUCCESS", "ready", "ok"].includes(status)) return "active";
+  if (["partial", "completed_with_errors", "partial_success", "warning"].includes(status)) return "warning";
   if (["failed", "FAILURE", "error"].includes(status)) return "failed";
   if (["cancelled", "REVOKED", "revoked"].includes(status)) return "cancelled";
   if (["pending", "queued"].includes(status)) return "neutral";
@@ -17,6 +18,10 @@ function statusLabel(status: string | null): string {
     SUCCESS: "успешно",
     ready: "готово",
     ok: "готово",
+    partial: "частично",
+    completed_with_errors: "с ошибками",
+    partial_success: "частично",
+    warning: "с предупреждением",
     failed: "ошибка",
     FAILURE: "ошибка",
     error: "ошибка",

@@ -94,17 +94,17 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    # Prepare alembic_version outside Alembic's migration transaction, then
-    # explicitly commit the implicit SQLAlchemy 2.x transaction opened by the
-    # DDL above. Without this commit PostgreSQL can execute all migration DDL,
-    # print "Running upgrade ...", and then roll everything back when the
-    # connection closes. That is why the backend later saw no users/papers tables.
+
+
+
+
+
     _ensure_version_table_capacity(connection)
     try:
         connection.commit()
     except Exception:
-        # Some dialect/test connections may not expose commit here. Alembic will
-        # still manage the transaction in the usual way for those cases.
+
+
         pass
 
     context.configure(connection=connection, target_metadata=target_metadata)

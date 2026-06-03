@@ -9,7 +9,11 @@ import type {
   PaperContentPart,
   PaperContentPartRegenerateResponse,
   PaperDetailResponse,
+  PaperTranslateResponse,
   PaperProcessingStatusInfo,
+  PaperProcessingQualityInfo,
+  PaperPipelineStageInfo,
+  PaperProcessingPipelineStatus,
   PaperReportData,
   FullTextSearchResult,
   FullTextSearchStats,
@@ -33,6 +37,14 @@ type PaperApiModel = {
   abstract: string | null;
   full_text?: string | null;
   keywords: string[];
+  language_code: string | null;
+  language_name: string | null;
+  language_confidence: number | null;
+  language_source: string | null;
+  available_language_codes?: string[] | null;
+  translation_status?: string | null;
+  translation_task_id?: string | null;
+  translation_error?: string | null;
   source: PaperSource | string;
   source_id: string | null;
   canonical_patent_id: string | null;
@@ -70,14 +82,88 @@ type PaperListResponseApiModel = {
   offset: number;
 };
 
+type PaperProcessingStatusApiModel = {
+  key: string;
+  label: string;
+  group?: string;
+  final?: boolean;
+  stage?: string;
+  stage_label?: string;
+};
+
+type PaperProcessingQualityApiModel = {
+  mode: string;
+  score: number | null;
+  label: string;
+  basis: string;
+  status: string;
+  pages_total?: number | null;
+  pages_success?: number | null;
+  pages_failed?: number | null;
+  fallback_used?: boolean;
+  requested_mode?: string | null;
+  actual_mode?: string | null;
+};
+
+type PaperPipelineStageApiModel = {
+  key: string;
+  label: string;
+  status: string;
+  status_label: string;
+  progress: number;
+  final: boolean;
+  enabled?: boolean | null;
+  skipped?: boolean | null;
+  fallback_used?: boolean | null;
+  error?: string | null;
+  source?: string | null;
+  details?: Record<string, unknown> | null;
+};
+
+type PaperProcessingPipelineApiModel = {
+  aggregate_status: string;
+  aggregate_label: string;
+  aggregate_progress: number;
+  has_errors: boolean;
+  has_warnings: boolean;
+  pdf_stage: PaperPipelineStageApiModel;
+  ocr_stage: PaperPipelineStageApiModel;
+  markdown_stage: PaperPipelineStageApiModel;
+  ru_analysis_stage: PaperPipelineStageApiModel;
+  keywords_stage: PaperPipelineStageApiModel;
+  embedding_stage: PaperPipelineStageApiModel;
+  final_stage: PaperPipelineStageApiModel;
+  stages?: PaperPipelineStageApiModel[] | null;
+};
+
 type PaperDetailResponseApiModel = {
   paper: PaperApiModel;
   content_parts: PaperContentPartApiModel[];
-  status_info: PaperProcessingStatusInfo;
+  status_info: PaperProcessingStatusApiModel;
+  processing_quality?: PaperProcessingQualityApiModel | null;
+  pipeline_status?: PaperProcessingPipelineApiModel | null;
 };
 
 export type PaperListSortBy = "id" | "authors" | "created_at" | "publication_date" | "relevance";
 export type PaperListSortDir = "asc" | "desc";
+
+type PaperContentPartTranslationApiModel = {
+  id: number;
+  paper_id: number;
+  part_id: number;
+  language_code: string;
+  language_name?: string | null;
+  source_language_code?: string | null;
+  translated_markdown_text?: string | null;
+  status: string;
+  error?: string | null;
+  qwen_model?: string | null;
+  qwen_prompt_version?: string | null;
+  source_chars?: number | null;
+  translated_chars?: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
 
 type PaperContentPartApiModel = {
   id: number;
@@ -104,9 +190,104 @@ type PaperContentPartApiModel = {
   extraction_quality_score?: number | null;
   extraction_warnings?: string[] | null;
   extraction_metadata?: Record<string, unknown> | null;
+  translations?: PaperContentPartTranslationApiModel[] | null;
   created_at: string | null;
   updated_at: string | null;
 };
+
+
+function mapProcessingStatusInfo(status: PaperProcessingStatusApiModel | null | undefined): PaperProcessingStatusInfo {
+  return {
+    key: status?.key || "unknown",
+    label: status?.label || status?.key || "Неизвестно",
+    group: status?.group || "unknown",
+    final: Boolean(status?.final),
+    stage: status?.stage || "unknown",
+    stageLabel: status?.stage_label || "Неизвестный этап",
+  };
+}
+
+function mapProcessingQuality(quality: PaperProcessingQualityApiModel | null | undefined): PaperProcessingQualityInfo | null {
+  if (!quality) return null;
+  return {
+    mode: quality.mode,
+    score: quality.score ?? null,
+    label: quality.label,
+    basis: quality.basis,
+    status: quality.status,
+    pagesTotal: quality.pages_total ?? null,
+    pagesSuccess: quality.pages_success ?? null,
+    pagesFailed: quality.pages_failed ?? null,
+    fallbackUsed: Boolean(quality.fallback_used),
+    requestedMode: quality.requested_mode ?? null,
+    actualMode: quality.actual_mode ?? null,
+  };
+}
+
+function mapPipelineStage(stage: PaperPipelineStageApiModel | null | undefined, fallbackKey: string): PaperPipelineStageInfo {
+  return {
+    key: stage?.key || fallbackKey,
+    label: stage?.label || fallbackKey,
+    status: stage?.status || "unknown",
+    statusLabel: stage?.status_label || "Нет данных",
+    progress: Math.max(0, Math.min(100, Number(stage?.progress ?? 0) || 0)),
+    final: Boolean(stage?.final),
+    enabled: stage?.enabled ?? null,
+    skipped: Boolean(stage?.skipped),
+    fallbackUsed: Boolean(stage?.fallback_used),
+    error: stage?.error ?? null,
+    source: stage?.source || "derived",
+    details: stage?.details ?? {},
+  };
+}
+
+function mapProcessingPipelineStatus(pipeline: PaperProcessingPipelineApiModel | null | undefined): PaperProcessingPipelineStatus | null {
+  if (!pipeline) return null;
+  const pdfStage = mapPipelineStage(pipeline.pdf_stage, "pdf");
+  const ocrStage = mapPipelineStage(pipeline.ocr_stage, "ocr");
+  const markdownStage = mapPipelineStage(pipeline.markdown_stage, "markdown");
+  const ruAnalysisStage = mapPipelineStage(pipeline.ru_analysis_stage, "ru_analysis");
+  const keywordsStage = mapPipelineStage(pipeline.keywords_stage, "keywords");
+  const embeddingStage = mapPipelineStage(pipeline.embedding_stage, "embedding");
+  const finalStage = mapPipelineStage(pipeline.final_stage, "final");
+  return {
+    aggregateStatus: pipeline.aggregate_status || "unknown",
+    aggregateLabel: pipeline.aggregate_label || "Нет данных",
+    aggregateProgress: Math.max(0, Math.min(100, Number(pipeline.aggregate_progress ?? 0) || 0)),
+    hasErrors: Boolean(pipeline.has_errors),
+    hasWarnings: Boolean(pipeline.has_warnings),
+    pdfStage,
+    ocrStage,
+    markdownStage,
+    ruAnalysisStage,
+    keywordsStage,
+    embeddingStage,
+    finalStage,
+    stages: Array.isArray(pipeline.stages) && pipeline.stages.length
+      ? pipeline.stages.map((stage) => mapPipelineStage(stage, stage?.key || "stage"))
+      : [pdfStage, ocrStage, markdownStage, ruAnalysisStage, keywordsStage, embeddingStage, finalStage],
+  };
+}
+
+function mapPaperContentPartTranslation(apiTranslation: PaperContentPartTranslationApiModel) {
+  return {
+    id: apiTranslation.id,
+    paperId: apiTranslation.paper_id,
+    partId: apiTranslation.part_id,
+    languageCode: apiTranslation.language_code,
+    languageName: apiTranslation.language_name ?? null,
+    sourceLanguageCode: apiTranslation.source_language_code ?? null,
+    translatedMarkdownText: apiTranslation.translated_markdown_text ?? null,
+    status: apiTranslation.status ?? "pending",
+    error: apiTranslation.error ?? null,
+    qwenModel: apiTranslation.qwen_model ?? null,
+    qwenPromptVersion: apiTranslation.qwen_prompt_version ?? null,
+    sourceChars: apiTranslation.source_chars ?? 0,
+    translatedChars: apiTranslation.translated_chars ?? 0,
+    createdAt: apiTranslation.created_at ?? null,
+    updatedAt: apiTranslation.updated_at ?? null,
+  };
+}
 
 function mapPaperContentPart(
   apiPart: PaperContentPartApiModel,
@@ -138,6 +319,7 @@ function mapPaperContentPart(
       ? apiPart.extraction_warnings
       : [],
     extractionMetadata: apiPart.extraction_metadata ?? null,
+    translations: (apiPart.translations ?? []).map(mapPaperContentPartTranslation),
     createdAt: apiPart.created_at ?? null,
     updatedAt: apiPart.updated_at ?? null,
   };
@@ -165,6 +347,14 @@ function mapPaper(apiPaper: PaperApiModel): Paper {
     keywords: (apiPaper.keywords ?? [])
       .map((k) => stripHtml(k) ?? "")
       .filter(Boolean),
+    languageCode: stripHtml(apiPaper.language_code),
+    languageName: stripHtml(apiPaper.language_name),
+    languageConfidence: apiPaper.language_confidence ?? null,
+    languageSource: stripHtml(apiPaper.language_source),
+    availableLanguageCodes: Array.isArray(apiPaper.available_language_codes) ? apiPaper.available_language_codes.filter(Boolean) : [],
+    translationStatus: apiPaper.translation_status ?? null,
+    translationTaskId: apiPaper.translation_task_id ?? null,
+    translationError: apiPaper.translation_error ?? null,
     source: apiPaper.source,
     sourceId: apiPaper.source_id ?? null,
     canonicalPatentId: apiPaper.canonical_patent_id ?? null,
@@ -215,6 +405,7 @@ export async function getPapersPage(args: {
   dateFrom?: string;
   dateTo?: string;
   processingStatus?: string;
+  translationStatus?: string;
   fullTextOnly?: boolean;
   sortBy?: PaperListSortBy;
   sortDir?: PaperListSortDir;
@@ -230,6 +421,10 @@ export async function getPapersPage(args: {
       processing_status:
         args.processingStatus && args.processingStatus !== "all"
           ? args.processingStatus
+          : undefined,
+      translation_status:
+        args.translationStatus && args.translationStatus !== "all"
+          ? args.translationStatus
           : undefined,
       full_text_only: args.fullTextOnly || undefined,
       sort_by: args.sortBy ?? "created_at",
@@ -278,8 +473,8 @@ export async function getPapersCount(source?: PaperSource | "all") {
 }
 
 export async function getPaperProcessingStatuses() {
-  const { data } = await apiClient.get<PaperProcessingStatusInfo[]>("/papers/statuses");
-  return data ?? [];
+  const { data } = await apiClient.get<PaperProcessingStatusApiModel[]>("/papers/statuses");
+  return (data ?? []).map(mapProcessingStatusInfo);
 }
 
 export async function exportPapersCsv(args: {
@@ -288,6 +483,7 @@ export async function exportPapersCsv(args: {
   dateFrom?: string;
   dateTo?: string;
   processingStatus?: string;
+  translationStatus?: string;
   fullTextOnly?: boolean;
   sortBy?: PaperListSortBy;
   sortDir?: PaperListSortDir;
@@ -303,6 +499,10 @@ export async function exportPapersCsv(args: {
       processing_status:
         args.processingStatus && args.processingStatus !== "all"
           ? args.processingStatus
+          : undefined,
+      translation_status:
+        args.translationStatus && args.translationStatus !== "all"
+          ? args.translationStatus
           : undefined,
       full_text_only: args.fullTextOnly || undefined,
       sort_by: args.sortBy ?? "created_at",
@@ -342,8 +542,29 @@ export async function getPaperDetails(paperId: number): Promise<PaperDetailRespo
   return {
     paper: mapPaper(data.paper),
     contentParts: (data.content_parts ?? []).map(mapPaperContentPart),
-    statusInfo: data.status_info,
+    statusInfo: mapProcessingStatusInfo(data.status_info),
+    processingQuality: mapProcessingQuality(data.processing_quality),
+    pipelineStatus: mapProcessingPipelineStatus(data.pipeline_status),
   };
+}
+
+
+export async function translatePaperText(
+  paperId: number,
+  args?: {
+    targetLanguageCode?: string;
+    targetLanguageName?: string;
+    force?: boolean;
+  },
+): Promise<PaperTranslateResponse> {
+  const { data } = await apiClient.post<PaperTranslateResponse>(`/papers/id/${paperId}/translate`, {
+    target_language_code: args?.targetLanguageCode ?? "ru",
+    target_language_name: args?.targetLanguageName ?? "Русский",
+    source_layer: "markdown",
+    scope: "displayed_pages",
+    force: Boolean(args?.force),
+  });
+  return data;
 }
 
 export function getPaperPdfUrl(paperId: number) {
@@ -560,9 +781,20 @@ export type CeleryTaskStatus = {
   total_content_skipped?: number;
   errors?: string[];
   error?: string;
+  pipeline_error?: boolean;
+  failed_stage?: string;
+  pipeline_error_message?: string;
+  stage_errors?: Record<string, any>[];
+  final_stage?: string;
   name?: string;
   args?: any[];
   kwargs?: Record<string, any>;
+  child_task_ids?: string[];
+  children?: Record<string, any>[];
+  related_child_statuses?: Record<string, any>[];
+  related_task_ids?: string[];
+  stage_task_ids?: Record<string, string>;
+  stage_tasks?: Record<string, any>[];
 };
 
 export async function getCeleryTaskStatus(taskId: string) {
@@ -589,6 +821,7 @@ export type SharedParseJob = {
   status:
     | "in_progress"
     | "completed"
+    | "partial"
     | "cancelled"
     | "failed"
     | "expired"

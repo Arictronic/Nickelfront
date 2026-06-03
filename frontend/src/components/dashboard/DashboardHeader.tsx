@@ -5,9 +5,9 @@ interface Props {
 }
 
 function formatGeneratedAt(value?: string | null): string {
-  if (!value) return "—";
+  if (!value) return "нет данных";
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
+  if (Number.isNaN(date.getTime())) return "нет данных";
   return date.toLocaleString("ru-RU", {
     day: "2-digit",
     month: "2-digit",

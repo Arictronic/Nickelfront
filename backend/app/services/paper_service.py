@@ -6,12 +6,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from loguru import logger
-from sqlalchemy import String, func, literal, or_, select
+from sqlalchemy import String, exists, func, literal, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.models.paper import Paper as PaperModel
+from app.db.models.paper_content_part import PaperContentPart as PaperContentPartModel
 from shared.schemas.paper import Paper as PaperSchema
 from shared.schemas.paper import PaperCreate
 
@@ -52,6 +53,24 @@ def _text_present(column):
     """SQL expression: поле заполнено непустой строкой."""
     return column.isnot(None) & (func.length(func.trim(column)) > 0)
 
+
+def _paper_has_content_part_text_expr():
+    """SQL EXISTS: у статьи есть сохранённые content-parts с raw или AI Markdown текстом."""
+    return exists().where(
+        PaperContentPartModel.paper_id == PaperModel.id,
+        or_(
+            _text_present(PaperContentPartModel.raw_text),
+            _text_present(PaperContentPartModel.markdown_text),
+        ),
+    )
+
+
+def _paper_has_full_text_expr():
+    """Единый признак текста для списка: full_text или сохранённые parts."""
+    return or_(
+        _text_present(PaperModel.full_text),
+        _paper_has_content_part_text_expr(),
+    )
 
 
 
@@ -183,6 +202,14 @@ def _paper_list_columns():
         PaperModel.doi,
         PaperModel.abstract,
         PaperModel.keywords,
+        PaperModel.language_code,
+        PaperModel.language_name,
+        PaperModel.language_confidence,
+        PaperModel.language_source,
+        PaperModel.available_language_codes,
+        PaperModel.translation_status,
+        PaperModel.translation_task_id,
+        PaperModel.translation_error,
         PaperModel.source,
         PaperModel.source_id,
         PaperModel.canonical_patent_id,
@@ -202,7 +229,7 @@ def _paper_list_columns():
         PaperModel.created_at,
         PaperModel.updated_at,
         or_(_text_present(PaperModel.pdf_url), _text_present(PaperModel.pdf_local_path)).label("has_pdf"),
-        _text_present(PaperModel.full_text).label("has_full_text"),
+        _paper_has_full_text_expr().label("has_full_text"),
     )
 
 
@@ -237,6 +264,14 @@ class PaperService:
             "abstract",
             "full_text",
             "keywords",
+            "language_code",
+            "language_name",
+            "language_confidence",
+            "language_source",
+            "available_language_codes",
+            "translation_status",
+            "translation_task_id",
+            "translation_error",
             "url",
             "pdf_url",
             "canonical_patent_id",
@@ -256,6 +291,17 @@ class PaperService:
                 setattr(existing, field_name, new_value)
                 filled_fields.append(field_name)
                 updated = True
+
+        incoming_language_code = str(getattr(paper_data, "language_code", None) or "").strip().lower()
+        current_language_code = str(getattr(existing, "language_code", None) or "").strip().lower()
+        if incoming_language_code and (not current_language_code or current_language_code == "unknown"):
+            for field_name in ("language_code", "language_name", "language_confidence", "language_source"):
+                new_value = getattr(paper_data, field_name, None)
+                if new_value not in (None, "") and getattr(existing, field_name, None) != new_value:
+                    setattr(existing, field_name, new_value)
+                    if field_name not in filled_fields:
+                        filled_fields.append(field_name)
+                    updated = True
 
         merged_provenance = dict(existing.provenance or {})
         incoming_provenance = paper_data.provenance or {}
@@ -338,6 +384,14 @@ class PaperService:
             abstract=paper_data.abstract,
             full_text=paper_data.full_text,
             keywords=paper_data.keywords,
+            language_code=paper_data.language_code,
+            language_name=paper_data.language_name,
+            language_confidence=paper_data.language_confidence,
+            language_source=paper_data.language_source,
+            available_language_codes=paper_data.available_language_codes or [],
+            translation_status=paper_data.translation_status,
+            translation_task_id=paper_data.translation_task_id,
+            translation_error=paper_data.translation_error,
             source=paper_data.source,
             source_id=paper_data.source_id,
             canonical_patent_id=paper_data.canonical_patent_id,
@@ -460,6 +514,7 @@ class PaperService:
         date_from=None,
         date_to=None,
         processing_status: str | None = None,
+        translation_status: str | None = None,
         full_text_only: bool = False,
     ):
         """Общие фильтры списка статей для items и total."""
@@ -491,8 +546,17 @@ class PaperService:
                 )
             )
 
+        translation_status_key = (translation_status or "").strip()
+        if translation_status_key and translation_status_key != "all":
+            stmt = stmt.where(
+                or_(
+                    PaperModel.translation_status == translation_status_key,
+                    PaperModel.translation_status.startswith(f"{translation_status_key}:"),
+                )
+            )
+
         if full_text_only:
-            stmt = stmt.where(_text_present(PaperModel.full_text))
+            stmt = stmt.where(_paper_has_full_text_expr())
 
         return stmt
 
@@ -506,6 +570,7 @@ class PaperService:
         date_from=None,
         date_to=None,
         processing_status: str | None = None,
+        translation_status: str | None = None,
         full_text_only: bool = False,
         sort_by: str = "created_at",
         sort_dir: str = "desc",
@@ -517,6 +582,7 @@ class PaperService:
             "date_from": date_from,
             "date_to": date_to,
             "processing_status": processing_status,
+            "translation_status": translation_status,
             "full_text_only": full_text_only,
         }
 

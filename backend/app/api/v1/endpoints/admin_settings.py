@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, require_admin_user
 from app.db.session import get_db
 from app.services.qwen_client import QwenServiceClient
-from app.services.qwen_test_runner import run_qwen_service_test
+from app.services.qwen_test_runner import run_qwen_service_test, run_qwen_upload_smoke_test
 from app.services.system_settings_service import SystemSettingsService, get_settings_schema
 from shared.schemas.auth import UserResponse
 from shared.schemas.system_settings import (
@@ -48,6 +48,14 @@ def _clear_qwen_token_status_cache() -> None:
 class QwenTestRunRequest(BaseModel):
     chat_count: int = Field(default=5, ge=1, le=50)
     message: str = Field(default="Напиши короткий ответ: OK", min_length=1, max_length=4000)
+
+
+class QwenUploadTestRunRequest(BaseModel):
+    message: str = Field(
+        default="Прочитай прикреплённый TXT-файл и ответь одной короткой фразой: файл получен.",
+        min_length=1,
+        max_length=4000,
+    )
 
 
 def _normalize_qwen_auth_status(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -184,15 +192,30 @@ async def run_qwen_test(
     )
 
 
+@router.post("/qwen/upload-test-run")
+async def run_qwen_upload_test(
+    payload: QwenUploadTestRunRequest,
+    _current_user: UserResponse = Depends(require_admin_user),
+) -> dict[str, Any]:
+    """Admin action: run a real Qwen upload-and-send smoke test with a temporary TXT file."""
+    return await to_thread.run_sync(
+        run_qwen_upload_smoke_test,
+        300.0,
+        payload.message,
+    )
+
+
 @router.post("/qwen/token/update-from-har")
 async def update_qwen_token_from_har(
     har_file: UploadFile = File(...),
     _current_user: UserResponse = Depends(require_admin_user),
 ) -> dict[str, Any]:
-    """Extract the latest Qwen token from uploaded HAR and apply it to qwen_service.
+    """Extract Qwen token/browser-session from uploaded HAR and apply it to qwen_service.
 
-    The HAR file is read in memory only and is not saved. The response never
-    returns the token value, only a short masked preview and source metadata.
+    The HAR must contain the file pipeline requests (/api/v2/files/*), not only
+    a login/chat request. The file is read in memory only and is not saved. The
+    response never returns token/cookie values, only a masked preview and source
+    metadata.
     """
     filename = har_file.filename or ""
     if filename and not filename.lower().endswith(".har"):
@@ -208,9 +231,10 @@ async def update_qwen_token_from_har(
             content,
             filename=filename or "qwen.har",
             validate=True,
+            require_file_api=True,
         )
         if str(update_result.get("status") or "").lower() not in {"ok", "success"}:
-            raise RuntimeError(str(update_result.get("message") or "qwen_service не смог извлечь или применить токен из HAR"))
+            raise RuntimeError(str(update_result.get("message") or "qwen_service не смог извлечь или применить файловую session из HAR"))
 
         status = _normalize_qwen_auth_status(update_result.get("qwen_status") or client.check_active_token())
         return update_result, status
@@ -226,7 +250,11 @@ async def update_qwen_token_from_har(
         "token_preview": update_result.get("token_preview"),
         "token_source": update_result.get("token_source"),
         "qwen_status": status,
-        "message": "Qwen токен обновлён из HAR." if status.get("valid") else "Токен извлечён и установлен, но проверка не прошла.",
+        "message": (
+            "Qwen token/session обновлены из файлового HAR."
+            if status.get("valid")
+            else "Qwen token/session извлечены из файлового HAR и установлены, но проверка токена не прошла."
+        ),
     }
 
 @router.get("/{section}", response_model=SystemSettingsSectionResponse)

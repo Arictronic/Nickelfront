@@ -22,6 +22,7 @@ from app.services.celery_cancel import clear_cancel_flag, is_cancelled
 from app.services.paper_content_service import resolve_pdf_url
 from app.services.paper_service import PaperService
 from app.services.parse_job_history import update_parse_job
+from app.services.parse_admission_service import refresh_parse_slot, release_parse_slot
 from app.services.system_settings_service import get_parser_settings_safe, get_postprocess_settings_safe
 from app.tasks.content_tasks import process_paper_content_task
 from shared.schemas.paper import PaperCreate
@@ -194,34 +195,88 @@ def _first_scalar_text_value(value: Any) -> Any:
         return None
     return value
 
-_CONTENT_PROCESSING_ACTIVE_OR_DONE_STATUSES = {
+_CONTENT_PROCESSING_IN_PROGRESS_STATUSES = {
     "queued_for_content_processing",
     "pdf_pending",
     "downloading_pdf",
     "pdf_downloaded",
-    "pdf_download_failed",
-    "pdf_unavailable",
     "extracting_pdf_text",
     "pdf_parsed",
     "fulltext_fallback_parsed",
-    "fulltext_unavailable",
     "formatting_markdown",
     "digitizing_file",
     "markdown_ready",
-    "markdown_failed",
-    "markdown_skipped",
+    "markdown_partial",
     "analyzing_ru",
     "ru_analysis_ready",
     "ru_analysis_fallback",
     "extracting_keywords",
     "keywords_ready",
-    "keywords_failed",
     "indexing_vector",
-    "embedding_ready",
-    "embedding_skipped",
+}
+
+_CONTENT_PROCESSING_FINAL_OR_SKIP_STATUSES = {
     "ready",
     "ready_with_fallback",
+    "completed",
+    "failed",
+    "pdf_unavailable",
+    "pdf_download_skipped",
+    "pdf_text_skipped",
+    "fulltext_unavailable",
+    "markdown_ready_without_qwen",
+    "markdown_skipped",
+    "ru_analysis_skipped",
+    "keywords_skipped",
+    "embedding_skipped",
+    "qwen_auth_failed",
 }
+
+_CONTENT_PROCESSING_RECOVERABLE_STALE_STATUSES = {
+    "embedding_ready",
+}
+
+_CONTENT_PROCESSING_STALE_SECONDS = max(300, int(os.getenv("NICKELFRONT_CONTENT_STAGE_STALE_SECONDS", "3600") or "3600"))
+_ADMISSION_SLOT_REFRESH_INTERVAL_SECONDS = max(30, int(os.getenv("NICKELFRONT_PARSE_ADMISSION_REFRESH_INTERVAL_SECONDS", "60") or "60"))
+_LAST_ADMISSION_SLOT_REFRESH: dict[str, float] = {}
+
+
+def _paper_stage_age_seconds(paper: Any) -> float | None:
+    updated_at = getattr(paper, "updated_at", None) or getattr(paper, "created_at", None)
+    if not isinstance(updated_at, datetime):
+        return None
+    now = datetime.now(timezone.utc)
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    else:
+        updated_at = updated_at.astimezone(timezone.utc)
+    return max(0.0, (now - updated_at).total_seconds())
+
+
+def _is_stale_processing_stage(paper: Any) -> bool:
+    age_seconds = _paper_stage_age_seconds(paper)
+    if age_seconds is None:
+        return False
+    return age_seconds >= _CONTENT_PROCESSING_STALE_SECONDS
+
+
+def _refresh_parse_slot_now(task_id: str | None) -> None:
+    normalized = str(task_id or "").strip()
+    if not normalized:
+        return
+    _LAST_ADMISSION_SLOT_REFRESH[normalized] = time.monotonic()
+    refresh_parse_slot(normalized)
+
+
+def _refresh_parse_slot_if_needed(task_id: str | None) -> None:
+    normalized = str(task_id or "").strip()
+    if not normalized:
+        return
+    now = time.monotonic()
+    last_seen = _LAST_ADMISSION_SLOT_REFRESH.get(normalized, 0.0)
+    if now - last_seen < _ADMISSION_SLOT_REFRESH_INTERVAL_SECONDS:
+        return
+    _refresh_parse_slot_now(normalized)
 
 
 def _should_queue_content_processing(paper: Any) -> bool:
@@ -229,17 +284,33 @@ def _should_queue_content_processing(paper: Any) -> bool:
 
     Re-parsing the same source can return an existing DB row. Without this guard we
     enqueue expensive PDF/Qwen processing again for papers that are already queued,
-    in progress, or ready.
+    in progress, or ready. Recoverable intermediate stages such as
+    ``embedding_ready`` may be re-queued when they are stale and never reached
+    finalization.
     """
     status = str(getattr(paper, "processing_status", "") or "").strip().lower()
     task_id = str(getattr(paper, "content_task_id", "") or "").strip()
-
     status_key = status.split(":", 1)[0]
 
-    if status_key in _CONTENT_PROCESSING_ACTIVE_OR_DONE_STATUSES:
+    if status_key in _CONTENT_PROCESSING_FINAL_OR_SKIP_STATUSES:
         return False
-    if task_id and status != "failed":
+
+    if status_key in _CONTENT_PROCESSING_RECOVERABLE_STALE_STATUSES:
+        if not task_id or _is_stale_processing_stage(paper):
+            logger.info(
+                "Re-queueing stale recoverable content stage for paper {}: status={}, task_id={}",
+                getattr(paper, "id", None),
+                status_key,
+                task_id or "<empty>",
+            )
+            return True
         return False
+
+    if status_key in _CONTENT_PROCESSING_IN_PROGRESS_STATUSES:
+        return False
+
+    if task_id and status_key != "failed":
+        return bool(_is_stale_processing_stage(paper))
     return True
 
 
@@ -332,6 +403,7 @@ def _safe_update_state(task, state: str, meta: dict[str, Any], task_id: str | No
     try:
         task.update_state(task_id=resolved_task_id, state=state, meta=meta)
         _sync_parse_job_history(resolved_task_id, state, meta)
+        _refresh_parse_slot_if_needed(resolved_task_id)
     except Exception as exc:
         logger.warning(
             "Failed to update parser task state: task_id={}, state={}, error={}",
@@ -913,6 +985,8 @@ def _parse_queries_for_task(
     total_target_new = 0
     total_candidate_limit = 0
     total_examined = 0
+    child_task_ids: list[str] = []
+    child_tasks_preview: list[dict[str, Any]] = []
     refill_exhausted = False
 
     for idx, query in enumerate(queries):
@@ -934,11 +1008,16 @@ def _parse_queries_for_task(
                     "total_content_skipped": total_content_skipped,
                     "total_updated": total_updated,
                     "total_duplicates": total_duplicates,
+                    "child_tasks_count": len(child_task_ids),
+                    "child_task_ids": child_task_ids[:300],
+                    "content_task_ids": child_task_ids[:300],
+                    "child_tasks_preview": child_tasks_preview[:80],
                     "status": f"Обработка запроса {idx + 1}/{total_queries}: '{query}'",
                 },
                 task_id=task_id,
             )
 
+            _refresh_parse_slot_now(task_id)
             result = _run_parse_query_for_task(
                 task,
                 query=query,
@@ -947,6 +1026,7 @@ def _parse_queries_for_task(
                 task_id=task_id,
                 pdf_mode=pdf_mode,
             )
+            _refresh_parse_slot_now(task_id)
             results.append(result)
             total_saved += int(result.get("saved_count", 0) or 0)
             total_content_queued += int(result.get("content_queued_count", 0) or 0)
@@ -956,6 +1036,13 @@ def _parse_queries_for_task(
             total_target_new += int(result.get("target_new_count", limit_per_query) or limit_per_query)
             total_candidate_limit += int(result.get("candidate_limit", limit_per_query) or limit_per_query)
             total_examined += int(result.get("examined_count", 0) or 0)
+            for child_task_id in result.get("child_task_ids", []) or result.get("content_task_ids", []) or []:
+                child_task_id = str(child_task_id or "").strip()
+                if child_task_id and child_task_id not in child_task_ids:
+                    child_task_ids.append(child_task_id)
+            for child_task in result.get("child_tasks_preview", []) or []:
+                if isinstance(child_task, dict):
+                    child_tasks_preview.append({**child_task, "query": query, "source": source})
             refill_exhausted = refill_exhausted or bool(result.get("refill_exhausted", False))
 
             if result.get("status") == "revoked":
@@ -964,6 +1051,10 @@ def _parse_queries_for_task(
         except Exception as e:
             logger.error(f"Ошибка при парсинге запроса '{query}': {e}")
             results.append({"query": query, "error": str(e)})
+
+    errors = [str(item.get("error")) for item in results if isinstance(item, dict) and item.get("error")]
+    result_status = "completed_with_errors" if errors else "completed"
+    status_label = "Обработано с ошибками" if errors else "Все запросы обработаны"
 
     _safe_update_state(
         task,
@@ -988,12 +1079,26 @@ def _parse_queries_for_task(
             "candidate_limit": total_candidate_limit,
             "examined_count": total_examined,
             "refill_exhausted": refill_exhausted,
-            "status": "Все запросы обработаны",
+            "child_tasks_count": len(child_task_ids),
+            "child_task_ids": child_task_ids[:300],
+            "content_task_ids": child_task_ids[:300],
+            "child_tasks_preview": child_tasks_preview[:100],
+            "result_status": result_status,
+            "status_key": result_status,
+            "status_label": status_label,
+            "errors_count": len(errors),
+            "errors": errors,
+            "status": status_label,
         },
         task_id=task_id,
     )
 
     return {
+        "status": result_status,
+        "status_key": result_status,
+        "status_label": status_label,
+        "errors_count": len(errors),
+        "errors": errors,
         "total_queries": total_queries,
         "source": source,
         "pdf_mode": pdf_mode,
@@ -1012,6 +1117,10 @@ def _parse_queries_for_task(
         "candidate_limit": total_candidate_limit,
         "examined_count": total_examined,
         "refill_exhausted": refill_exhausted,
+        "child_tasks_count": len(child_task_ids),
+        "child_task_ids": child_task_ids[:300],
+        "content_task_ids": child_task_ids[:300],
+        "child_tasks_preview": child_tasks_preview[:100],
     }
 
 
@@ -1032,6 +1141,8 @@ def parse_papers_task(
         task_id = _get_task_id(self)
         if task_id:
             clear_cancel_flag(task_id)
+            release_parse_slot(task_id)
+            _LAST_ADMISSION_SLOT_REFRESH.pop(task_id, None)
 
 
 
@@ -1070,6 +1181,8 @@ async def _parse_async(
         "embedded_count": 0,
         "content_queued_count": 0,
         "content_skipped_count": 0,
+        "child_task_ids": [],
+        "child_tasks_preview": [],
         "errors": [],
     }
 
@@ -1091,9 +1204,15 @@ async def _parse_async(
     )
 
     try:
+        _refresh_parse_slot_now(task_id)
         report, papers = await _run_parser_alpha(query=query, limit=candidate_limit, source=source, task=self, task_id=task_id, parser_settings=parser_settings)
+        _refresh_parse_slot_now(task_id)
     except ParserAlphaCancelled:
+        _refresh_parse_slot_now(task_id)
         return _mark_revoked(self, query=query, source=source, current=0, total=limit, task_id=task_id)
+    except Exception:
+        _refresh_parse_slot_now(task_id)
+        raise
 
     stats["found_count"] = int(report.get("raw_count") or len(papers))
     stats["parsed_count"] = len(papers)
@@ -1145,6 +1264,10 @@ async def _parse_async(
                             "duplicate_count": stats["duplicate_count"],
                             "content_queued_count": stats["content_queued_count"],
                             "content_skipped_count": stats["content_skipped_count"],
+                            "child_tasks_count": len(stats.get("child_task_ids") or []),
+                            "child_task_ids": list(stats.get("child_task_ids") or [])[:300],
+                            "content_task_ids": list(stats.get("child_task_ids") or [])[:300],
+                            "child_tasks_preview": list(stats.get("child_tasks_preview") or [])[:50],
                             "status": f"Отбор новых статей: {stats['saved_count']}/{limit} (проверено {stats['examined_count']})...",
                         },
                         task_id=task_id,
@@ -1213,9 +1336,12 @@ async def _parse_async(
                             )
                             final_pdf_url = saved_paper.pdf_url or inferred_pdf_url
 
+                            content_kwargs = {"parse_root_task_id": task_id}
+                            if pdf_mode:
+                                content_kwargs["pdf_mode"] = pdf_mode
                             content_task = process_paper_content_task.apply_async(
                                 args=[saved_paper.id],
-                                kwargs={"pdf_mode": pdf_mode} if pdf_mode else {},
+                                kwargs=content_kwargs,
                                 queue=settings.CONTENT_QUEUE_NAME,
                             )
                             await paper_service.update_paper(
@@ -1225,6 +1351,18 @@ async def _parse_async(
                                 pdf_url=final_pdf_url,
                                 processing_error=None,
                             )
+                            content_task_id = str(getattr(content_task, "id", "") or "").strip()
+                            if content_task_id:
+                                stats.setdefault("child_task_ids", []).append(content_task_id)
+                                stats.setdefault("child_tasks_preview", []).append(
+                                    {
+                                        "paper_id": saved_paper.id,
+                                        "task_id": content_task_id,
+                                        "kind": "content_worker",
+                                        "queue": settings.CONTENT_QUEUE_NAME,
+                                        "title": str(getattr(saved_paper, "title", "") or "")[:160],
+                                    }
+                                )
                             logger.info(
                                 "Queued content pipeline entry: paper_id={}, task_id={}, queue={}",
                                 saved_paper.id,
@@ -1245,11 +1383,26 @@ async def _parse_async(
                 await db.rollback()
 
     stats["refill_exhausted"] = stats["saved_count"] < limit
-    stats["status"] = (
-        "Завершено: набрано нужное количество новых записей"
-        if not stats["refill_exhausted"]
-        else "Завершено: новые кандидаты в доступном окне закончились"
-    )
+    if stats["saved_count"] >= limit:
+        stats["outcome"] = "target_reached"
+        stats["status_reason"] = "target_reached"
+        stats["status"] = "Завершено: набрано нужное количество новых записей"
+    elif stats["parsed_count"] <= 0:
+        stats["outcome"] = "no_candidates"
+        stats["status_reason"] = "source_returned_no_candidates"
+        stats["status"] = "Завершено без новых записей: источник не вернул кандидатов по запросу"
+    elif stats["examined_count"] <= 0:
+        stats["outcome"] = "no_candidates_examined"
+        stats["status_reason"] = "no_candidates_examined"
+        stats["status"] = "Завершено без новых записей: кандидатов для проверки не было"
+    elif stats["duplicate_count"] >= stats["examined_count"] and stats["saved_count"] <= 0 and stats["updated_count"] <= 0:
+        stats["outcome"] = "duplicates_only"
+        stats["status_reason"] = "all_candidates_already_exist"
+        stats["status"] = "Завершено без новых записей: все проверенные кандидаты уже есть в базе"
+    else:
+        stats["outcome"] = "target_not_reached"
+        stats["status_reason"] = "candidate_window_exhausted"
+        stats["status"] = "Завершено частично: цель новых записей не достигнута в текущем окне поиска"
 
     _safe_update_state(
         self,
@@ -1264,12 +1417,20 @@ async def _parse_async(
             "candidate_limit": candidate_limit,
             "examined_count": stats["examined_count"],
             "refill_exhausted": stats["refill_exhausted"],
+            "outcome": stats["outcome"],
+            "status_reason": stats["status_reason"],
+            "found_count": stats["found_count"],
+            "parsed_count": stats["parsed_count"],
             "saved_count": stats["saved_count"],
             "updated_count": stats["updated_count"],
             "duplicate_count": stats["duplicate_count"],
             "embedded_count": stats["embedded_count"],
             "content_queued_count": stats["content_queued_count"],
             "content_skipped_count": stats["content_skipped_count"],
+            "child_tasks_count": len(stats.get("child_task_ids") or []),
+            "child_task_ids": list(stats.get("child_task_ids") or [])[:300],
+            "content_task_ids": list(stats.get("child_task_ids") or [])[:300],
+            "child_tasks_preview": list(stats.get("child_tasks_preview") or [])[:80],
             "status": stats["status"],
         },
         task_id=task_id,
@@ -1316,6 +1477,8 @@ def parse_multiple_queries_task(
         task_id = _get_task_id(self)
         if task_id:
             clear_cancel_flag(task_id)
+            release_parse_slot(task_id)
+            _LAST_ADMISSION_SLOT_REFRESH.pop(task_id, None)
 
 
 @celery_app.task(bind=True)
@@ -1347,6 +1510,8 @@ def parse_all_sources_task(
         source_statuses: dict[str, dict[str, Any]] = {
             src: {
                 "status": "pending",
+                "status_key": "pending",
+                "status_label": "Ожидает",
                 "saved_count": 0,
                 "updated_count": 0,
                 "duplicate_count": 0,
@@ -1365,6 +1530,8 @@ def parse_all_sources_task(
         total_content_skipped = 0
         total_updated = 0
         total_duplicates = 0
+        child_task_ids: list[str] = []
+        child_tasks_preview: list[dict[str, Any]] = []
 
         if queries is not None:
             user_queries = [str(q).strip() for q in queries if str(q).strip()]
@@ -1375,6 +1542,8 @@ def parse_all_sources_task(
 
         for idx, source in enumerate(selected_sources, start=1):
             source_statuses[source]["status"] = "in_progress"
+            source_statuses[source]["status_key"] = "in_progress"
+            source_statuses[source]["status_label"] = "Выполняется"
             _safe_update_state(
                 self,
                 state="STARTED",
@@ -1388,6 +1557,10 @@ def parse_all_sources_task(
                     "total_content_skipped": total_content_skipped,
                     "total_updated": total_updated,
                     "total_duplicates": total_duplicates,
+                    "child_tasks_count": len(child_task_ids),
+                    "child_task_ids": child_task_ids[:300],
+                    "content_task_ids": child_task_ids[:300],
+                    "child_tasks_preview": child_tasks_preview[:100],
                     "sources": source_statuses,
                     "status": f"Парсинг источника {source}...",
                 },
@@ -1396,6 +1569,8 @@ def parse_all_sources_task(
 
             if _is_cancelled(self, task_id):
                 source_statuses[source]["status"] = "revoked"
+                source_statuses[source]["status_key"] = "revoked"
+                source_statuses[source]["status_label"] = "Отменено"
                 return _mark_revoked(self, query="all_sources", source=source, current=idx - 1, total=total_sources, task_id=task_id)
 
             if user_queries:
@@ -1437,9 +1612,23 @@ def parse_all_sources_task(
             source_target_new = int(source_result.get("target_new_count", 0) or 0)
             source_candidate_limit = int(source_result.get("candidate_limit", 0) or 0)
             source_examined = int(source_result.get("examined_count", 0) or 0)
+            source_child_task_ids = [str(item or "").strip() for item in (source_result.get("child_task_ids", []) or source_result.get("content_task_ids", []) or []) if str(item or "").strip()]
+            for child_task_id in source_child_task_ids:
+                if child_task_id not in child_task_ids:
+                    child_task_ids.append(child_task_id)
+            for child_task in source_result.get("child_tasks_preview", []) or []:
+                if isinstance(child_task, dict):
+                    child_tasks_preview.append({**child_task, "source": source})
 
+            source_errors = source_result.get("errors") if isinstance(source_result.get("errors"), list) else []
+            source_errors_count = int(source_result.get("errors_count", 0) or len(source_errors) or 0)
+            raw_source_status = str(source_result.get("status_key") or source_result.get("status") or "completed")
+            if raw_source_status == "completed" and source_errors_count:
+                raw_source_status = "completed_with_errors"
             source_statuses[source] = {
-                "status": str(source_result.get("status") or "completed"),
+                "status": raw_source_status,
+                "status_key": raw_source_status,
+                "status_label": source_result.get("status_label") or ("Обработано с ошибками" if raw_source_status == "completed_with_errors" else "Завершено"),
                 "saved_count": source_saved,
                 "updated_count": source_updated,
                 "duplicate_count": source_duplicates,
@@ -1449,7 +1638,12 @@ def parse_all_sources_task(
                 "candidate_limit": source_candidate_limit,
                 "examined_count": source_examined,
                 "refill_exhausted": bool(source_result.get("refill_exhausted", False)),
-                "error": source_result.get("error"),
+                "errors_count": source_errors_count,
+                "errors": source_errors,
+                "child_tasks_count": len(source_child_task_ids),
+                "child_task_ids": source_child_task_ids[:300],
+                "content_task_ids": source_child_task_ids[:300],
+                "error": source_result.get("error") or (source_errors[0] if source_errors else None),
             }
 
             total_saved += source_saved
@@ -1460,7 +1654,22 @@ def parse_all_sources_task(
 
             if source_result.get("status") == "revoked":
                 source_statuses[source]["status"] = "revoked"
+                source_statuses[source]["status_key"] = "revoked"
+                source_statuses[source]["status_label"] = "Отменено"
                 break
+
+        partial_sources = [
+            src for src, item in source_statuses.items()
+            if str(item.get("status_key") or item.get("status") or "") in {"completed_with_errors", "partial_success", "warning", "partial", "failed"}
+            or int(item.get("errors_count", 0) or 0) > 0
+        ]
+        result_status = "completed_with_errors" if partial_sources else "completed"
+        status_label = "Все источники обработаны с ошибками" if partial_sources else "Все источники обработаны"
+        all_errors = [
+            f"{src}: {item.get('error')}"
+            for src, item in source_statuses.items()
+            if item.get("error")
+        ]
 
         _safe_update_state(
             self,
@@ -1480,7 +1689,18 @@ def parse_all_sources_task(
                 "total_duplicates": total_duplicates,
                 "duplicate_count": total_duplicates,
                 "sources": source_statuses,
-                "status": "Все источники обработаны",
+                "sources_status": source_statuses,
+                "child_tasks_count": len(child_task_ids),
+                "child_task_ids": child_task_ids[:300],
+                "content_task_ids": child_task_ids[:300],
+                "child_tasks_preview": child_tasks_preview[:120],
+                "result_status": result_status,
+                "status_key": result_status,
+                "status_label": status_label,
+                "partial_sources": partial_sources,
+                "errors_count": len(all_errors),
+                "errors": all_errors,
+                "status": status_label,
             },
             task_id=task_id,
         )
@@ -1488,10 +1708,20 @@ def parse_all_sources_task(
         legacy_core = results_by_source.get("CORE", {"total_saved": 0, "results": []})
         legacy_arxiv = results_by_source.get("arXiv", {"total_saved": 0, "results": []})
         return {
+            "status": result_status,
+            "status_key": result_status,
+            "status_label": status_label,
+            "partial_sources": partial_sources,
+            "errors_count": len(all_errors),
+            "errors": all_errors,
             "core": legacy_core,
             "arxiv": legacy_arxiv,
             "sources": results_by_source,
             "sources_status": source_statuses,
+            "child_tasks_count": len(child_task_ids),
+            "child_task_ids": child_task_ids[:300],
+            "content_task_ids": child_task_ids[:300],
+            "child_tasks_preview": child_tasks_preview[:120],
             "total_saved": total_saved,
             "saved_count": total_saved,
             "total_content_queued": total_content_queued,
@@ -1507,3 +1737,5 @@ def parse_all_sources_task(
         task_id = _get_task_id(self)
         if task_id:
             clear_cancel_flag(task_id)
+            release_parse_slot(task_id)
+            _LAST_ADMISSION_SLOT_REFRESH.pop(task_id, None)

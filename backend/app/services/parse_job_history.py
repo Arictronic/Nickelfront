@@ -9,11 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+from app.services import task_lifecycle_status as lifecycle
 
 _LOCK = threading.Lock()
 _HISTORY_PATH = Path(settings.resolve_path("data/parse_jobs.json"))
 _MAX_JOBS = 100
-_ALLOWED_STATUSES = {"in_progress", "completed", "cancelled", "failed", "expired"}
+_ALLOWED_STATUSES = {"in_progress", "completed", "partial", "cancelled", "failed", "expired"}
+PARTIAL_RESULT_STATUSES = {"completed_with_errors", "partial_success", "warning", "partial", "stage_failed", "ready_with_fallback"}
+
 _COUNTER_FIELDS = (
     "savedCount",
     "updatedCount",
@@ -34,12 +37,28 @@ def _safe_int(value: Any, fallback: int = 0) -> int:
 
 def _safe_status(value: Any) -> str:
     status = str(value or "in_progress").strip()
+    if status in PARTIAL_RESULT_STATUSES:
+        return "partial"
     return status if status in _ALLOWED_STATUSES else "in_progress"
+
+
+def _result_is_partial(result: Any) -> bool:
+    return lifecycle.result_is_partial(result if isinstance(result, dict) else None)
 
 
 def _normalize_job(job: dict[str, Any]) -> dict[str, Any]:
     started_at = _safe_int(job.get("startedAt"), int(time.time() * 1000))
     initial_count = _safe_int(job.get("initialCount"), 0)
+    celery_status = job.get("celeryStatus")
+    status = _safe_status(job.get("status"))
+    if (
+        status == "completed"
+        and isinstance(celery_status, dict)
+        and str(celery_status.get("status") or "").strip() == "SUCCESS"
+        and _result_is_partial(celery_status.get("result"))
+    ):
+        status = "partial"
+
     normalized: dict[str, Any] = {
         "jobId": str(job.get("jobId") or ""),
         "startedAt": started_at,
@@ -48,16 +67,19 @@ def _normalize_job(job: dict[str, Any]) -> dict[str, Any]:
         "initialCount": initial_count,
         "lastObservedCount": _safe_int(job.get("lastObservedCount"), initial_count),
         "lastCountChangeAt": _safe_int(job.get("lastCountChangeAt"), started_at),
-        "status": _safe_status(job.get("status")),
+        "status": status,
+        "jobType": str(job.get("jobType") or job.get("job_type") or "parse"),
     }
 
     for field in _COUNTER_FIELDS:
         if field in job and job.get(field) is not None:
             normalized[field] = max(0, _safe_int(job.get(field), 0))
 
-    celery_status = job.get("celeryStatus")
     if isinstance(celery_status, dict):
         normalized["celeryStatus"] = celery_status
+
+    if job.get("relatedTaskIds") is not None:
+        normalized["relatedTaskIds"] = job.get("relatedTaskIds")
 
     if job.get("lastPolledAt") is not None:
         normalized["lastPolledAt"] = _safe_int(job.get("lastPolledAt"), 0)
