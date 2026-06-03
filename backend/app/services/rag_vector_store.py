@@ -239,3 +239,53 @@ def get_rag_vector_store() -> RAGVectorStore:
     if _rag_vector_store is None:
         _rag_vector_store = RAGVectorStore()
     return _rag_vector_store
+
+
+def _paper_part_text(part: Any) -> str:
+    return str(part.markdown_text or part.raw_text or "").strip()
+
+
+def rag_part_document(part: Any, paper: Any) -> Document | None:
+    from app.services.pdf_parser.compat import Document
+
+    text = _paper_part_text(part)
+    if not text:
+        return None
+    title = str(paper.title or f"Paper #{paper.id}").strip()
+    metadata = {
+        "paper_id": int(paper.id),
+        "part_index": int(part.part_index or 0),
+        "title": title[:500],
+        "source": paper.source or "unknown",
+        "doi": paper.doi,
+        "journal": paper.journal,
+        "page_start": int(part.page_start or 0),
+        "page_end": int(part.page_end or 0),
+        "content_type": part.content_type or "body",
+        "section_title": part.section_title,
+        "rag_source": "paper_content_parts",
+    }
+    return Document(page_content=f"{title}\n\n{text}", metadata={k: v for k, v in metadata.items() if v not in (None, "")})
+
+
+def rag_paper_document(paper: Any) -> Document | None:
+    from app.services.pdf_parser.compat import Document
+
+    chunks = [str(paper.title or "").strip()]
+    if paper.abstract and str(paper.abstract).strip():
+        chunks.append(str(paper.abstract).strip())
+    if paper.full_text and str(paper.full_text).strip():
+        chunks.append(str(paper.full_text).strip())
+    text = "\n\n".join(chunk for chunk in chunks if chunk)
+    if not text:
+        return None
+    metadata = {
+        "paper_id": int(paper.id),
+        "part_index": 0,
+        "title": str(paper.title or f"Paper #{paper.id}")[:500],
+        "source": paper.source or "unknown",
+        "doi": paper.doi,
+        "journal": paper.journal,
+        "rag_source": "paper_full_text" if paper.full_text else "paper_abstract",
+    }
+    return Document(page_content=text, metadata={k: v for k, v in metadata.items() if v not in (None, "")})

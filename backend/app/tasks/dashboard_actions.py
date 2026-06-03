@@ -19,7 +19,7 @@ from app.db.models.paper_content_part import PaperContentPart
 from app.db.session import async_session_maker
 from app.services.paper_service import PaperService
 from app.services.vector_service import get_vector_service
-from app.services.pdf_parser.compat import Document
+from app.services.rag_vector_store import rag_part_document, rag_paper_document
 from app.tasks.async_runner import run_async
 from app.tasks.celery_app import celery_app
 from app.tasks.content_tasks import build_embedding_task, process_paper_content_task
@@ -397,50 +397,7 @@ def rebuild_vector_store_full_task(self, source: str | None = None) -> dict[str,
     return run_async(_sync_vector_store_async(self, source=source, clear_first=True))
 
 
-def _paper_part_text(part: PaperContentPart) -> str:
-    return str(part.markdown_text or part.raw_text or "").strip()
 
-
-def _rag_part_document(part: PaperContentPart, paper: PaperModel) -> Document | None:
-    text = _paper_part_text(part)
-    if not text:
-        return None
-    title = str(paper.title or f"Paper #{paper.id}").strip()
-    metadata = {
-        "paper_id": int(paper.id),
-        "part_index": int(part.part_index or 0),
-        "title": title[:500],
-        "source": paper.source or "unknown",
-        "doi": paper.doi,
-        "journal": paper.journal,
-        "page_start": int(part.page_start or 0),
-        "page_end": int(part.page_end or 0),
-        "content_type": part.content_type or "body",
-        "section_title": part.section_title,
-        "rag_source": "paper_content_parts",
-    }
-    return Document(page_content=f"{title}\n\n{text}", metadata={k: v for k, v in metadata.items() if v not in (None, "")})
-
-
-def _rag_paper_document(paper: PaperModel) -> Document | None:
-    chunks = [str(paper.title or "").strip()]
-    if paper.abstract and str(paper.abstract).strip():
-        chunks.append(str(paper.abstract).strip())
-    if paper.full_text and str(paper.full_text).strip():
-        chunks.append(str(paper.full_text).strip())
-    text = "\n\n".join(chunk for chunk in chunks if chunk)
-    if not text:
-        return None
-    metadata = {
-        "paper_id": int(paper.id),
-        "part_index": 0,
-        "title": str(paper.title or f"Paper #{paper.id}")[:500],
-        "source": paper.source or "unknown",
-        "doi": paper.doi,
-        "journal": paper.journal,
-        "rag_source": "paper_full_text" if paper.full_text else "paper_abstract",
-    }
-    return Document(page_content=text, metadata={k: v for k, v in metadata.items() if v not in (None, "")})
 
 
 async def _rebuild_rag_index_async(task_self: Any) -> dict[str, Any]:
@@ -494,7 +451,7 @@ async def _rebuild_rag_index_async(task_self: Any) -> dict[str, Any]:
             if not rows:
                 break
             last_part_id = int(rows[-1][0].id)
-            documents = [doc for part, paper in rows if (doc := _rag_part_document(part, paper)) is not None]
+            documents = [doc for part, paper in rows if (doc := rag_part_document(part, paper)) is not None]
             _safe_update_state(
                 task_self,
                 "PROGRESS",
@@ -538,7 +495,7 @@ async def _rebuild_rag_index_async(task_self: Any) -> dict[str, Any]:
                 break
             last_paper_id = int(papers[-1].id)
             processed_fallback += len(papers)
-            documents = [doc for paper in papers if (doc := _rag_paper_document(paper)) is not None]
+            documents = [doc for paper in papers if (doc := rag_paper_document(paper)) is not None]
             _safe_update_state(
                 task_self,
                 "PROGRESS",

@@ -1282,6 +1282,29 @@ async def _finalize_paper_processing_async(
             error = None
 
         await _set_stage(paper_service, paper_id, final_stage, task_id=task_id, error=error)
+
+        # RAG: индексация контента статьи после полной обработки
+        if settings.RAG_ENABLED:
+            try:
+                from app.services.rag_vector_store import get_rag_vector_store, rag_part_document, rag_paper_document
+
+                rag_store = get_rag_vector_store()
+                rag_docs = []
+                part_service = PaperContentPartService(db)
+                parts = await part_service.list_embedding_parts(paper_id)
+                for part in parts:
+                    doc = rag_part_document(part, paper)
+                    if doc:
+                        rag_docs.append(doc)
+                if not rag_docs:
+                    doc = rag_paper_document(paper)
+                    if doc:
+                        rag_docs.append(doc)
+                if rag_docs:
+                    await asyncio.to_thread(rag_store.add_documents, rag_docs)
+            except Exception as exc:
+                logger.warning("Failed to index paper {} into RAG: {}", paper_id, exc)
+
         logger.info(
             "Content pipeline finished: paper_id={}, final_stage={}, embedded={}, qwen_markdown={}, qwen_analysis={}, qwen_keywords={}",
             paper_id,

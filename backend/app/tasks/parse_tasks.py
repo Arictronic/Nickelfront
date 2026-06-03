@@ -1402,6 +1402,19 @@ async def _parse_async(
                 was_updated_existing = bool(getattr(saved_paper, "_nickelfront_updated", False))
                 if was_created:
                     stats["saved_count"] += 1
+
+                    # RAG: индексация новой статьи сразу после парсинга
+                    if settings.RAG_ENABLED:
+                        try:
+                            from app.services.rag_vector_store import get_rag_vector_store, rag_paper_document
+
+                            rag_store = get_rag_vector_store()
+                            doc = rag_paper_document(saved_paper)
+                            if doc:
+                                await asyncio.to_thread(rag_store.add_documents, [doc])
+                        except Exception as exc:
+                            logger.warning("Failed to index new paper {} into RAG: {}", saved_paper.id, exc)
+
                 elif was_updated_existing:
                     stats["updated_count"] += 1
                 else:
