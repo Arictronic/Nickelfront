@@ -896,7 +896,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--query", required=True, help="Search query")
     p.add_argument("--limit", type=int, default=20, help="Max number of merged results")
-    p.add_argument("--out", default="data", help="Output directory for JSON files")
+    p.add_argument("--out", default="../logs/runtime/parser_alpha", help="Output directory for JSON files")
     p.add_argument(
         "--max-fallback-sources",
         type=int,

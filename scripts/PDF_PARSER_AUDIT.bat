@@ -21,7 +21,7 @@ echo 4 - Show commands
 echo 0 - Exit
 echo.
 
-set /p ACTION=Choose action: 
+set /p ACTION=Choose action:
 
 if "%ACTION%"=="1" "%PY%" "%VERIFY%"
 if "%ACTION%"=="2" "%PY%" "%AUDIT%" --pdf-dir "%PDF_DIR%" --out-base "%OUT_DIR%" --no-ocr --audit-domain-mode generic --sample-blocks 5 --sample-chars 500 --per-pdf-timeout-sec 180

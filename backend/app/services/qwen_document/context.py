@@ -21,8 +21,8 @@ def page_markdown_heading(page_start: int | None, page_end: int | None) -> str:
 
 def qwen_input_text_for_part(part: Any) -> str:
     """Return sanitized block-aware text for Qwen markdown normalization."""
-    # Lazy import keeps this helper module light and avoids importing the DB
-    # service layer when only payload/context helpers are needed.
+
+
     from app.services.paper_content_part_service import get_qwen_projection_text_for_part
 
     return get_qwen_projection_text_for_part(part)

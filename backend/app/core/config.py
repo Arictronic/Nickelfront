@@ -122,7 +122,7 @@ class Settings(BaseSettings):
     PARSE_QUERIES: str | None = None
 
 
-    CHROMA_DB_PATH: str = "./chroma_db"
+    CHROMA_DB_PATH: str = str(BASE_DIR / "chroma_db")
     EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
     EMBEDDING_DIM: int = 384
     EMBEDDING_LOCAL_ONLY: bool = False
@@ -210,6 +210,17 @@ class Settings(BaseSettings):
     @classmethod
     def _strip_bool_quotes(cls, value):
         return _strip_wrapping_quotes(value)
+
+    @field_validator("CHROMA_DB_PATH", mode="before")
+    @classmethod
+    def _resolve_chroma_path(cls, value):
+        value = _strip_wrapping_quotes(value)
+        if not value:
+            return str(BASE_DIR / "chroma_db")
+        path = Path(str(value))
+        if path.is_absolute():
+            return str(path)
+        return str(BASE_DIR / path)
 
     @field_validator(
         "QWEN_MAX_CONTINUES",

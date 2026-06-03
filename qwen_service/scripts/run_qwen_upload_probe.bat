@@ -1,7 +1,6 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 
-rem Keep the console open even when the script is launched by double-click.
 if /I "%~1"=="--inner" goto :inner
 cmd /k ""%~f0" --inner %*"
 exit /b

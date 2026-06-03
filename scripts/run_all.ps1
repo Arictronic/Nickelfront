@@ -125,7 +125,7 @@ function Start-CmdWindow([string]$Title, [string]$ScriptPath, [string[]]$Argumen
 
 Import-DotEnv (Join-Path $Root '.env')
 
-# Defaults. Empty values from .env are treated as missing.
+
 Set-DefaultEnv 'START_REDIS' '1'
 Set-DefaultEnv 'START_QWEN_SERVICE' '1'
 Set-DefaultEnv 'START_BACKEND' '1'

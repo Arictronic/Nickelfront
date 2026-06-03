@@ -143,8 +143,8 @@ def build_cache_maintenance_payload(*, state: Any, request: Any) -> dict[str, An
             "candidates": int(before["session_registry"].get("entries") or 0),
         }
         if not dry_run:
-            # Keep runtime memory consistent with the persisted registry.  This
-            # does not delete remote provider chats; it only clears local cache.
+
+
             with state.registry_lock:
                 state.active_sessions.clear()
                 state.session_qwen_clients.clear()

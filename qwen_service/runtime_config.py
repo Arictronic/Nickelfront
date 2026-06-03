@@ -16,9 +16,9 @@ from typing import Any
 from dotenv import set_key
 
 
-# Values persisted through /config and token/session endpoints.
-# The third item is the fallback used only when a key is unexpectedly absent from
-# the in-memory config dict. In normal service startup all keys are present.
+
+
+
 _PERSISTED_CONFIG_KEYS: tuple[tuple[str, str, Any, bool], ...] = (
     ("token", "QWEN_TOKEN", "", False),
     ("cookie", "QWEN_COOKIE", "", False),
@@ -29,10 +29,10 @@ _PERSISTED_CONFIG_KEYS: tuple[tuple[str, str, Any, bool], ...] = (
     ("model", "QWEN_MODEL", "qwen3.6-plus", False),
     ("user_agent", "QWEN_USER_AGENT", "", False),
     ("file_upload_mode", "QWEN_FILE_UPLOAD_MODE", "auto", False),
-    ("file_metadata_cache_path", "QWEN_FILE_METADATA_CACHE_PATH", "runtime/qwen_uploaded_files.json", False),
+    ("file_metadata_cache_path", "QWEN_FILE_METADATA_CACHE_PATH", "logs/runtime/qwen/qwen_uploaded_files.json", False),
     ("file_metadata_cache_max_entries", "QWEN_FILE_METADATA_CACHE_MAX_ENTRIES", 500, False),
     ("file_metadata_cache_max_age_days", "QWEN_FILE_METADATA_CACHE_MAX_AGE_DAYS", 7, False),
-    ("session_registry_cache_path", "QWEN_SESSION_REGISTRY_CACHE_PATH", "runtime/qwen_sessions.json", False),
+    ("session_registry_cache_path", "QWEN_SESSION_REGISTRY_CACHE_PATH", "logs/runtime/qwen/qwen_sessions.json", False),
     ("session_registry_cache_max_entries", "QWEN_SESSION_REGISTRY_CACHE_MAX_ENTRIES", 500, False),
     ("session_registry_cache_max_age_days", "QWEN_SESSION_REGISTRY_CACHE_MAX_AGE_DAYS", 30, False),
     ("session_source", "QWEN_SESSION_SOURCE", "har", False),

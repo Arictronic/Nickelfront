@@ -14,7 +14,7 @@ from typing import Any
 try:
     from .defaults import DEFAULT_FILE_UPLOAD_MAX_FILES, DEFAULT_FILE_UPLOAD_MAX_SIZE_MB
     from .upload_validation import file_max_size_bytes, max_files_per_message
-except ImportError:  # pragma: no cover - direct script compatibility
+except ImportError:
     from defaults import DEFAULT_FILE_UPLOAD_MAX_FILES, DEFAULT_FILE_UPLOAD_MAX_SIZE_MB
     from upload_validation import file_max_size_bytes, max_files_per_message
 

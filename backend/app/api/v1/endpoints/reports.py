@@ -10,7 +10,7 @@ from app.api.deps import get_current_user
 from app.api.v1.endpoints.error_helpers import format_paper_db_error
 from app.db.session import get_db
 from app.services.paper_service import PaperService
-from app.services.report_service import generate_paper_docx, generate_paper_pdf
+from app.services.report_service import generate_paper_docx, generate_paper_pdf, generate_paper_report
 from shared.schemas.auth import UserResponse
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -31,54 +31,6 @@ def _paper_to_report_dict(paper) -> dict:
         "keywords": paper.keywords or [],
     }
 
-
-def _fallback_paper_report(paper) -> dict:
-    authors = paper.authors or []
-    keywords = paper.keywords or []
-    abstract_len = len(paper.abstract or "")
-    full_text_len = len(paper.full_text or "")
-    score = 0
-    if abstract_len:
-        score += 20
-    if full_text_len:
-        score += 30
-    if keywords:
-        score += 20
-    if paper.doi:
-        score += 15
-    if authors:
-        score += 15
-    completeness = min(100, score)
-    recommendations = []
-    if not abstract_len:
-        recommendations.append("Добавить или извлечь аннотацию статьи.")
-    if not full_text_len:
-        recommendations.append("Загрузить PDF или полный текст для анализа.")
-    if not keywords:
-        recommendations.append("Выделить ключевые слова для улучшения поиска и метрик.")
-    if not paper.doi:
-        recommendations.append("Проверить DOI/идентификатор источника для дедупликации.")
-
-    from datetime import datetime
-
-    return {
-        "paper_id": paper.id,
-        "title": paper.title,
-        "authors": authors,
-        "journal": paper.journal,
-        "publication_date": str(paper.publication_date) if paper.publication_date else None,
-        "doi": paper.doi,
-        "source": paper.source,
-        "abstract_length": abstract_len,
-        "full_text_length": full_text_len,
-        "keywords_count": len(keywords),
-        "scores": {
-            "quality_score": completeness,
-            "completeness_score": completeness,
-        },
-        "recommendations": recommendations,
-        "generated_at": datetime.now().isoformat(),
-    }
 
 
 async def _load_paper_or_404(paper_id: int, db: AsyncSession):
@@ -187,16 +139,8 @@ async def get_paper_report(
         paper = await _load_paper_or_404(paper_id, db)
 
 
-        try:
-            from analytics.reports import generate_paper_report
-
-            report = await asyncio.to_thread(generate_paper_report, _paper_to_report_dict(paper))
-
-            return report
-
-        except ImportError:
-
-            return _fallback_paper_report(paper)
+        report = await asyncio.to_thread(generate_paper_report, _paper_to_report_dict(paper))
+        return report
 
     except HTTPException:
         raise

@@ -7,7 +7,7 @@ from typing import Any
 
 try:
     from .status_payload import provider_status_payload, session_capability_flags
-except ImportError:  # pragma: no cover - supports direct script imports
+except ImportError:
     from status_payload import provider_status_payload, session_capability_flags
 
 

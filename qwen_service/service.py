@@ -545,9 +545,9 @@ except Exception as exc:
     logging.warning("Cannot initialize Qwen event journal: %s", exc)
 
 
-# Backward-compatible aliases while routes are still kept in service.py.
-# The actual owners now live in runtime_state; future route/runtime modules can
-# receive runtime_state directly instead of a long list of callbacks/globals.
+
+
+
 _session_qwen_clients = runtime_state.session_qwen_clients
 _session_locks = runtime_state.session_locks
 _qwen_registry_lock = runtime_state.registry_lock
@@ -1103,7 +1103,7 @@ async def diagnostics_cache_maintenance(
     """Inspect/prune local runtime caches without external Qwen provider calls.
 
     Default mode is dry-run. Set dry_run=false to actually remove stale local
-    entries from runtime/qwen_uploaded_files.json and runtime/qwen_sessions.json.
+    entries from logs/runtime/qwen/qwen_uploaded_files.json and logs/runtime/qwen/qwen_sessions.json.
     """
     _require_service_token(credentials)
     payload = _cache_maintenance_payload(

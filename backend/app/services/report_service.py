@@ -7,16 +7,8 @@
 """
 
 import io
-import sys
 from datetime import datetime
-from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
-
-
-ROOT_DIR = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(ROOT_DIR))
-sys.path.insert(0, str(ROOT_DIR / "backend"))
-sys.path.insert(0, str(ROOT_DIR / "analytics"))
 
 try:
     from reportlab.lib import colors
@@ -352,6 +344,97 @@ class ReportExporter:
         buffer.close()
 
         return docx_bytes
+
+
+def _list_value(value: object) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, set):
+        return list(value)
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",")]
+        return [item for item in items if item]
+    return []
+
+
+def generate_paper_report(paper: dict) -> dict:
+    authors = _list_value(paper.get("authors"))
+    keywords = _list_value(paper.get("keywords"))
+    abstract = paper.get("abstract") or ""
+    full_text = paper.get("full_text") or ""
+    abstract_length = len(abstract)
+    full_text_length = len(full_text)
+    keywords_count = len(keywords)
+    has_abstract = abstract_length > 0
+    has_full_text = full_text_length > 0
+    has_keywords = keywords_count > 0
+    has_doi = bool(paper.get("doi"))
+    quality_score = 0
+    if abstract_length > 100:
+        quality_score += 20
+    if full_text_length > 1000:
+        quality_score += 30
+    if keywords_count >= 5:
+        quality_score += 20
+    if has_doi:
+        quality_score += 15
+    if authors:
+        quality_score += 15
+    quality_fields = [
+        has_abstract,
+        has_full_text,
+        has_keywords,
+        has_doi,
+        bool(authors),
+        bool(paper.get("journal")),
+        bool(paper.get("publication_date")),
+    ]
+    completeness_score = round((sum(quality_fields) / len(quality_fields)) * 100, 2) if quality_fields else 0
+    recommendations = []
+    if not has_abstract:
+        recommendations.append("Добавить аннотацию")
+    if not has_full_text:
+        recommendations.append("Добавить полный текст")
+    if keywords_count < 5:
+        recommendations.append(f"Добавить ключевые слова (текущее: {keywords_count}, рекомендуется: 5+)")
+    if not has_doi:
+        recommendations.append("Добавить DOI")
+    if not authors:
+        recommendations.append("Добавить авторов")
+    return {
+        "paper_id": paper.get("id"),
+        "title": paper.get("title") or "",
+        "authors": authors,
+        "journal": paper.get("journal"),
+        "publication_date": paper.get("publication_date"),
+        "doi": paper.get("doi"),
+        "source": paper.get("source"),
+        "abstract_length": abstract_length,
+        "full_text_length": full_text_length,
+        "keywords_count": keywords_count,
+        "metrics": {
+            "abstract_length": abstract_length,
+            "full_text_length": full_text_length,
+            "keywords_count": keywords_count,
+            "references_count": 0,
+        },
+        "content_flags": {
+            "has_abstract": has_abstract,
+            "has_full_text": has_full_text,
+            "has_keywords": has_keywords,
+            "has_doi": has_doi,
+        },
+        "scores": {
+            "quality_score": round(min(100, quality_score), 2),
+            "completeness_score": completeness_score,
+        },
+        "recommendations": recommendations,
+        "generated_at": datetime.now().isoformat(),
+    }
 
 
 def generate_paper_pdf(paper: dict) -> bytes:

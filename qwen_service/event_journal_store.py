@@ -16,7 +16,7 @@ from typing import Any
 try:
     from .defaults import DEFAULT_EVENT_JOURNAL_MAX_ENTRIES, DEFAULT_EVENT_JOURNAL_PATH
     from .har_storage import resolve_project_path
-except ImportError:  # pragma: no cover - direct script compatibility
+except ImportError:
     from defaults import DEFAULT_EVENT_JOURNAL_MAX_ENTRIES, DEFAULT_EVENT_JOURNAL_PATH
     from har_storage import resolve_project_path
 
@@ -79,7 +79,7 @@ def _safe_value(value: Any, *, depth: int = 0) -> Any:
         return safe
     if isinstance(value, (list, tuple, set)):
         result = [_safe_value(item, depth=depth + 1) for item in list(value)[:20]]
-        if len(value) > 20:  # type: ignore[arg-type]
+        if len(value) > 20:
             result.append("<truncated>")
         return result
     return str(value)[:500]

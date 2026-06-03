@@ -20,7 +20,7 @@ PARSER_ALPHA_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PARSER_ALPHA_DIR.parent
 BACKEND_DIR = PROJECT_ROOT / "backend"
 
-# Keep project root first so backend imports use the canonical /shared package.
+
 _PATH_ORDER = (PROJECT_ROOT, BACKEND_DIR, PARSER_ALPHA_DIR)
 _path_strings = [str(_path) for _path in _PATH_ORDER if _path.exists()]
 if _path_strings:

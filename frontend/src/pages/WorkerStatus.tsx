@@ -45,9 +45,9 @@ export default function WorkerStatus() {
         const sharedJobs = normalizeJobs(sharedJobsRaw);
         setAllCount(count);
 
-        // После runtime cleanup backend удаляет data/parse_jobs.json и papers.
-        // В этом состоянии локальная browser-история устарела: не надо опрашивать
-        // старые task_id и создавать видимость "живых" задач.
+
+
+
         if (count === 0 && sharedJobs.length === 0) {
           clearParseJobStorage();
           jobsRef.current = [];
@@ -121,7 +121,7 @@ export default function WorkerStatus() {
       }),
     );
 
-    // If user clicked "clear history" while refresh was in-flight, keep list empty.
+
     if (jobsRef.current.length === 0) {
       const total = await getPapersCount("all");
       setAllCount(total);
@@ -138,7 +138,7 @@ export default function WorkerStatus() {
     setLastUpdatedAt(Date.now());
   };
 
-  // Polling статуса задач Celery
+
   useEffect(() => {
     if (!jobsRef.current.some((job) => job.status === "in_progress")) return;
     let cancelled = false;

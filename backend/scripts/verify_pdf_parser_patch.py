@@ -189,16 +189,6 @@ check("parser_alpha/parsers_pkg/pdf_processor.py", [
     "def parse_bytes",
     "def extract_content",
 ])
-check("rag/app/services/parser_service.py", [
-    "CanonicalPDFParser",
-    "without tempfile",
-    "PdfExtractionError",
-    "from backend.app.services.pdf_parser.compat import Document",
-    "def parse_bytes",
-    "def extract_content",
-    "parse_to_structured_documents",
-])
-
 print("Nickelfront PDF parser patch verification")
 print("Expected version: v47_parser_typing_stabilization_full + post-merge invariants")
 print("Project root:", ROOT)
@@ -253,7 +243,6 @@ try:
         "backend/scripts/debug_pdf_extract.py",
         "backend/scripts/verify_pdf_parser_patch.py",
         "parser_alpha/parsers_pkg/pdf_processor.py",
-        "rag/app/services/parser_service.py",
     ]
     for rel in compile_targets:
         py_compile.compile(str(ROOT / rel), doraise=True)
@@ -356,28 +345,6 @@ run_python_check(
     from backend.app.services.pdf_content_parser import PDFParser as BackendPDFParser, pdf_parser as backend_pdf_parser
     assert BackendPDFParser is PublicPDFParser
     assert backend_pdf_parser is pdf_parser
-    print("OK")
-    ''',
-)
-
-run_python_check(
-    "RAG parser_service import without langchain",
-    r'''
-    import builtins
-    real_import = builtins.__import__
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "langchain" or name.startswith("langchain."):
-            raise ModuleNotFoundError("blocked langchain for verify")
-        return real_import(name, globals, locals, fromlist, level)
-    builtins.__import__ = fake_import
-    try:
-        from rag.app.services.parser_service import PDFParser as RagPDFParser, Document
-        parser = RagPDFParser(chunk_size=500, chunk_overlap=50)
-        assert hasattr(Document, "page_content") or Document.__name__ == "Document"
-        assert hasattr(parser, "parse_bytes")
-        assert hasattr(parser, "parse_bytes_to_documents")
-    finally:
-        builtins.__import__ = real_import
     print("OK")
     ''',
 )

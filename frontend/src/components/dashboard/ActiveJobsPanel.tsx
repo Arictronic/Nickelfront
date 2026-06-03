@@ -92,8 +92,8 @@ function parseOutcomeLabel(meta: Record<string, unknown>, docs: ReturnType<typeo
   if (outcome === "duplicates_only" || outcome === "all_candidates_already_exist") return "Все кандидаты уже есть в базе";
   if (outcome === "target_not_reached" || outcome === "candidate_window_exhausted") return "Цель не достигнута в текущем окне поиска";
   if (docs.saved >= docs.target && docs.target > 0) return "Цель выполнена";
-  if (docs.found <= 0 && docs.saved <= 0) return "Источник не вернул кандидатов";
-  if (docs.saved <= 0 && docs.duplicates > 0 && docs.duplicates >= docs.examined) return "Все кандидаты уже есть в базе";
+  if (docs.found <= 0 && docs.parsed <= 0 && docs.examined <= 0 && docs.saved <= 0) return "Источник не вернул кандидатов";
+  if (docs.examined > 0 && docs.saved <= 0 && docs.duplicates > 0 && docs.duplicates >= docs.examined) return "Все кандидаты уже есть в базе";
   if (docs.saved < docs.target && docs.target > 0) return "Цель не достигнута";
   return "Завершено";
 }
@@ -556,8 +556,8 @@ function buildPipelineStageEvents(job: ParseJob, meta: Record<string, unknown>):
 }
 
 function getDocumentSummary(job: ParseJob, meta: Record<string, unknown>) {
-  const found = toNumber(meta.found_count ?? meta.parsed_count, 0);
-  const parsed = toNumber(meta.parsed_count ?? meta.found_count, 0);
+  const found = toNumber(meta.found_count, 0);
+  const parsed = toNumber(meta.parsed_count, 0);
   const saved = toNumber(job.savedCount ?? meta.saved_count ?? meta.total_saved, 0);
   const updated = toNumber(job.updatedCount ?? meta.updated_count ?? meta.total_updated, 0);
   const duplicates = toNumber(job.duplicateCount ?? meta.duplicate_count ?? meta.total_duplicates, 0);
@@ -566,15 +566,28 @@ function getDocumentSummary(job: ParseJob, meta: Record<string, unknown>) {
   const errors = toNumber(meta.errors_count ?? (Array.isArray(meta.errors) ? meta.errors.length : 0), 0);
   const target = toNumber(meta.target_new_count ?? meta.total ?? job.celeryStatus?.total, 0);
   const candidateLimit = toNumber(meta.candidate_limit, 0);
-  const examined = toNumber(meta.examined_count ?? meta.current ?? job.celeryStatus?.current, 0);
+  const examined = toNumber(meta.examined_count, 0);
 
-  const produced = saved + updated + duplicates + skipped;
+  const producedCandidates = saved + updated + duplicates;
   const downstreamTotal = queued + skipped;
-  const naturalTotal = Math.max(target, examined, produced, downstreamTotal, 0);
+  const boundedFound = candidateLimit > 0 && found > 0 ? Math.min(candidateLimit, found) : found;
+  const candidateTotal = parsed > 0 ? parsed : Math.max(boundedFound, candidateLimit, examined, producedCandidates, 0);
+  const checkedCandidates = Math.min(Math.max(examined, producedCandidates), candidateTotal || Math.max(examined, producedCandidates));
   const terminal = isJobTerminal(job);
-  const processed = target > 0 ? saved : terminal ? Math.max(naturalTotal, produced, downstreamTotal) : Math.min(Math.max(produced, examined), naturalTotal || Math.max(produced, examined));
-  const total = target > 0 ? target : Math.max(naturalTotal, processed, produced, downstreamTotal);
-  const percent = target > 0 ? Math.max(0, Math.min(100, Math.round((saved / target) * 100))) : total > 0 ? Math.max(0, Math.min(100, Math.round((processed / total) * 100))) : getParseJobProgressPercent(job);
+  const hasCandidateTelemetry = candidateTotal > 0 || examined > 0 || producedCandidates > 0;
+
+  const fallbackTotal = Math.max(target, downstreamTotal, toNumber(meta.total ?? job.celeryStatus?.total, 0), 0);
+  const fallbackProcessed = Math.max(toNumber(meta.current ?? job.celeryStatus?.current, 0), saved, updated, queued, skipped, 0);
+  const processed = hasCandidateTelemetry ? checkedCandidates : fallbackProcessed;
+  const total = hasCandidateTelemetry ? Math.max(candidateTotal, processed) : fallbackTotal;
+  const rawPercent = total > 0 && processed > 0
+    ? Math.round((Math.min(processed, total) / total) * 100)
+    : getParseJobProgressPercent(job);
+  const percent = terminal
+    ? 100
+    : hasCandidateTelemetry
+      ? Math.max(8, Math.min(95, rawPercent))
+      : Math.max(0, Math.min(95, rawPercent));
 
   return {
     found,
@@ -648,7 +661,7 @@ function buildTimeline(job: ParseJob, meta: Record<string, unknown>, taskIds: st
     {
       key: "search",
       label: "Поиск статей/патентов",
-      description: docs.candidateLimit > 0 ? `Проверено кандидатов: ${docs.examined}/${docs.candidateLimit}` : docs.examined > 0 ? `Проверено кандидатов: ${docs.examined}` : "Ожидание результатов парсера",
+      description: docs.total > 0 ? `Проверено кандидатов: ${Math.min(docs.examined, docs.total)}/${docs.total}` : docs.examined > 0 ? `Проверено кандидатов: ${docs.examined}` : "Ожидание результатов парсера",
       status: searchStatus,
     },
     {
@@ -776,8 +789,6 @@ export default function ActiveJobsPanel({ jobs, expandedJobId, isAdmin, onToggle
             const current = Number(job.celeryStatus?.current ?? meta.current ?? 0) || 0;
             const total = Number(job.celeryStatus?.total ?? meta.total ?? 0) || 0;
             const targetNew = Number(meta.target_new_count ?? total ?? 0) || 0;
-            const examined = Number(meta.examined_count ?? 0) || 0;
-            const candidateLimit = Number(meta.candidate_limit ?? targetNew ?? 0) || 0;
             const elapsed = Number(meta.elapsed_seconds ?? 0) || 0;
             const durationText = formatDuration(elapsed);
             const stage = nonEmptyText(meta.stage_label || meta.stage);
@@ -806,7 +817,13 @@ export default function ActiveJobsPanel({ jobs, expandedJobId, isAdmin, onToggle
             const perSourceRows = Object.entries(sourceDetailsRaw).map(([name, value]) => {
               const item = asRecord(value);
               const targetNew = Number(item.target_new_count || 0) || 0;
+              const candidateLimit = Number(item.candidate_limit || 0) || 0;
+              const found = Number(item.found_count || 0) || 0;
+              const parsed = Number(item.parsed_count || 0) || 0;
               const examined = Number(item.examined_count || 0) || 0;
+              const candidateTotal = parsed > 0
+                ? parsed
+                : Math.max(candidateLimit > 0 && found > 0 ? Math.min(candidateLimit, found) : found, candidateLimit, examined, 0);
               const refillExhausted = Boolean(item.refill_exhausted);
               const error = nonEmptyText(item.error);
               return {
@@ -821,7 +838,7 @@ export default function ActiveJobsPanel({ jobs, expandedJobId, isAdmin, onToggle
                 targetNew,
                 examined,
                 refillExhausted,
-                progressText: targetNew > 0 || examined > 0 ? `пров. ${examined}/${targetNew || "?"} новых` : null,
+                progressText: candidateTotal > 0 || examined > 0 ? `пров. ${examined}/${candidateTotal || "?"} кандид.` : targetNew > 0 ? `цель новых: ${targetNew}` : null,
                 note: error || (refillExhausted ? "новые записи закончились" : null),
               };
             });
@@ -829,13 +846,14 @@ export default function ActiveJobsPanel({ jobs, expandedJobId, isAdmin, onToggle
             const errorsCount = Number(meta.errors_count ?? (Array.isArray(meta.errors) ? meta.errors.length : 0)) || 0;
             const childTasksCount = Number(meta.child_tasks_count ?? (Array.isArray(meta.child_task_ids) ? meta.child_task_ids.length : 0)) || 0;
             const metrics = [
-              { label: "Сохранено", value: savedCount, show: !isParseTask && savedCount > 0 },
+              { label: "Цель новых", value: documentSummary.target, show: isParseTask && documentSummary.target > 0 },
+              { label: "Сохранено", value: savedCount, show: savedCount > 0 },
               { label: "Обновлено", value: updatedCount, show: updatedCount > 0 },
               { label: "Дубликаты", value: duplicates, show: duplicates > 0 },
-              { label: "Очередь PDF", value: queued, show: !isParseTask && queued > 0 },
+              { label: "Очередь PDF", value: queued, show: queued > 0 },
               { label: "Пропущено", value: skipped, show: skipped > 0 },
               { label: "Индексировано", value: indexedCount, show: indexedCount > 0 },
-              { label: "Дочерних задач", value: childTasksCount, show: !isParseTask && childTasksCount > 0 },
+              { label: "Дочерних задач", value: childTasksCount, show: childTasksCount > 0 },
               { label: "Ошибок", value: errorsCount, show: errorsCount > 0 },
             ].filter((item) => item.show);
 
@@ -856,8 +874,8 @@ export default function ActiveJobsPanel({ jobs, expandedJobId, isAdmin, onToggle
                   <span>{progress}%</span>
                 </div>
                 <div className="dashboard-job-doc-progress">
-                  <span>{isParseTask ? "Новые статьи: добавлено из цели" : "Общий прогресс обработки документов"}</span>
-                  <strong>{documentSummary.total > 0 ? `${documentSummary.processed}/${documentSummary.total}` : "—"}</strong>
+                  <span>{isParseTask ? "Проверка кандидатов" : "Общий прогресс обработки документов"}</span>
+                  <strong>{documentSummary.total > 0 ? `${documentSummary.processed}/${documentSummary.total}` : documentSummary.target > 0 ? `цель новых: ${documentSummary.target}` : "—"}</strong>
                 </div>
                 <div className="dashboard-job-metrics">
                   {metrics.map((item) => (
@@ -889,7 +907,7 @@ export default function ActiveJobsPanel({ jobs, expandedJobId, isAdmin, onToggle
                       <div><strong>Обновлено:</strong> {formatDateTime(job.lastCountChangeAt)}</div>
                       {targetNew > 0 && <div><strong>Цель:</strong> добавить {targetNew} новых</div>}
                       {isParseTask && <div><strong>Источник вернул:</strong> {documentSummary.found} кандидатов</div>}
-                      {isParseTask && <div><strong>Проверено:</strong> {examined} из {candidateLimit || documentSummary.found || targetNew} кандидатов</div>}
+                      {isParseTask && <div><strong>Проверено:</strong> {documentSummary.processed} из {documentSummary.total || "?"} кандидатов</div>}
                       {isParseTask && <div><strong>Результат:</strong> новых {savedCount}, обновлено {updatedCount}, дубликатов {duplicates}</div>}
                       {isParseTask && <div><strong>Итог:</strong> {parseOutcome}</div>}
                     </div>

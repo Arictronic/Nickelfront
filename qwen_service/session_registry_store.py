@@ -46,7 +46,7 @@ class QwenSessionRegistryStore:
 
             raw_sessions = payload.get("sessions") if isinstance(payload, dict) else None
             if raw_sessions is None and isinstance(payload, dict):
-                # Diagnostic-friendly shape: {session_id: metadata}
+
                 raw_sessions = payload
             if not isinstance(raw_sessions, dict):
                 return
@@ -304,7 +304,7 @@ def build_qwen_session_registry_store(
     config: dict[str, Any],
     *,
     project_root: str | Path,
-    default_path: str = "runtime/qwen_sessions.json",
+    default_path: str = "logs/runtime/qwen/qwen_sessions.json",
     logger: Any = logging,
 ) -> QwenSessionRegistryStore:
     raw_path = str(config.get("session_registry_cache_path") or default_path).strip() or default_path

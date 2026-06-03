@@ -1,7 +1,7 @@
 """Add content typing metadata to paper_content_parts.
 
 Revision ID: 013_add_content_part_types
-Revises: 012_add_content_part_extraction_metadata
+Revises: 012_content_extract_meta
 Create Date: 2026-05-24
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 revision = "013_add_content_part_types"
-down_revision = "012_add_content_part_extraction_metadata"
+down_revision = "012_content_extract_meta"
 branch_labels = None
 depends_on = None
 

@@ -1142,7 +1142,7 @@ async def _translate_markdown_parts_async(
         qwen_timeout = float(qwen_settings.get("request_timeout_seconds") or settings.QWEN_QUEUE_TIMEOUT)
         client = QwenServiceClient(queue_enabled=False, timeout=qwen_timeout)
 
-        temp_dir = Path(settings.resolve_path("tmp/qwen_article_translations"))
+        temp_dir = Path(settings.resolve_path("logs/run/tmp/qwen_article_translations"))
         temp_dir.mkdir(parents=True, exist_ok=True)
 
         for index, part in enumerate(eligible_parts, start=1):

@@ -43,13 +43,13 @@ export async function getPublicDisplaySettings() {
 }
 
 
-// Lightweight client-side cache for Qwen token status.
-// This endpoint is used by global UI status indicators and settings pages,
-// so without dedupe several mounted components can poll the backend at once.
+
+
+
 const QWEN_TOKEN_STATUS_CACHE_MS = 60_000;
 
 type QwenTokenStatusOptions = {
-  /** Force a real request, for example after manual token update/check. */
+
   force?: boolean;
 };
 

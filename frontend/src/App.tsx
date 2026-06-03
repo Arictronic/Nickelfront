@@ -129,9 +129,9 @@ function SessionBootstrap() {
         if (!active) return;
         const status = error?.response?.status;
 
-        // Backend cleanup removes refresh_tokens. Old browser tokens then become stale.
-        // Clear auth only for explicit auth errors. Network/proxy/backend errors should not
-        // erase the user session just because the backend is still starting.
+
+
+
         if (status === 401 || status === 403) {
           localStorage.removeItem("auth_token");
           localStorage.removeItem("refresh_token");

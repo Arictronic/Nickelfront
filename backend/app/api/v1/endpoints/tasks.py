@@ -337,8 +337,8 @@ async def _enrich_task_info_with_related_children(task_info: dict | None, max_ch
         task_info["related_child_statuses"] = child_statuses[:max_children]
     task_info = _merge_related_task_ids(task_info, discovered)
 
-    # Promote stage metadata to root task_info so frontend does not have to dig
-    # into wrapper.result manually. Prefer the first wrapper payload with stages.
+
+
     for child in child_statuses:
         if not task_info.get("stage_task_ids") and isinstance(child.get("stage_task_ids"), dict):
             task_info["stage_task_ids"] = child.get("stage_task_ids")

@@ -16,7 +16,7 @@ try:
         DEFAULT_SEARCH_ENABLED,
         DEFAULT_THINKING_ENABLED,
     )
-except ImportError:  # pragma: no cover - supports direct script imports
+except ImportError:
     from defaults import (
         DEFAULT_AUTO_CONTINUE_ENABLED,
         DEFAULT_MAX_CONTINUES,

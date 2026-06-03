@@ -101,8 +101,8 @@ COMPACT_CHILD_PAYLOAD_KEYS = {
     "stage_tasks",
     "related_task_ids",
     "child_task_ids",
-    # Soft-fail/finalization contract fields. These are intentionally short and
-    # do not include full text, OCR pages, PDF bytes or markdown bodies.
+
+
     "pipeline_error",
     "failed_stage",
     "first_failed_stage",

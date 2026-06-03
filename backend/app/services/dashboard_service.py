@@ -384,6 +384,34 @@ def _job_counter(job: dict[str, Any], *keys: str) -> int:
     return 0
 
 
+def _job_candidate_scan_total(meta: dict[str, Any]) -> int:
+    parsed = max(0, _safe_int(meta.get("parsed_count"), 0))
+    found = max(0, _safe_int(meta.get("found_count"), 0))
+    candidate_limit = max(0, _safe_int(meta.get("candidate_limit"), 0))
+    if parsed > 0:
+        return parsed
+    if candidate_limit > 0 and found > 0:
+        return min(candidate_limit, found)
+    return max(candidate_limit, found, 0)
+
+
+def _job_candidate_scan_progress(job: dict[str, Any]) -> int | None:
+    meta = _job_meta(job)
+    total = _job_candidate_scan_total(meta)
+    examined = max(0, _safe_int(meta.get("examined_count"), 0))
+    processed = max(
+        examined,
+        _job_counter(job, "savedCount", "saved_count", "total_saved")
+        + _job_counter(job, "updatedCount", "updated_count", "total_updated")
+        + _job_counter(job, "duplicateCount", "duplicate_count", "total_duplicates"),
+    )
+    if total <= 0:
+        return None
+    if processed <= 0:
+        return 8
+    return max(8, min(95, int(_percent(min(processed, total), total))))
+
+
 def _job_progress_percent(job: dict[str, Any]) -> int:
     status = _job_status(job)
     if status in {"completed", "partial"}:
@@ -395,6 +423,10 @@ def _job_progress_percent(job: dict[str, Any]) -> int:
     explicit = _first_present(meta, "percent", "progress_percent")
     if explicit is not None:
         return int(_percent(_safe_float(explicit), 100))
+
+    candidate_progress = _job_candidate_scan_progress(job)
+    if candidate_progress is not None:
+        return candidate_progress
 
     current = _safe_float(_first_present(meta, "current"), 0.0)
     total = _safe_float(_first_present(meta, "total"), 0.0)
@@ -577,9 +609,9 @@ def _should_sync_job_from_celery(job: dict[str, Any]) -> bool:
         return False
     now_ms = int(time.time() * 1000)
     started_ms = _safe_int(job.get("startedAt"), now_ms)
-    # Re-evaluate recent terminal jobs so soft-failed downstream stages can
-    # downgrade old green SUCCESS records to partial/warning. Do not keep polling
-    # very old history forever.
+
+
+
     return now_ms - started_ms <= 24 * 60 * 60 * 1000
 
 

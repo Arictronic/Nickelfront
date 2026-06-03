@@ -13,7 +13,7 @@ from typing import Any
 
 try:
     from .env_utils import env_bool, env_float, env_int
-except ImportError:  # pragma: no cover - supports direct script imports
+except ImportError:
     from env_utils import env_bool, env_float, env_int
 
 
@@ -85,12 +85,12 @@ DEFAULT_FILE_UPLOAD_MODE = (os.getenv("QWEN_FILE_UPLOAD_MODE", "auto") or "auto"
 DEFAULT_FILE_UPLOAD_MAX_SIZE_MB = env_int("QWEN_FILE_UPLOAD_MAX_SIZE_MB", 20, min_value=1, max_value=100)
 DEFAULT_FILE_UPLOAD_MAX_FILES = env_int("QWEN_FILE_UPLOAD_MAX_FILES", 5, min_value=1, max_value=5)
 DEFAULT_FILE_METADATA_CACHE_PATH = (
-    os.getenv("QWEN_FILE_METADATA_CACHE_PATH", "runtime/qwen_uploaded_files.json") or "runtime/qwen_uploaded_files.json"
+    os.getenv("QWEN_FILE_METADATA_CACHE_PATH", "logs/runtime/qwen/qwen_uploaded_files.json") or "logs/runtime/qwen/qwen_uploaded_files.json"
 ).strip()
 DEFAULT_FILE_METADATA_CACHE_MAX_ENTRIES = env_int("QWEN_FILE_METADATA_CACHE_MAX_ENTRIES", 500, min_value=10, max_value=5000)
 DEFAULT_FILE_METADATA_CACHE_MAX_AGE_DAYS = env_int("QWEN_FILE_METADATA_CACHE_MAX_AGE_DAYS", 7, min_value=1, max_value=3650)
 DEFAULT_SESSION_REGISTRY_CACHE_PATH = (
-    os.getenv("QWEN_SESSION_REGISTRY_CACHE_PATH", "runtime/qwen_sessions.json") or "runtime/qwen_sessions.json"
+    os.getenv("QWEN_SESSION_REGISTRY_CACHE_PATH", "logs/runtime/qwen/qwen_sessions.json") or "logs/runtime/qwen/qwen_sessions.json"
 ).strip()
 DEFAULT_SESSION_REGISTRY_CACHE_MAX_ENTRIES = env_int(
     "QWEN_SESSION_REGISTRY_CACHE_MAX_ENTRIES", 500, min_value=10, max_value=5000
@@ -99,7 +99,7 @@ DEFAULT_SESSION_REGISTRY_CACHE_MAX_AGE_DAYS = env_int(
     "QWEN_SESSION_REGISTRY_CACHE_MAX_AGE_DAYS", 30, min_value=1, max_value=3650
 )
 DEFAULT_EVENT_JOURNAL_PATH = (
-    os.getenv("QWEN_EVENT_JOURNAL_PATH", "runtime/qwen_events.json") or "runtime/qwen_events.json"
+    os.getenv("QWEN_EVENT_JOURNAL_PATH", "logs/runtime/qwen/qwen_events.json") or "logs/runtime/qwen/qwen_events.json"
 ).strip()
 DEFAULT_EVENT_JOURNAL_MAX_ENTRIES = env_int(
     "QWEN_EVENT_JOURNAL_MAX_ENTRIES", 500, min_value=10, max_value=5000
@@ -134,9 +134,9 @@ DEFAULT_OSS_PUT_MODE = (os.getenv("QWEN_OSS_PUT_MODE", "minimal") or "minimal").
 if DEFAULT_OSS_PUT_MODE not in {"minimal", "browser_like", "har"}:
     DEFAULT_OSS_PUT_MODE = "minimal"
 
-# Security/CORS defaults for the local standalone service.  Mutable endpoints
-# must not silently become unauthenticated when QWEN_API_KEY is missing; allow
-# that only through an explicit developer override.
+
+
+
 DEFAULT_ALLOW_UNAUTH_WITHOUT_API_KEY = env_bool("QWEN_ALLOW_UNAUTH_WITHOUT_API_KEY", False)
 DEFAULT_CORS_ORIGINS = (
     os.getenv(

@@ -342,7 +342,7 @@ function mapPaper(apiPaper: PaperApiModel): Paper {
     journal: stripHtml(apiPaper.journal),
     doi: apiPaper.doi ?? null,
     abstract: stripHtml(apiPaper.abstract),
-    // Keep raw markdown/latex content for detailed paper view rendering.
+
     fullText: apiPaper.full_text ?? null,
     keywords: (apiPaper.keywords ?? [])
       .map((k) => stripHtml(k) ?? "")
@@ -953,7 +953,7 @@ export async function saveAlloyAnalysisPrompt(prompt: string) {
   return data;
 }
 
-// Full-text search API
+
 export async function fullTextSearch(args: {
   query: string;
   limit?: number;

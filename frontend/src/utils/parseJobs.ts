@@ -83,6 +83,30 @@ function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, Math.round(value)));
 }
 
+function candidateScanTotal(meta: Record<string, unknown>): number {
+  const parsed = toFiniteNumber(meta.parsed_count, 0);
+  const found = toFiniteNumber(meta.found_count, 0);
+  const candidateLimit = toFiniteNumber(meta.candidate_limit, 0);
+
+  if (parsed > 0) return parsed;
+  if (candidateLimit > 0 && found > 0) return Math.min(candidateLimit, found);
+  return Math.max(candidateLimit, found, 0);
+}
+
+function candidateScanProgress(meta: Record<string, unknown>): number | undefined {
+  const total = candidateScanTotal(meta);
+  const examined = toFiniteNumber(meta.examined_count, 0);
+  const saved = toFiniteNumber(meta.saved_count ?? meta.total_saved, 0);
+  const updated = toFiniteNumber(meta.updated_count ?? meta.total_updated, 0);
+  const duplicates = toFiniteNumber(meta.duplicate_count ?? meta.total_duplicates, 0);
+  const processed = Math.max(examined, saved + updated + duplicates);
+
+  if (total <= 0) return undefined;
+  if (processed <= 0) return 8;
+  return clampPercent(Math.min(95, Math.max(8, (Math.min(processed, total) / total) * 100)));
+}
+
+
 function normalizeStatus(value: unknown): ParseJobStatus {
   const status = String(value || "").trim();
   if ([
@@ -176,7 +200,7 @@ function preferSharedJob(
 ): ParseJob {
   if (!localJob) return sharedJob;
 
-  // Не даём старой backend-записи `in_progress` перетереть локально завершённую задачу.
+
   if (isTerminalStatus(localJob.status) && sharedJob.status === "in_progress") {
     return {
       ...sharedJob,
@@ -388,6 +412,9 @@ export function getParseJobProgressPercent(job: ParseJob): number {
       meta.percent ?? meta.progress_percent,
     );
     if (explicitPercent !== undefined) return clampPercent(explicitPercent);
+
+    const scanProgress = candidateScanProgress(meta);
+    if (scanProgress !== undefined) return scanProgress;
 
     const current = toFiniteNumber(celeryStatus.current ?? meta.current, 0);
     const total = toFiniteNumber(celeryStatus.total ?? meta.total, 0);

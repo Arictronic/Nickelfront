@@ -15,7 +15,7 @@ from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.security import HTTPAuthorizationCredentials
 
-try:  # package import
+try:
     from .defaults import (
         DEFAULT_AUTO_CONTINUE_ENABLED,
         DEFAULT_BROWSER_CHANNEL,
@@ -32,7 +32,7 @@ try:  # package import
     from .playwright_session import refresh_qwen_browser_session, refresh_qwen_cdp_session
     from .runtime_state import QwenRuntimeState
     from .schemas import APIKeyConfig, HarFileImportRequest, ModelConfig, QwenSessionHeadersConfig, RuntimeConfigUpdate, TokenConfig
-except ImportError:  # pragma: no cover - supports direct script imports
+except ImportError:
     from defaults import (
         DEFAULT_AUTO_CONTINUE_ENABLED,
         DEFAULT_BROWSER_CHANNEL,

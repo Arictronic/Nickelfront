@@ -87,7 +87,7 @@ AVAILABLE_SOURCES = ["CORE", "arXiv", *list(EXTERNAL_SEARCH_QUERIES.keys())]
 
 PARSER_ALPHA_ROOT = Path(__file__).resolve().parents[3] / "parser_alpha"
 PARSER_ALPHA_RUNNER = PARSER_ALPHA_ROOT / "run_parser.py"
-PARSER_ALPHA_DATA_DIR = PARSER_ALPHA_ROOT / "data"
+PARSER_ALPHA_DATA_DIR = Path(settings.resolve_path("logs/runtime/parser_alpha"))
 PARSER_ALPHA_VENV_PYTHON = PARSER_ALPHA_ROOT / ".venv" / "Scripts" / "python.exe"
 PARSER_ALPHA_DEFAULT_TIMEOUT_SECONDS = 1800.0
 
@@ -145,6 +145,47 @@ def _candidate_scan_limit(target_new_count: int, parser_settings: dict[str, Any]
     """Read a bounded candidate window so DB duplicates do not consume the user's target."""
     max_limit = max(1, int(parser_settings.get("max_limit") or 100))
     return min(max_limit, max(target_new_count, target_new_count * 4))
+
+
+def _parse_candidate_total(*, parsed_count: int = 0, found_count: int = 0, candidate_limit: int = 0) -> int:
+    parsed = max(0, int(parsed_count or 0))
+    found = max(0, int(found_count or 0))
+    limit = max(0, int(candidate_limit or 0))
+    if parsed > 0:
+        return parsed
+    if limit > 0 and found > 0:
+        return min(limit, found)
+    return max(limit, found, 0)
+
+
+def _parse_progress_percent(
+    *,
+    examined_count: int = 0,
+    saved_count: int = 0,
+    updated_count: int = 0,
+    duplicate_count: int = 0,
+    parsed_count: int = 0,
+    found_count: int = 0,
+    candidate_limit: int = 0,
+    terminal: bool = False,
+) -> int:
+    if terminal:
+        return 100
+    total = _parse_candidate_total(
+        parsed_count=parsed_count,
+        found_count=found_count,
+        candidate_limit=candidate_limit,
+    )
+    processed = max(
+        0,
+        int(examined_count or 0),
+        int(saved_count or 0) + int(updated_count or 0) + int(duplicate_count or 0),
+    )
+    if total <= 0:
+        return 3
+    if processed <= 0:
+        return 8
+    return max(8, min(95, round(min(processed, total) / total * 100)))
 
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -985,6 +1026,8 @@ def _parse_queries_for_task(
     total_target_new = 0
     total_candidate_limit = 0
     total_examined = 0
+    total_found = 0
+    total_parsed = 0
     child_task_ids: list[str] = []
     child_tasks_preview: list[dict[str, Any]] = []
     refill_exhausted = False
@@ -1036,6 +1079,8 @@ def _parse_queries_for_task(
             total_target_new += int(result.get("target_new_count", limit_per_query) or limit_per_query)
             total_candidate_limit += int(result.get("candidate_limit", limit_per_query) or limit_per_query)
             total_examined += int(result.get("examined_count", 0) or 0)
+            total_found += int(result.get("found_count", 0) or 0)
+            total_parsed += int(result.get("parsed_count", 0) or 0)
             for child_task_id in result.get("child_task_ids", []) or result.get("content_task_ids", []) or []:
                 child_task_id = str(child_task_id or "").strip()
                 if child_task_id and child_task_id not in child_task_ids:
@@ -1078,6 +1123,19 @@ def _parse_queries_for_task(
             "target_new_count": total_target_new,
             "candidate_limit": total_candidate_limit,
             "examined_count": total_examined,
+            "found_count": total_found,
+            "parsed_count": total_parsed,
+            "progress_percent": _parse_progress_percent(
+                examined_count=total_examined,
+                saved_count=total_saved,
+                updated_count=total_updated,
+                duplicate_count=total_duplicates,
+                parsed_count=total_parsed,
+                found_count=total_found,
+                candidate_limit=total_candidate_limit,
+                terminal=True,
+            ),
+            "progress_kind": "candidate_scan",
             "refill_exhausted": refill_exhausted,
             "child_tasks_count": len(child_task_ids),
             "child_task_ids": child_task_ids[:300],
@@ -1116,6 +1174,19 @@ def _parse_queries_for_task(
         "target_new_count": total_target_new,
         "candidate_limit": total_candidate_limit,
         "examined_count": total_examined,
+        "found_count": total_found,
+        "parsed_count": total_parsed,
+        "progress_percent": _parse_progress_percent(
+            examined_count=total_examined,
+            saved_count=total_saved,
+            updated_count=total_updated,
+            duplicate_count=total_duplicates,
+            parsed_count=total_parsed,
+            found_count=total_found,
+            candidate_limit=total_candidate_limit,
+            terminal=True,
+        ),
+        "progress_kind": "candidate_scan",
         "refill_exhausted": refill_exhausted,
         "child_tasks_count": len(child_task_ids),
         "child_task_ids": child_task_ids[:300],
@@ -1198,6 +1269,8 @@ async def _parse_async(
             "target_new_count": limit,
             "candidate_limit": candidate_limit,
             "examined_count": 0,
+            "progress_percent": 3,
+            "progress_kind": "candidate_scan",
             "status": f"Поиск кандидатов по запросу '{query}' (цель новых: {limit})...",
         },
         task_id=task_id,
@@ -1229,6 +1302,14 @@ async def _parse_async(
             "target_new_count": limit,
             "candidate_limit": candidate_limit,
             "examined_count": 0,
+            "found_count": stats["found_count"],
+            "parsed_count": stats["parsed_count"],
+            "progress_percent": _parse_progress_percent(
+                parsed_count=stats["parsed_count"],
+                found_count=stats["found_count"],
+                candidate_limit=candidate_limit,
+            ),
+            "progress_kind": "candidate_scan",
             "status": f"Проверка кандидатов ({len(papers)} найдено, нужно новых: {limit})...",
         },
         task_id=task_id,
@@ -1259,6 +1340,18 @@ async def _parse_async(
                             "target_new_count": limit,
                             "candidate_limit": candidate_limit,
                             "examined_count": stats["examined_count"],
+                            "found_count": stats["found_count"],
+                            "parsed_count": stats["parsed_count"],
+                            "progress_percent": _parse_progress_percent(
+                                examined_count=stats["examined_count"],
+                                saved_count=stats["saved_count"],
+                                updated_count=stats["updated_count"],
+                                duplicate_count=stats["duplicate_count"],
+                                parsed_count=stats["parsed_count"],
+                                found_count=stats["found_count"],
+                                candidate_limit=candidate_limit,
+                            ),
+                            "progress_kind": "candidate_scan",
                             "saved_count": stats["saved_count"],
                             "updated_count": stats["updated_count"],
                             "duplicate_count": stats["duplicate_count"],
@@ -1404,6 +1497,18 @@ async def _parse_async(
         stats["status_reason"] = "candidate_window_exhausted"
         stats["status"] = "Завершено частично: цель новых записей не достигнута в текущем окне поиска"
 
+    stats["progress_percent"] = _parse_progress_percent(
+        examined_count=stats["examined_count"],
+        saved_count=stats["saved_count"],
+        updated_count=stats["updated_count"],
+        duplicate_count=stats["duplicate_count"],
+        parsed_count=stats["parsed_count"],
+        found_count=stats["found_count"],
+        candidate_limit=candidate_limit,
+        terminal=True,
+    )
+    stats["progress_kind"] = "candidate_scan"
+
     _safe_update_state(
         self,
         state="SUCCESS",
@@ -1421,6 +1526,8 @@ async def _parse_async(
             "status_reason": stats["status_reason"],
             "found_count": stats["found_count"],
             "parsed_count": stats["parsed_count"],
+            "progress_percent": stats["progress_percent"],
+            "progress_kind": stats["progress_kind"],
             "saved_count": stats["saved_count"],
             "updated_count": stats["updated_count"],
             "duplicate_count": stats["duplicate_count"],
@@ -1530,6 +1637,11 @@ def parse_all_sources_task(
         total_content_skipped = 0
         total_updated = 0
         total_duplicates = 0
+        total_target_new = 0
+        total_candidate_limit = 0
+        total_examined = 0
+        total_found = 0
+        total_parsed = 0
         child_task_ids: list[str] = []
         child_tasks_preview: list[dict[str, Any]] = []
 
@@ -1612,6 +1724,8 @@ def parse_all_sources_task(
             source_target_new = int(source_result.get("target_new_count", 0) or 0)
             source_candidate_limit = int(source_result.get("candidate_limit", 0) or 0)
             source_examined = int(source_result.get("examined_count", 0) or 0)
+            source_found = int(source_result.get("found_count", 0) or 0)
+            source_parsed = int(source_result.get("parsed_count", 0) or 0)
             source_child_task_ids = [str(item or "").strip() for item in (source_result.get("child_task_ids", []) or source_result.get("content_task_ids", []) or []) if str(item or "").strip()]
             for child_task_id in source_child_task_ids:
                 if child_task_id not in child_task_ids:
@@ -1637,6 +1751,19 @@ def parse_all_sources_task(
                 "target_new_count": source_target_new,
                 "candidate_limit": source_candidate_limit,
                 "examined_count": source_examined,
+                "found_count": source_found,
+                "parsed_count": source_parsed,
+                "progress_percent": _parse_progress_percent(
+                    examined_count=source_examined,
+                    saved_count=source_saved,
+                    updated_count=source_updated,
+                    duplicate_count=source_duplicates,
+                    parsed_count=source_parsed,
+                    found_count=source_found,
+                    candidate_limit=source_candidate_limit,
+                    terminal=True,
+                ),
+                "progress_kind": "candidate_scan",
                 "refill_exhausted": bool(source_result.get("refill_exhausted", False)),
                 "errors_count": source_errors_count,
                 "errors": source_errors,
@@ -1651,6 +1778,11 @@ def parse_all_sources_task(
             total_content_skipped += source_skipped
             total_updated += source_updated
             total_duplicates += source_duplicates
+            total_target_new += source_target_new
+            total_candidate_limit += source_candidate_limit
+            total_examined += source_examined
+            total_found += source_found
+            total_parsed += source_parsed
 
             if source_result.get("status") == "revoked":
                 source_statuses[source]["status"] = "revoked"
@@ -1688,6 +1820,22 @@ def parse_all_sources_task(
                 "updated_count": total_updated,
                 "total_duplicates": total_duplicates,
                 "duplicate_count": total_duplicates,
+                "target_new_count": total_target_new,
+                "candidate_limit": total_candidate_limit,
+                "examined_count": total_examined,
+                "found_count": total_found,
+                "parsed_count": total_parsed,
+                "progress_percent": _parse_progress_percent(
+                    examined_count=total_examined,
+                    saved_count=total_saved,
+                    updated_count=total_updated,
+                    duplicate_count=total_duplicates,
+                    parsed_count=total_parsed,
+                    found_count=total_found,
+                    candidate_limit=total_candidate_limit,
+                    terminal=True,
+                ),
+                "progress_kind": "candidate_scan",
                 "sources": source_statuses,
                 "sources_status": source_statuses,
                 "child_tasks_count": len(child_task_ids),
@@ -1732,6 +1880,22 @@ def parse_all_sources_task(
             "updated_count": total_updated,
             "total_duplicates": total_duplicates,
             "duplicate_count": total_duplicates,
+            "target_new_count": total_target_new,
+            "candidate_limit": total_candidate_limit,
+            "examined_count": total_examined,
+            "found_count": total_found,
+            "parsed_count": total_parsed,
+            "progress_percent": _parse_progress_percent(
+                examined_count=total_examined,
+                saved_count=total_saved,
+                updated_count=total_updated,
+                duplicate_count=total_duplicates,
+                parsed_count=total_parsed,
+                found_count=total_found,
+                candidate_limit=total_candidate_limit,
+                terminal=True,
+            ),
+            "progress_kind": "candidate_scan",
         }
     finally:
         task_id = _get_task_id(self)

@@ -1,9 +1,5 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
-rem ============================================================================
-rem Safe outer wrapper: keeps the console open even if the inner doctor/setup
-rem exits early because of a batch syntax/runtime error.
-rem ============================================================================
 if /I not "%NF_DOCTOR_SETUP_INNER%"=="1" (
     set "NF_DOCTOR_SETUP_INNER=1"
     set "NF_DOCTOR_SETUP_INNER_NO_PAUSE=1"
@@ -32,23 +28,8 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 title Nickelfront Doctor + Setup FIXED v27
 
-rem ============================================================================
-rem Nickelfront Doctor + Setup
-rem VERSION: 2026-05-28.08-FRONTEND-CHECK-HELPER
 rem
-rem Главное в этой версии:
-rem   1) Читает реальные DATABASE_URL и REDIS_URL из .env.
-rem   2) Учитывает порт PostgreSQL 5433 и Redis 6380, если они указаны в .env.
-rem   3) Для миграций использует backend\apply_migrations.py.
-rem   4) По умолчанию работает с .venv, как run_backend.bat/run_worker.bat/run_migrations.bat.
-rem   5) RAG обслуживается backend; legacy standalone rag\requirements.txt не ставится и не используется.
-rem   6) Не закрывает окно при ошибке/раннем выходе, пишет логи в logs\run.
-rem   7) v22: убраны хрупкие inline python/node команды, которые ломались в cmd.exe.
-rem   8) v23: единый env-loader, Redis helper, frontend full-check, health-gated run_all.
-rem   9) v24: safe wrapper — окно не закрывается даже при раннем падении doctor/setup.
-rem  10) v25: parser dependencies полностью идут через корневой requirements.txt.
 rem
-rem ============================================================================
 
 set "SCRIPT_VERSION=2026-05-28.08-FRONTEND-CHECK-HELPER"
 set "SCRIPT_DIR=%~dp0"
@@ -94,7 +75,6 @@ if not defined PROJECT_ROOT (
 
 cd /d "%PROJECT_ROOT%"
 
-rem Все служебные файлы doctor/setup-скрипта храним только здесь.
 set "RUN_ROOT=%PROJECT_ROOT%\logs\run"
 if not exist "%PROJECT_ROOT%\logs" mkdir "%PROJECT_ROOT%\logs" >nul 2>nul
 if not exist "%RUN_ROOT%" mkdir "%RUN_ROOT%" >nul 2>nul
@@ -165,8 +145,6 @@ if "%FATAL%"=="1" goto finish_error
 goto finish_ok
 
 :parse_args
-rem Разбор аргументов через SHIFT безопаснее, чем FOR %%A IN (%*):
-rem FOR ломается, если в аргументах/путях случайно есть спецсимволы cmd.
 if "%~1"=="" exit /b 0
 if /I "%~1"=="--no-pause" shift & goto parse_args
 if /I "%~1"=="--yes" set "AUTO_YES=1"
@@ -199,17 +177,14 @@ echo.
 exit /b 0
 
 :detect_project_root
-rem 1) Если скрипт лежит в корне.
 if exist "%SCRIPT_DIR%\requirements.txt" if exist "%SCRIPT_DIR%\frontend\package.json" if exist "%SCRIPT_DIR%\backend\app\main.py" (
     set "PROJECT_ROOT=%SCRIPT_DIR%"
     exit /b 0
 )
-rem 2) Если скрипт лежит в scripts.
 if exist "%SCRIPT_DIR%\..\requirements.txt" if exist "%SCRIPT_DIR%\..\frontend\package.json" if exist "%SCRIPT_DIR%\..\backend\app\main.py" (
     for %%I in ("%SCRIPT_DIR%\..") do set "PROJECT_ROOT=%%~fI"
     exit /b 0
 )
-rem 3) Если запущен из корня.
 if exist "%CD%\requirements.txt" if exist "%CD%\frontend\package.json" if exist "%CD%\backend\app\main.py" (
     set "PROJECT_ROOT=%CD%"
     exit /b 0
@@ -271,10 +246,6 @@ echo [INFO] %~1
 exit /b 0
 
 :run_logged
-rem ВАЖНО: команды установки запускаются напрямую в текущей консоли.
-rem Никаких PowerShell tee, никаких временных runner .cmd и никаких редиректов stdout/stderr в файл.
-rem Поэтому живой вывод pip/npm/playwright виден именно в этом окне при двойном клике.
-rem Команды запускаются через CALL, чтобы npm.cmd/npm.ps1 не уводили управление из этого .bat.
 set "NF_RUN_CMD=%*"
 if not defined NF_RUN_CMD exit /b 1
 echo.
@@ -618,7 +589,6 @@ set "VENV_EXE="
 set "BROKEN_VENV_DIR="
 set "PREFERRED_CREATE_VENV=.venv"
 
-rem Project run_*.bat prefer .venv, but if only venv exists, repair/use venv.
 call :probe_venv ".venv"
 call :probe_venv "venv"
 
@@ -642,9 +612,6 @@ set "PV_INFO_FILE=%TEMP%\nf_venv_probe_%RANDOM%_%RANDOM%.txt"
 if not exist "%PV_DIR%\Scripts\python.exe" exit /b 2
 for %%I in ("%PV_DIR%") do set "PV_ABS=%%~fI"
 
-rem В v13 проверка была через FOR /F с quoted python.exe. На Windows это иногда
-rem ложно падало: созданный venv рабочий, но preflight считал его битым.
-rem Теперь запускаем python напрямую и читаем вывод из временного файла.
 "%PV_ABS%\Scripts\python.exe" -c "import sys; print(str(sys.version_info.major)+'.'+str(sys.version_info.minor)+'.'+str(sys.version_info.micro)+';'+sys.executable)" >"%PV_INFO_FILE%" 2>>"%LOG_FILE%"
 if errorlevel 1 (
     del "%PV_INFO_FILE%" >nul 2>nul
@@ -716,12 +683,12 @@ exit /b 0
 :check_services
 call :check_tcp "%REDIS_HOST%" "%REDIS_PORT%" "Redis"
 if errorlevel 1 (
-    if exist "scriptsun_redis.bat" (
-        call :warn "Redis не отвечает на %REDIS_HOST%:%REDIS_PORT%. При установке попробую запустить scriptsun_redis.bat."
-    ) else if exist "redisedis-server.exe" (
-        call :warn "Redis не отвечает. scriptsun_redis.bat не найден, но найден redisedis-server.exe."
+    if exist "scriptsun_redis.bat" (
+        call :warn "Redis не отвечает на %REDIS_HOST%:%REDIS_PORT%. При установке попробую запустить scriptsun_redis.bat."
+    ) else if exist "redisedis-server.exe" (
+        call :warn "Redis не отвечает. scriptsun_redis.bat не найден, но найден redisedis-server.exe."
     ) else (
-        call :warn "Redis не отвечает и scriptsun_redis.bat не найден. Запусти Redis вручную."
+        call :warn "Redis не отвечает и scriptsun_redis.bat не найден. Запусти Redis вручную."
     )
 ) else (
     call :ok "Redis отвечает на %REDIS_HOST%:%REDIS_PORT%."
@@ -817,7 +784,7 @@ if exist ".env.example" (
 exit /b 0
 
 :ensure_runtime_dirs
-for %%D in ("logs" "logs\run" "logs\run\tmp" "logs\run\backups" "data" "storage" "uploads" "tmp" "runtime" "chroma_db" "models" "%STATE_DIR%") do (
+for %%D in ("logs" "logs\run" "logs\run\tmp" "logs\run\backups" "logs\runtime" "logs\runtime\qwen" "logs\runtime\parser_alpha" "storage" "chroma_db" "models" "%STATE_DIR%") do (
     if not exist %%~D mkdir %%~D >>"%LOG_FILE%" 2>>&1
 )
 call :ok "Runtime-папки созданы/проверены."
@@ -1090,15 +1057,15 @@ call :hash_file "frontend\package.json" "FRONT_PKG_HASH"
 if errorlevel 1 exit /b 1
 call :hash_file "frontend\package-lock.json" "FRONT_LOCK_HASH"
 if errorlevel 1 set "FRONT_LOCK_HASH=NO_PACKAGE_LOCK"
-call :read_marker "%STATE_DIR%rontend_package.sha256" "MARK_FRONT_PKG_HASH"
-call :read_marker "%STATE_DIR%rontend_lock.sha256" "MARK_FRONT_LOCK_HASH"
+call :read_marker "%STATE_DIR%rontend_package.sha256" "MARK_FRONT_PKG_HASH"
+call :read_marker "%STATE_DIR%rontend_lock.sha256" "MARK_FRONT_LOCK_HASH"
 
 if not exist "scripts\check_frontend_deps.js" exit /b 1
 node "scripts\check_frontend_deps.js" "frontend" >>"%LOG_FILE%" 2>>&1
 set "FRONT_NODE_RC=%ERRORLEVEL%"
 if not "%FRONT_NODE_RC%"=="0" exit /b 1
 
-if not exist "%STATE_DIR%rontend_package.sha256" if not exist "%STATE_DIR%rontend_lock.sha256" (
+if not exist "%STATE_DIR%rontend_package.sha256" if not exist "%STATE_DIR%rontend_lock.sha256" (
     call :info "Маркеров frontend ещё нет: запущу npm ci/npm install для полной проверки package-lock/package.json."
     exit /b 1
 )
@@ -1119,7 +1086,7 @@ exit /b 0
 
 
 :ensure_redis_launcher
-if exist "scriptsun_redis.bat" (call :ok "scriptsun_redis.bat найден.") else call :warn "scriptsun_redis.bat не найден. Redis нужно будет запускать вручную."
+if exist "scriptsun_redis.bat" (call :ok "scriptsun_redis.bat найден.") else call :warn "scriptsun_redis.bat не найден. Redis нужно будет запускать вручную."
 if exist "scripts\download_redis.ps1" (call :ok "Redis download helper найден.") else call :warn "scripts\download_redis.ps1 не найден. Автоскачивание Redis будет недоступно."
 exit /b 0
 
@@ -1127,14 +1094,14 @@ exit /b 0
 :start_redis_if_possible
 call :check_tcp "%REDIS_HOST%" "%REDIS_PORT%" "Redis"
 if not errorlevel 1 exit /b 0
-if exist "scriptsun_redis.bat" (
-    call :info "Пробую запустить Redis через scriptsun_redis.bat на порту из .env..."
-    start "Nickelfront Redis" /min cmd /c "cd /d ""%PROJECT_ROOT%"" && call scriptsun_redis.bat"
+if exist "scriptsun_redis.bat" (
+    call :info "Пробую запустить Redis через scriptsun_redis.bat на порту из .env..."
+    start "Nickelfront Redis" /min cmd /c "cd /d ""%PROJECT_ROOT%"" && call scriptsun_redis.bat"
     timeout /t 4 >nul
     call :check_tcp "%REDIS_HOST%" "%REDIS_PORT%" "Redis"
-    if errorlevel 1 (call :warn "Redis не запустился автоматически. Проверь scriptsun_redis.bat и порт %REDIS_PORT%.") else call :ok "Redis запущен/отвечает."
+    if errorlevel 1 (call :warn "Redis не запустился автоматически. Проверь scriptsun_redis.bat и порт %REDIS_PORT%.") else call :ok "Redis запущен/отвечает."
 ) else (
-    call :warn "scriptsun_redis.bat не найден. Автозапуск Redis невозможен."
+    call :warn "scriptsun_redis.bat не найден. Автозапуск Redis невозможен."
 )
 exit /b 0
 

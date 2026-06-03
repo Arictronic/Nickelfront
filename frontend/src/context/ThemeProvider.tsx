@@ -17,18 +17,18 @@ interface ThemeProviderProps {
   defaultTheme?: Theme;
 }
 
-/**
- * Провайдер темы приложения.
- */
+
+
+
 export function ThemeProvider({ children, defaultTheme = "light" }: ThemeProviderProps) {
   const [theme, setThemeState] = useState<Theme>(() => {
-    // Проверяем сохраненную тему
+
     const saved = localStorage.getItem(STORAGE_KEY) as Theme | null;
     if (saved && (saved === "light" || saved === "dark")) {
       return saved;
     }
 
-    // Проверяем системную тему
+
     if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
       return "dark";
     }
@@ -37,11 +37,11 @@ export function ThemeProvider({ children, defaultTheme = "light" }: ThemeProvide
   });
 
   useEffect(() => {
-    // Применяем тему к документу
+
     const root = document.documentElement;
     root.setAttribute("data-theme", theme);
 
-    // Сохраняем в localStorage
+
     localStorage.setItem(STORAGE_KEY, theme);
   }, [theme]);
 

@@ -42,7 +42,7 @@ class UploadedFileMetadataStore:
 
             raw_files = payload.get("files") if isinstance(payload, dict) else None
             if raw_files is None and isinstance(payload, dict):
-                # Backward/diagnostic friendly shape: {file_id: file_info}
+
                 raw_files = payload
             if not isinstance(raw_files, dict):
                 return
@@ -203,7 +203,7 @@ class UploadedFileMetadataStore:
         if value is None:
             return 0
         if isinstance(value, (int, float)):
-            # Provider payloads are usually milliseconds, but accept seconds too.
+
             numeric = float(value)
             return int(numeric * 1000) if 0 < numeric < 10_000_000_000 else int(numeric)
         text = str(value or "").strip()
@@ -252,7 +252,7 @@ def build_uploaded_file_metadata_store(
     config: dict[str, Any],
     *,
     project_root: str | Path,
-    default_path: str = "runtime/qwen_uploaded_files.json",
+    default_path: str = "logs/runtime/qwen/qwen_uploaded_files.json",
     logger: Any = logging,
 ) -> UploadedFileMetadataStore:
     raw_path = str(config.get("file_metadata_cache_path") or default_path).strip() or default_path

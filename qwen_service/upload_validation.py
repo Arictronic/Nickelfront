@@ -11,7 +11,7 @@ from fastapi import HTTPException
 
 try:
     from .error_payload import raise_provider_http_error
-except ImportError:  # pragma: no cover - direct script compatibility
+except ImportError:
     from error_payload import raise_provider_http_error
 
 

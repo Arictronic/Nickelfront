@@ -357,7 +357,6 @@ IMPORTANT_CHECKS = [
     "frontend/vite.config.js",
     ".github/workflows",
     "tests/backend/conftest.py",
-    "rag/app/main.py",
     "run_all.bat",
     "scripts/run_backend.bat",
     "scripts/run_worker.bat",
@@ -365,7 +364,6 @@ IMPORTANT_CHECKS = [
     "scripts/run_frontend.bat",
     "parser_alpha/run_parser.py",
     "qwen_service/service.py",
-    "rag/app",
     "backend/alembic",
     "backend/alembic.ini",
 ]

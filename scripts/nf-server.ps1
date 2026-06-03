@@ -4,8 +4,8 @@ param(
     [switch]$IncludeRag,
     [switch]$KillByPorts,
 
-    # 0/-1 means: read from .env or fallback.
-    # CLI parameters still override .env when explicitly set.
+
+
     [int]$RedisPort = 0,
     [int]$FlowerPort = 0,
     [int]$FrontendPort = 0,
@@ -119,7 +119,6 @@ $FrontendHost = Get-EnvString -ExplicitValue '' -Name 'VITE_DEV_HOST' -DefaultVa
 $ApiHost = Get-EnvString -ExplicitValue '' -Name 'API_HOST' -DefaultValue '0.0.0.0'
 $ApiPort = Get-EnvInt -ExplicitValue 0 -Name 'API_PORT' -DefaultValue 8001
 $QwenServicePort = Get-EnvInt -ExplicitValue 0 -Name 'QWEN_SERVICE_PORT' -DefaultValue 8767
-$RagPort = Get-EnvInt -ExplicitValue 0 -Name 'RAG_PORT' -DefaultValue 8000
 
 $CeleryWorkers = Get-EnvInt -ExplicitValue $CeleryWorkers -Name 'CELERY_WORKERS' -DefaultValue 3 -AllowZero
 $QwenWorkers = Get-EnvInt -ExplicitValue $QwenWorkers -Name 'QWEN_QUEUE_WORKERS' -DefaultValue 5 -AllowZero
@@ -263,22 +262,8 @@ if ($QwenWorkers -gt 0) {
     }
 }
 
-function Ensure-RagService {
-    if ($Services | Where-Object { $_.Tag -eq 'NF_RAG' }) {
-        return
-    }
-
-    $script:Services += @{
-        Tag = 'NF_RAG'
-        WorkDir = Join-Path $RepoRoot 'rag'
-        Ports = @($RagPort)
-        Command = "`$host.UI.RawUI.WindowTitle='NF_RAG'; Set-Location '$($RepoRoot.Replace("'", "''"))'; `$env:PYTHONIOENCODING='utf-8'; & powershell -NoProfile -ExecutionPolicy Bypass -File '$($PSScriptRoot.Replace("'", "''"))\run_rag_venv.ps1' -NoPause"
-        Optional = $false
-    }
-}
-
 if ($IncludeRag) {
-    Ensure-RagService
+    Write-Host 'WARN: standalone RAG launcher removed; backend RAG runs inside FastAPI.'
 }
 
 function Get-TaggedShells {
@@ -386,7 +371,7 @@ function Stop-Services {
     }
 
     if ($KillByPorts) {
-        $ports = @($FrontendPort, 8000, 8001, 8767, $FlowerPort, $RedisPort)
+        $ports = @($FrontendPort, $ApiPort, $QwenServicePort, $FlowerPort, $RedisPort)
         foreach ($port in $ports | Sort-Object -Unique) {
             $listeners = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue
             $owners = @($listeners | Select-Object -ExpandProperty OwningProcess -Unique)
@@ -408,10 +393,6 @@ function Invoke-Menu {
 
     switch ($choice) {
         '1' {
-            $ragChoice = Read-Host 'Include RAG service? [y/N]'
-            if ($ragChoice -match '^(y|yes|д|да)$') {
-                Ensure-RagService
-            }
             Start-Services
             Show-Status
         }
@@ -420,10 +401,6 @@ function Invoke-Menu {
             Show-Status
         }
         '3' {
-            $ragChoice = Read-Host 'Include RAG service after restart? [y/N]'
-            if ($ragChoice -match '^(y|yes|д|да)$') {
-                Ensure-RagService
-            }
             Stop-Services
             Start-Sleep -Milliseconds 500
             Start-Services

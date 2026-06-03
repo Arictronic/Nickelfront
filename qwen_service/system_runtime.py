@@ -43,7 +43,7 @@ try:
     )
     from .runtime_state import QwenRuntimeState
     from .status_payload import health_payload
-except ImportError:  # pragma: no cover - direct script import fallback
+except ImportError:
     from defaults import (
         DEFAULT_AUTO_CONTINUE_ENABLED,
         DEFAULT_HOST,
@@ -127,7 +127,7 @@ async def user_info_payload(
     try:
         user_info = await run_qwen_locked(qwen_api.get_user_info)
         return {"user_info": user_info}
-    except Exception as exc:  # noqa: BLE001 - endpoint must return HTTP error
+    except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

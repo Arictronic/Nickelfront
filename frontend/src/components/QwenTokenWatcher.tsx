@@ -36,7 +36,7 @@ export default function QwenTokenWatcher() {
           lastStatusRef.current = "valid";
         }
       } catch {
-        // Qwen status check is best-effort. Do not spam users if backend/qwen_service is restarting.
+
       } finally {
         if (active) {
           timer = window.setTimeout(check, CHECK_INTERVAL_MS);

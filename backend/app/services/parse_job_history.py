@@ -12,7 +12,8 @@ from app.core.config import settings
 from app.services import task_lifecycle_status as lifecycle
 
 _LOCK = threading.Lock()
-_HISTORY_PATH = Path(settings.resolve_path("data/parse_jobs.json"))
+_HISTORY_PATH = Path(settings.resolve_path("logs/runtime/parse_jobs.json"))
+_LEGACY_HISTORY_PATH = Path(settings.resolve_path("data/parse_jobs.json"))
 _MAX_JOBS = 100
 _ALLOWED_STATUSES = {"in_progress", "completed", "partial", "cancelled", "failed", "expired"}
 PARTIAL_RESULT_STATUSES = {"completed_with_errors", "partial_success", "warning", "partial", "stage_failed", "ready_with_fallback"}
@@ -87,11 +88,18 @@ def _normalize_job(job: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _active_history_path() -> Path:
+    if _HISTORY_PATH.exists() or not _LEGACY_HISTORY_PATH.exists():
+        return _HISTORY_PATH
+    return _LEGACY_HISTORY_PATH
+
+
 def _read_jobs_unlocked() -> list[dict[str, Any]]:
-    if not _HISTORY_PATH.exists():
+    history_path = _active_history_path()
+    if not history_path.exists():
         return []
     try:
-        data = json.loads(_HISTORY_PATH.read_text(encoding="utf-8"))
+        data = json.loads(history_path.read_text(encoding="utf-8"))
     except Exception:
         return []
     if not isinstance(data, list):

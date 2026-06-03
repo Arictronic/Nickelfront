@@ -1,9 +1,9 @@
 import axios from "axios";
 import { useAuthStore } from "../store/authStore";
 
-// Определяем базовый URL API
-// - Если задан VITE_API_URL (полный URL), используем его
-// - Иначе используем относительный путь (для работы через proxy на сервере)
+
+
+
 const apiUrl = String(import.meta.env.VITE_API_URL || "").trim();
 const baseURL = apiUrl || "/api/v1";
 
@@ -79,7 +79,7 @@ function clearAuthAndRedirect(): void {
   }
 }
 
-// Add auth header
+
 apiClient.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem("auth_token");
@@ -91,7 +91,7 @@ apiClient.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// Handle 401 with refresh token rotation
+
 apiClient.interceptors.response.use(
   (response) => response,
   async (error) => {
@@ -135,7 +135,7 @@ apiClient.interceptors.response.use(
       useAuthStore.getState().setRefreshToken(data.refresh_token);
       useAuthStore.getState().setSessionError(null);
 
-      // Background profile refresh to avoid UI flicker
+
       refreshClient
         .get("/auth/me", {
           headers: { Authorization: `Bearer ${data.access_token}` },
@@ -152,7 +152,7 @@ apiClient.interceptors.response.use(
       return apiClient(originalRequest);
     }
 
-    // Keep login/register errors inside UI form (no forced page reload).
+
     if (status === 401 && isRefreshRoute) {
       clearAuthAndRedirect();
     }

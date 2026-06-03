@@ -61,7 +61,7 @@ export default function Analytics() {
       const stats = await getVectorStats();
       setVectorStats(stats);
     } catch {
-      // non-blocking
+
     }
   };
 
@@ -72,7 +72,7 @@ export default function Analytics() {
       );
       setKeywordHints(data.items ?? []);
     } catch {
-      // non-blocking
+
     }
   };
 

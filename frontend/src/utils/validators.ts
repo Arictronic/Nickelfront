@@ -16,7 +16,7 @@ export const checkPasswordRequirements = (password: string): PasswordRequirement
   const hasUpperCase = /[A-Z]/.test(password);
   const hasLowerCase = /[a-z]/.test(password);
   const hasNumber = /\d/.test(password);
-  
+
   return {
     minLength,
     hasUpperCase,

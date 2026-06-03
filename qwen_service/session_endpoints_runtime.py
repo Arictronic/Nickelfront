@@ -64,7 +64,7 @@ async def create_session_payload_from_state(
         if request and getattr(request, "title", None):
             try:
                 await run_in_threadpool(client.update_session_title, session_id, title)
-            except Exception as rename_exc:  # pragma: no cover - provider/network specific
+            except Exception as rename_exc:
                 logging.warning("Failed to set session title for %s: %s", session_id, rename_exc)
 
         state.register_session_client(session_id, client)
@@ -266,7 +266,7 @@ async def create_session_payload(
         if request and getattr(request, "title", None):
             try:
                 await run_in_threadpool(client.update_session_title, session_id, title)
-            except Exception as rename_exc:  # pragma: no cover - provider/network specific
+            except Exception as rename_exc:
                 logging.warning("Failed to set session title for %s: %s", session_id, rename_exc)
 
         register_session_qwen_api(session_id, client)

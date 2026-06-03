@@ -189,7 +189,7 @@ export default function FullTextSearch() {
       nextPage: normalizePage(searchParams.get("page") ?? 1),
       syncUrl: false,
     });
-    // Нужно выполнить автозапуск только при первом открытии страницы с URL-параметрами.
+
   }, []);
 
   const resultInsights = useMemo(() => {

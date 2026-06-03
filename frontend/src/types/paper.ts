@@ -335,9 +335,9 @@ const PROCESSING_FINAL_STATUSES = new Set([
   "ready_with_fallback",
   "completed",
   "failed",
-  // Translation statuses are final for the translation action, not for the
-  // AI/PDF/Qwen document pipeline. They are kept here for legacy widgets that
-  // still receive translation status through processingStatus.
+
+
+
   "translation_ready",
   "translation_partial",
   "translation_failed",
@@ -430,8 +430,8 @@ export interface PaperSearchFilters {
 export interface PaperListFilters {
   source?: PaperSource | "all";
   fullTextOnly: boolean;
-  dateFrom?: string; // yyyy-mm-dd
-  dateTo?: string; // yyyy-mm-dd
+  dateFrom?: string;
+  dateTo?: string;
   query?: string;
   processingStatus?: string;
   translationStatus?: string;

@@ -47,12 +47,12 @@ def setup_qwen_logging(project_root: Path, *, stdout: TextIO | None = None) -> P
     root_logger.addHandler(stream_handler)
     root_logger.addHandler(file_handler)
 
-    # Uvicorn has two different formatter types: a regular formatter for
-    # server lifecycle logs and an AccessFormatter for HTTP access logs.  The
-    # access formatter expects 5 arguments, so it crashes if it is accidentally
-    # attached to messages like ``Started server process [%d]``.  Keep every
-    # uvicorn logger on the same plain qwen formatter and disable propagation to
-    # avoid duplicate console/file records.
+
+
+
+
+
+
     for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         uvicorn_logger = logging.getLogger(logger_name)
         uvicorn_logger.handlers = list(root_logger.handlers)

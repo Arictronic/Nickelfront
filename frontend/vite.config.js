@@ -15,7 +15,7 @@ function writeFrontendLog(level, message) {
     const ts = new Date().toISOString()
     fs.appendFileSync(frontendLogFile, `${ts} | ${level} | ${message}\n`, 'utf-8')
   } catch {
-    // Keep dev-server running even if file logging fails.
+
   }
 }
 
@@ -64,7 +64,7 @@ export default defineConfig(({ mode }) => {
     try {
       if (/^https?:\/\//i.test(raw)) {
         const url = new URL(raw)
-        // Windows/Node may resolve localhost to IPv6 first and Vite proxy can fail with EACCES.
+
         if (url.hostname === 'localhost') {
           url.hostname = '127.0.0.1'
         }
@@ -74,8 +74,8 @@ export default defineConfig(({ mode }) => {
       return null
     }
 
-    // Relative values like /api/v1 are valid for frontend axios baseURL,
-    // but they are NOT valid as Vite proxy target. Ignore them here.
+
+
     return null
   }
 

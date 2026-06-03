@@ -24,7 +24,7 @@ try:
     )
     from .defaults import DEFAULT_AUTO_CONTINUE_ENABLED, DEFAULT_MAX_CONTINUES
     from .error_payload import raise_provider_http_error
-except ImportError:  # pragma: no cover - direct script compatibility
+except ImportError:
     from continuation import (
         can_auto_continue as _state_can_auto_continue,
         reset_continuation_tracker as _state_reset_continuation_tracker,

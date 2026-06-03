@@ -25,7 +25,7 @@ try:
         prevalidate_upload_paths,
         raise_upload_http_error,
     )
-except ImportError:  # pragma: no cover - direct script compatibility
+except ImportError:
     from defaults import DEFAULT_FILE_UPLOAD_MAX_FILES, DEFAULT_FILE_UPLOAD_MAX_SIZE_MB
     from qwen_api import QwenProviderError
     from error_payload import raise_provider_http_error

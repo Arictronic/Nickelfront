@@ -22,7 +22,7 @@ try:
         SendRequest,
         StreamCallbacks,
     )
-except ImportError:  # pragma: no cover - direct script import compatibility
+except ImportError:
     from qwen_api import (
         QwenChatInProgressError,
         QwenInternalStreamError,
@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover - direct script import compatibility
 
 try:
     from requests.exceptions import ChunkedEncodingError, ConnectionError as RequestsConnectionError, ReadTimeout
-except Exception:  # pragma: no cover - dependency fallback for diagnostics/imports
+except Exception:
     ChunkedEncodingError = Exception
     RequestsConnectionError = Exception
     ReadTimeout = Exception

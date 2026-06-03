@@ -1,6 +1,6 @@
 """add content part extraction metadata
 
-Revision ID: 012_add_content_part_extraction_metadata
+Revision ID: 012_content_extract_meta
 Revises: 011
 Create Date: 2026-05-23 18:30:00.000000
 """
@@ -9,7 +9,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "012_add_content_part_extraction_metadata"
+revision = "012_content_extract_meta"
 down_revision = "011"
 branch_labels = None
 depends_on = None
